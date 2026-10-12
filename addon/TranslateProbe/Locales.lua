@@ -1,0 +1,172 @@
+-- User-visible strings. English is the base table; other locales override keys they translate.
+-- Strings shown inside chat links (SUFFIX_*) must never contain a "|" character.
+local _, ns = ...
+
+local L = {
+    PREFIX = "TranslateProbe:",
+    LOADED = "loaded. Type /tprobe for the commands.",
+    YES = "yes",
+    NO = "no",
+    NONE = "none",
+
+    HELP_HEADER = "commands:",
+    HELP_INFO = "/tprobe info - client limits, chat lockdown and restriction state",
+    HELP_BENCH = "/tprobe bench - measure Lua speed and memory per value (about 20 s)",
+    HELP_MODEL = "/tprobe model [pieces] - run the simulated translation model once (default 8)",
+    HELP_BUDGET = "/tprobe budget <ms> - Lua time per frame allowed for background work",
+    HELP_LOG = "/tprobe log on|off - record whether incoming chat text is readable",
+    HELP_SIMULATE = "/tprobe simulate on|off - a [T] click also times the simulated model (test mode)",
+    HELP_GLOSS = "/tprobe gloss - abbreviation glossary: add, del, list, test",
+    HELP_REPORT = "/tprobe report - readability log summary and last bench",
+    HELP_RESET = "/tprobe reset - clear the logs and saved results",
+    HELP_FREE = "/tprobe free - release the simulated model from memory",
+    HELP_CLICK = "Click [T] after a player message: abbreviations explained under it, then the simulated model timing (Shift-click to run it again).",
+
+    BENCH_START = "bench started. Keep playing normally, results in about 20 s.",
+    BENCH_KERNEL = "%s: %.1f million multiply-adds per second",
+    KERNEL_FLOAT = "numbers in tables",
+    KERNEL_INT8 = "int8 bytes in strings, 16 per read (model kernel)",
+    KERNEL_BYTE = "int8 bytes in strings, 1 per read",
+    BENCH_MEM = "memory: %.1f bytes per table slot, %.1f per number stored, %.2f per string byte",
+    BENCH_MEM_NA = "memory: C_AddOnProfiler.MeasureCall unavailable, not measured",
+    BENCH_PROJECTION = "tiny model, %d pieces: %.0f M multiply-adds, about %.1f s of Lua, %.0f s of waiting",
+    BENCH_DONE = "bench done in %.1f s (slice %.1f ms per frame at %.0f fps). Saved for /tprobe report.",
+
+    SUFFIX_GLOSS = "Glossary: ",
+    SUFFIX_NO_GLOSS = "Glossary: no known abbreviation",
+    SUFFIX_QUEUED = "[test] simulated translation queued (%d pieces)...",
+    SUFFIX_RUNNING = "[test] simulated translation running (%d pieces)...",
+    SUFFIX_FAILED = "[test] simulated translation failed, see the Lua error",
+    SUFFIX_RESULT = "[test] simulated model: %d pieces, %.1f s of Lua, %.1f s of waiting over %d frames",
+    OLD_SESSION = "this line comes from before the last /reload.",
+    ALREADY_RUNNING = "a job is already running, wait for it to finish.",
+
+    CATCHUP_LINE = "catch-up %s: %d secret lines re-read, %d readable now, %d still secret, %d gone",
+    RESTRICTION_CHANGE = "restriction %s is now %s (%s).",
+    REPORT_EMPTY = "no chat line logged yet.",
+    REPORT_HEADER = "chat lines seen per context (readable / secret):",
+    REPORT_CONTEXT = "  %s: %d readable, %d secret",
+    REPORT_TRANSITIONS = "restriction changes logged: %d",
+
+    INFO_CLIENT = "client %s build %s, interface %s, project %s",
+    INFO_BUCKET = "script budget: normal %s ms/s (burst %s ms), restricted %s ms/s (burst %s ms)",
+    INFO_BUCKET_NA = "script budget: GetScriptBucketThrottleLimits not available on this client",
+    INFO_SLICE = "background slice: %.1f ms per frame at %.0f fps (setting %.1f ms)",
+    INFO_LOCK = "chat lockdown: %s, active restrictions: %s, context: %s",
+    INFO_CPU = "this addon: %.2f ms per frame recently, peak %.1f ms, %.0f frames over 5 ms",
+    INFO_MEM = "memory: %.1f MB (simulated model %s)",
+    MODEL_LOADED = "loaded, %.1f MB",
+    MODEL_NOT_LOADED = "not loaded",
+
+    MODEL_BUILD = "building the simulated model (about %.0f MB of weights)...",
+    MODEL_BUILT = "model ready: %.1f MB, %.1f s of Lua over %.1f s.",
+    MODEL_RESULT = "model pass %d pieces in, %d out: %.1f M multiply-adds, %.1f s of Lua, %.1f s of waiting over %d frames (slice %.1f ms, longest %.1f ms)",
+    MODEL_FREED = "simulated model released.",
+
+    BUDGET_USAGE = "usage: /tprobe budget <ms>, between 0.5 and 50.",
+    BUDGET_SET = "background slice set to %.1f ms per frame (%.1f ms after the script budget cap).",
+    LOG_ON = "chat readability log is on.",
+    LOG_OFF = "chat readability log is off.",
+    RESET_DONE = "logs and results cleared.",
+    SIMULATE_ON = "test mode on: a [T] click also times the simulated model.",
+    SIMULATE_OFF = "test mode off: a [T] click only shows the glossary.",
+
+    GLOSS_COUNT = "glossary: %d built-in abbreviations, case ignored, whole words only.",
+    GLOSS_HELP_ADD = "/tprobe gloss add <abbreviation> <meaning> - add or replace (several meanings: separate them with /)",
+    GLOSS_HELP_DEL = "/tprobe gloss del <abbreviation> - remove yours or disable a built-in one",
+    GLOSS_HELP_LIST = "/tprobe gloss list - your entries and the built-in ones you disabled",
+    GLOSS_HELP_TEST = "/tprobe gloss test <text> - show what a message would give",
+    GLOSS_ADDED = "%s = %s",
+    GLOSS_REMOVED = "%s removed.",
+    GLOSS_NO_CUSTOM = "no custom entry yet.",
+    GLOSS_ENTRY = "  %s = %s",
+    GLOSS_DISABLED = "(built-in entry disabled)",
+}
+
+local frFR = {
+    LOADED = "chargé. Tape /tprobe pour les commandes.",
+    YES = "oui",
+    NO = "non",
+    NONE = "aucune",
+
+    HELP_HEADER = "commandes :",
+    HELP_INFO = "/tprobe info - limites du client, verrouillage du chat et restrictions actives",
+    HELP_BENCH = "/tprobe bench - mesure la vitesse du Lua et la mémoire par valeur (environ 20 s)",
+    HELP_MODEL = "/tprobe model [morceaux] - lance une fois le modèle de traduction simulé (8 par défaut)",
+    HELP_BUDGET = "/tprobe budget <ms> - temps de Lua par image accordé au travail en arrière-plan",
+    HELP_LOG = "/tprobe log on|off - note si le texte des messages reçus est lisible",
+    HELP_SIMULATE = "/tprobe simulate on|off - un clic sur [T] chronomètre aussi le modèle simulé (mode test)",
+    HELP_GLOSS = "/tprobe gloss - lexique des sigles : add, del, list, test",
+    HELP_REPORT = "/tprobe report - résumé du journal de lisibilité et dernier bench",
+    HELP_RESET = "/tprobe reset - efface les journaux et les résultats",
+    HELP_FREE = "/tprobe free - libère la mémoire du modèle simulé",
+    HELP_CLICK = "Clique sur [T] après un message de joueur : sigles expliqués en dessous, puis le temps du modèle simulé (Maj-clic pour relancer).",
+
+    BENCH_START = "bench lancé. Continue à jouer normalement, résultats dans 20 s environ.",
+    BENCH_KERNEL = "%s : %.1f millions de multiplications-additions par seconde",
+    KERNEL_FLOAT = "nombres dans des tables",
+    KERNEL_INT8 = "octets int8 dans des chaînes, 16 par lecture (noyau du modèle)",
+    KERNEL_BYTE = "octets int8 dans des chaînes, 1 par lecture",
+    BENCH_MEM = "mémoire : %.1f octets par case de table, %.1f par nombre rangé, %.2f par octet de chaîne",
+    BENCH_MEM_NA = "mémoire : C_AddOnProfiler.MeasureCall indisponible, pas mesurée",
+    BENCH_PROJECTION = "modèle tiny, %d morceaux : %.0f M multiplications-additions, environ %.1f s de Lua, %.0f s d'attente",
+    BENCH_DONE = "bench terminé en %.1f s (tranche de %.1f ms par image à %.0f ips). Gardé pour /tprobe report.",
+
+    SUFFIX_GLOSS = "Lexique : ",
+    SUFFIX_NO_GLOSS = "Lexique : aucun sigle connu",
+    SUFFIX_QUEUED = "[test] traduction simulée en attente (%d morceaux)...",
+    SUFFIX_RUNNING = "[test] traduction simulée en cours (%d morceaux)...",
+    SUFFIX_FAILED = "[test] la traduction simulée a échoué, voir l'erreur Lua",
+    SUFFIX_RESULT = "[test] modèle simulé : %d morceaux, %.1f s de Lua, %.1f s d'attente sur %d images",
+    OLD_SESSION = "cette ligne date d'avant le dernier /reload.",
+    ALREADY_RUNNING = "un calcul est déjà en cours, attends qu'il se termine.",
+
+    CATCHUP_LINE = "rattrapage %s : %d lignes secrètes relues, %d lisibles maintenant, %d encore secrètes, %d disparues",
+    RESTRICTION_CHANGE = "la restriction %s passe à %s (%s).",
+    REPORT_EMPTY = "aucune ligne de chat notée pour l'instant.",
+    REPORT_HEADER = "lignes de chat vues par contexte (lisibles / secrètes) :",
+    REPORT_CONTEXT = "  %s : %d lisibles, %d secrètes",
+    REPORT_TRANSITIONS = "changements de restriction notés : %d",
+
+    INFO_CLIENT = "client %s build %s, interface %s, projet %s",
+    INFO_BUCKET = "budget de script : normal %s ms/s (rafale %s ms), restreint %s ms/s (rafale %s ms)",
+    INFO_BUCKET_NA = "budget de script : GetScriptBucketThrottleLimits absent de ce client",
+    INFO_SLICE = "tranche d'arrière-plan : %.1f ms par image à %.0f ips (réglage %.1f ms)",
+    INFO_LOCK = "verrouillage du chat : %s, restrictions actives : %s, contexte : %s",
+    INFO_CPU = "cet addon : %.2f ms par image récemment, pic %.1f ms, %.0f images au-dessus de 5 ms",
+    INFO_MEM = "mémoire : %.1f Mo (modèle simulé %s)",
+    MODEL_LOADED = "chargé, %.1f Mo",
+    MODEL_NOT_LOADED = "pas chargé",
+
+    MODEL_BUILD = "construction du modèle simulé (environ %.0f Mo de poids)...",
+    MODEL_BUILT = "modèle prêt : %.1f Mo, %.1f s de Lua sur %.1f s.",
+    MODEL_RESULT = "passe du modèle %d morceaux en entrée, %d en sortie : %.1f M multiplications-additions, %.1f s de Lua, %.1f s d'attente sur %d images (tranche %.1f ms, la plus longue %.1f ms)",
+    MODEL_FREED = "modèle simulé libéré.",
+
+    BUDGET_USAGE = "usage : /tprobe budget <ms>, entre 0.5 et 50.",
+    BUDGET_SET = "tranche d'arrière-plan réglée à %.1f ms par image (%.1f ms après le plafond du budget de script).",
+    LOG_ON = "le journal de lisibilité du chat est actif.",
+    LOG_OFF = "le journal de lisibilité du chat est coupé.",
+    RESET_DONE = "journaux et résultats effacés.",
+    SIMULATE_ON = "mode test actif : un clic sur [T] chronomètre aussi le modèle simulé.",
+    SIMULATE_OFF = "mode test coupé : un clic sur [T] affiche seulement le lexique.",
+
+    GLOSS_COUNT = "lexique : %d sigles fournis, majuscules ignorées, mots entiers seulement.",
+    GLOSS_HELP_ADD = "/tprobe gloss add <sigle> <sens> - ajoute ou remplace (plusieurs sens : sépare-les par /)",
+    GLOSS_HELP_DEL = "/tprobe gloss del <sigle> - retire le tien ou désactive un sigle fourni",
+    GLOSS_HELP_LIST = "/tprobe gloss list - tes entrées et les sigles fournis que tu as désactivés",
+    GLOSS_HELP_TEST = "/tprobe gloss test <texte> - montre ce que donnerait un message",
+    GLOSS_ADDED = "%s = %s",
+    GLOSS_REMOVED = "%s retiré.",
+    GLOSS_NO_CUSTOM = "aucune entrée perso pour l'instant.",
+    GLOSS_ENTRY = "  %s = %s",
+    GLOSS_DISABLED = "(sigle fourni désactivé)",
+}
+
+if GetLocale() == "frFR" then
+    for key, value in pairs(frFR) do
+        L[key] = value
+    end
+end
+
+ns.L = L

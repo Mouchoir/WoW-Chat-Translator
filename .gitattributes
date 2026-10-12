@@ -1,0 +1,5 @@
+# Treat binary assets as binary so line-ending normalisation never corrupts them.
+*.tga binary
+*.png binary
+*.blp binary
+*.zip binary

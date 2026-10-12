@@ -1,0 +1,4 @@
+*.zip
+*.log
+node_modules/
+scripts/dev.local.ps1

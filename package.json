@@ -1,0 +1,11 @@
+{
+  "name": "translate-probe",
+  "private": true,
+  "description": "Test harness for the TranslateProbe WoW addon",
+  "scripts": {
+    "test": "node tests/run.js enUS && node tests/run.js frFR"
+  },
+  "devDependencies": {
+    "fengari": "^0.1.4"
+  }
+}
