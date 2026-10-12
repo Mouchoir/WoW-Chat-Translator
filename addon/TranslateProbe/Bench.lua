@@ -6,7 +6,7 @@ local L = ns.L
 local Bench = {}
 ns.Bench = Bench
 
-local byte, char = string.byte, string.char
+local byte = string.byte
 local random = math.random
 local Check = ns.Scheduler.Check
 
@@ -76,26 +76,24 @@ local function Measure(fn, ...)
     end
 end
 
-local function FillNumbers(n)
-    local t = {}
-    for i = 1, n do
-        t[i] = i + 0.5
+-- Bytes per table slot: one table.create allocation of N slots. Bytes per string byte: one
+-- string.sub copy of the random bench string, which is never already interned. Both are single
+-- allocations, so the profiler's allocatedBytes is not inflated by temporary buffers.
+local function MemoryCosts(S)
+    if not table.create then
+        return nil
     end
-    return t
-end
-
-local function MemoryCosts()
     local N = 65536
-    local slots = Measure(table.create or FillNumbers, N)
-    local numbers = Measure(FillNumbers, N)
-    local bytes = Measure(string.rep, "x", 1048576)
-    if not (slots and numbers and bytes) then
+    local slots = Measure(table.create, N)
+    Check()
+    local bytes = Measure(string.sub, S, 2)
+    Check()
+    if not (slots and bytes) then
         return nil
     end
     return {
         slot = tonumber(slots.allocatedBytes) / N,
-        number = (tonumber(numbers.allocatedBytes) - tonumber(numbers.deallocatedBytes)) / N,
-        stringByte = tonumber(bytes.allocatedBytes) / 1048576,
+        stringByte = tonumber(bytes.allocatedBytes) / (#S - 1),
     }
 end
 
@@ -109,14 +107,7 @@ local function BuildData()
         R[j] = r
         Check()
     end
-    local parts, chunk = {}, {}
-    for k = 1, ROWS * COLS / 1024 do
-        for i = 1, 1024 do
-            chunk[i] = random(0, 255)
-        end
-        parts[k] = char(unpack(chunk, 1, 1024))
-        Check()
-    end
+    local S = ns.Model.RandomBytes(ROWS * COLS, false)
     local x, y = {}, {}
     for i = 1, COLS do
         x[i] = random() - 0.5
@@ -124,7 +115,7 @@ local function BuildData()
     for j = 1, ROWS do
         y[j] = 0
     end
-    return R, table.concat(parts), x, y
+    return R, S, x, y
 end
 
 function Bench.Run(job)
@@ -134,19 +125,21 @@ function Bench.Run(job)
         floatRate = Rate(KernelFloat, R, x, y),
         int8Rate = Rate(KernelInt8x16, S, x, y),
         byteRate = Rate(KernelInt8x1, S, x, y),
-        memory = MemoryCosts(),
     }
+    result.memory = MemoryCosts(S)
     -- Cross-check debugprofilestop against the client's own profiler on one block.
     local probe = Measure(KernelInt8x16, S, x, y, 1, CHUNK)
     result.measureCallMs = probe and tonumber(probe.elapsedMilliseconds)
     job.result = result
 end
 
--- Seconds of Lua and of waiting for a tiny model pass, at the given speed and slice budget.
-function Bench.Project(int8Rate, srcPieces, tgtPieces, budgetMs, fps)
+-- Seconds of Lua and of waiting for a tiny model pass with the same shapes /tprobe model
+-- uses (output = Model.TargetFor(input)), at the given speed, slice and frame rate.
+function Bench.Project(int8Rate, srcPieces, budgetMs, fps)
+    local tgtPieces = ns.Model.TargetFor(srcPieces)
     local macs = ns.Model.EstimateMacs(srcPieces, tgtPieces)
     local cpu = macs / (int8Rate * 1e6)
-    return macs, cpu, cpu * 1000 / (budgetMs * fps)
+    return tgtPieces, macs, cpu, cpu * 1000 / (budgetMs * fps)
 end
 
 function Bench.Start()
@@ -155,11 +148,12 @@ function Bench.Start()
         run = Bench.Run,
         done = function(job, ok)
             if not ok or not job.result then
+                ns.Printf(L.JOB_FAILED, job.err or "?")
                 return
             end
             local r, s = job.result, job.stats
-            r.budgetMs, r.frames, r.wallMs = s.maxBudgetMs, s.frames, s.wallMs
-            r.fps = GetFramerate()
+            r.budgetMs, r.frames, r.wallMs, r.maxSliceMs = s.maxBudgetMs, s.frames, s.wallMs, s.maxSliceMs
+            r.pausedMs, r.fps = s.pausedMs, s.avgFps
             ns.db.results.bench = r
             Bench.PrintResult(r)
         end,
@@ -171,14 +165,14 @@ function Bench.PrintResult(r)
     ns.Printf(L.BENCH_KERNEL, L.KERNEL_INT8, r.int8Rate)
     ns.Printf(L.BENCH_KERNEL, L.KERNEL_BYTE, r.byteRate)
     if r.memory then
-        ns.Printf(L.BENCH_MEM, r.memory.slot, r.memory.number, r.memory.stringByte)
+        ns.Printf(L.BENCH_MEM, r.memory.slot, r.memory.stringByte)
     else
         ns.Print(L.BENCH_MEM_NA)
     end
     local fps = math.max(r.fps or 60, 20)
     for _, pieces in ipairs({ 8, 15 }) do
-        local macs, cpu, wait = Bench.Project(r.int8Rate, pieces, pieces, r.budgetMs, fps)
-        ns.Printf(L.BENCH_PROJECTION, pieces, macs / 1e6, cpu, wait)
+        local tgt, macs, cpu, wait = Bench.Project(r.int8Rate, pieces, r.budgetMs, fps)
+        ns.Printf(L.BENCH_PROJECTION, pieces, tgt, macs / 1e6, cpu, wait)
     end
-    ns.Printf(L.BENCH_DONE, (r.wallMs or 0) / 1000, r.budgetMs or 0, fps)
+    ns.Printf(L.BENCH_DONE, (r.wallMs or 0) / 1000, r.budgetMs or 0, fps, r.maxSliceMs or 0)
 end

@@ -1,7 +1,7 @@
 -- A translation model shaped like Mozilla's Firefox Translations "tiny" student, filled with
 -- random int8 weights. Its output is meaningless: it exists to time, inside the real client,
--- exactly the work a local neural translator would do. Every function here must run inside a
--- Scheduler job, because it calls Scheduler.Check to spread the work over frames.
+-- exactly the work a local neural translator would do. Everything here runs inside Scheduler
+-- jobs and calls Scheduler.Check between small units of work, so no step blocks a frame.
 local _, ns = ...
 
 local Model = {}
@@ -13,10 +13,16 @@ local concat = table.concat
 local Check = ns.Scheduler.Check
 
 -- Tiny architecture: 6-layer encoder, 2-layer SSRU decoder, width 256, 8 heads, feed-forward
--- 1536, 32k shared vocabulary, output projection limited to a lexical shortlist.
-local cfg = { D = 256, H = 8, FF = 1536, V = 32000, SL = 500, ENC = 6, DEC = 2, POOL_KB = 1024 }
+-- 1536, 32k shared vocabulary, output projection limited to a lexical shortlist of SL rows.
+-- The embedding is stored in blocks of ROWS_PER_BLOCK rows (64 KB) so no multi-MB string is
+-- ever built in one slice.
+local cfg = { D = 256, H = 8, FF = 1536, V = 32000, SL = 500, ENC = 6, DEC = 2, POOL_KB = 256, ROWS_PER_BLOCK = 256 }
+local PIECE = 65536          -- largest string copied between two Check() calls
+local GROUP = 64             -- 1 KB chunks joined per Check() when building random bytes
+local MAX_SRC_PIECES = 80    -- a 255-character chat line is roughly 50 words
 
 local weights        -- built model, nil until Build runs
+local buildQueued = false
 local macs = 0       -- multiply-adds counted by the current forward pass
 
 -- Tests shrink the model so it runs fast in a JS-hosted Lua.
@@ -31,11 +37,20 @@ function Model.IsBuilt()
     return weights ~= nil
 end
 
+function Model.IsBuildQueued()
+    return buildQueued
+end
+
 function Model.Free()
     weights = nil
 end
 
--- Bytes of int8 weights the configuration needs: tied embedding plus every layer.
+function Model.ShortlistRows()
+    return cfg.SL
+end
+
+-- Bytes of int8 weights the configuration needs: tied embedding plus every layer. This is the
+-- weights alone; a real translator also needs its vocabulary and shortlist tables.
 function Model.ExpectedBytes()
     local D, FF = cfg.D, cfg.FF
     local encLayer = 4 * D * D + 2 * D * FF
@@ -47,61 +62,90 @@ function Model.Bytes()
     return weights and weights.bytes or 0
 end
 
--- Random bytes centred on 128 (roughly normal), reused to fill every matrix.
-local function BuildPool()
-    local parts, chunk = {}, {}
-    for k = 1, cfg.POOL_KB do
-        for i = 1, 1024 do
-            local v = floor(128 + (random() + random() + random() + random() - 2) * 43 + 0.5)
-            if v < 0 then
-                v = 0
-            elseif v > 255 then
-                v = 255
+-- n random bytes, built 1 KB at a time and joined 64 KB at a time between Check() calls.
+-- normal = true centres the bytes on 128 like quantized weights; otherwise uniform.
+function Model.RandomBytes(n, normal)
+    local groups, parts, chunk = {}, {}, {}
+    local left = n
+    while left > 0 do
+        local size = math.min(1024, left)
+        for i = 1, size do
+            local v
+            if normal then
+                v = floor(128 + (random() + random() + random() + random() - 2) * 43 + 0.5)
+                if v < 0 then
+                    v = 0
+                elseif v > 255 then
+                    v = 255
+                end
+            else
+                v = random(0, 255)
             end
             chunk[i] = v
         end
-        parts[k] = char(unpack(chunk, 1, 1024))
+        parts[#parts + 1] = char(unpack(chunk, 1, size))
+        left = left - size
         Check()
+        if #parts == GROUP or left == 0 then
+            groups[#groups + 1] = concat(parts)
+            parts = {}
+            Check()
+        end
     end
-    return concat(parts)
+    return concat(groups)
 end
 
-local function Int8String(pool, cursor, n)
-    local pieces, got, size = {}, 0, #pool
+-- n bytes copied from random places of the pool, at most PIECE bytes per step.
+local function Int8String(pool, n)
+    local size = #pool
+    local step = math.min(PIECE, size)
+    local pieces, got = {}, 0
     while got < n do
-        local start = (cursor.pos % (size - 1)) + 1
-        local take = math.min(n - got, size - start + 1)
+        local take = math.min(n - got, step)
+        local start = random(1, size - take + 1)
         pieces[#pieces + 1] = sub(pool, start, start + take - 1)
         got = got + take
-        cursor.pos = cursor.pos + take + 4099
+        Check()
     end
+    if #pieces == 1 then
+        return pieces[1]
+    end
+    local joined = concat(pieces)
     Check()
-    return concat(pieces)
+    return joined
 end
 
-local function NewMatrix(pool, cursor, rows, cols)
-    return { s = Int8String(pool, cursor, rows * cols), rows = rows, cols = cols, scale = 1 / (25 * sqrt(cols)) }
+local function NewMatrix(pool, rows, cols)
+    return { s = Int8String(pool, rows * cols), rows = rows, cols = cols, scale = 1 / (25 * sqrt(cols)) }
 end
 
+-- Builds the weights. Run it only through Model.QueueBuild, never inside a timed job.
 function Model.Build()
-    local D, FF = cfg.D, cfg.FF
-    local pool = BuildPool()
-    local cursor = { pos = 0 }
-    local w = { enc = {}, dec = {}, shortlist = {} }
-    w.E = Int8String(pool, cursor, cfg.V * D)
+    if weights then
+        return
+    end
+    local D, FF, RPB = cfg.D, cfg.FF, cfg.ROWS_PER_BLOCK
+    local pool = Model.RandomBytes(cfg.POOL_KB * 1024, true)
+    local w = { enc = {}, dec = {}, shortlist = {}, E = {} }
+    local rowsLeft = cfg.V
+    while rowsLeft > 0 do
+        local rows = math.min(RPB, rowsLeft)
+        w.E[#w.E + 1] = Int8String(pool, rows * D)
+        rowsLeft = rowsLeft - rows
+    end
     for l = 1, cfg.ENC do
         w.enc[l] = {
-            q = NewMatrix(pool, cursor, D, D), k = NewMatrix(pool, cursor, D, D),
-            v = NewMatrix(pool, cursor, D, D), o = NewMatrix(pool, cursor, D, D),
-            f1 = NewMatrix(pool, cursor, FF, D), f2 = NewMatrix(pool, cursor, D, FF),
+            q = NewMatrix(pool, D, D), k = NewMatrix(pool, D, D),
+            v = NewMatrix(pool, D, D), o = NewMatrix(pool, D, D),
+            f1 = NewMatrix(pool, FF, D), f2 = NewMatrix(pool, D, FF),
         }
     end
     for l = 1, cfg.DEC do
         w.dec[l] = {
-            rw = NewMatrix(pool, cursor, D, D), rf = NewMatrix(pool, cursor, D, D),
-            cq = NewMatrix(pool, cursor, D, D), ck = NewMatrix(pool, cursor, D, D),
-            cv = NewMatrix(pool, cursor, D, D), co = NewMatrix(pool, cursor, D, D),
-            f1 = NewMatrix(pool, cursor, FF, D), f2 = NewMatrix(pool, cursor, D, FF),
+            rw = NewMatrix(pool, D, D), rf = NewMatrix(pool, D, D),
+            cq = NewMatrix(pool, D, D), ck = NewMatrix(pool, D, D),
+            cv = NewMatrix(pool, D, D), co = NewMatrix(pool, D, D),
+            f1 = NewMatrix(pool, FF, D), f2 = NewMatrix(pool, D, FF),
         }
     end
     for r = 1, cfg.SL do
@@ -109,6 +153,25 @@ function Model.Build()
     end
     w.bytes = Model.ExpectedBytes()
     weights = w
+end
+
+-- Queues one build job unless the model exists or a build is already queued. onDone(job, ok)
+-- runs when that build finishes. Returns true when a build was queued by this call.
+function Model.QueueBuild(onDone)
+    if weights or buildQueued then
+        return false
+    end
+    buildQueued = true
+    ns.Scheduler.Enqueue({
+        run = Model.Build,
+        done = function(job, ok, err)
+            buildQueued = false
+            if onDone then
+                onDone(job, ok, err)
+            end
+        end,
+    })
+    return true
 end
 
 -- y = W x for int8 weights stored row by row in one string, 16 bytes per string.byte call.
@@ -136,7 +199,6 @@ local function MatVec(M, x, y)
     macs = macs + rows * cols
     return y
 end
-Model.MatVec = MatVec
 
 local function NewVector(n)
     local v = table.create and table.create(n) or {}
@@ -146,11 +208,18 @@ local function NewVector(n)
     return v
 end
 
+-- Embedding row of a token: block string and byte offset of that row inside it.
+local function EmbeddingRow(tok)
+    local RPB, D = cfg.ROWS_PER_BLOCK, cfg.D
+    return weights.E[floor((tok - 1) / RPB) + 1], ((tok - 1) % RPB) * D
+end
+
 local function Embed(tok)
-    local D, E = cfg.D, weights.E
-    local x, base = NewVector(D), (tok - 1) * D
+    local D = cfg.D
+    local block, base = EmbeddingRow(tok)
+    local x = NewVector(D)
     for i = 1, D do
-        x[i] = (byte(E, base + i) - 128) * 0.01
+        x[i] = (byte(block, base + i) - 128) * 0.01
     end
     return x
 end
@@ -257,7 +326,7 @@ local function Encode(src)
 end
 
 local function Decode(enc, steps)
-    local D, FF, E = cfg.D, cfg.FF, weights.E
+    local D, FF = cfg.D, cfg.FF
     local n = #enc
     local crossK, crossV, cells = {}, {}, {}
     for l = 1, cfg.DEC do
@@ -293,7 +362,8 @@ local function Decode(enc, steps)
         -- Output projection over the shortlist rows of the tied embedding, greedy pick.
         local best, bestRow = -1e30, 1
         for r = 1, #shortlist do
-            local base, acc = (shortlist[r] - 1) * D, 0
+            local E, base = EmbeddingRow(shortlist[r])
+            local acc = 0
             for i = 1, D, 16 do
                 local p = base + i
                 local a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16 = byte(E, p, p + 15)
@@ -314,10 +384,11 @@ local function Decode(enc, steps)
     end
 end
 
--- Runs one full translation pass: srcPieces in, tgtPieces out. Returns the multiply-adds done.
+-- One full translation pass: srcPieces in, tgtPieces out. Returns the multiply-adds done.
+-- The model must already be built (Model.QueueBuild), so a timed job never includes the build.
 function Model.Forward(srcPieces, tgtPieces)
     if not weights then
-        Model.Build()
+        error("simulated model is not built")
     end
     macs = 0
     local src = {}
@@ -337,8 +408,15 @@ function Model.EstimateMacs(srcPieces, tgtPieces)
     return encoder + crossKV + tgtPieces * perStep
 end
 
--- Rough SentencePiece count for chat text: about 1.5 pieces per word, plus one for the end.
+-- Output length used everywhere for a given input: about 10 percent longer, plus the end mark.
+function Model.TargetFor(srcPieces)
+    return floor(srcPieces * 1.1 + 0.5) + 1
+end
+
+-- Rough SentencePiece count for chat text: about 1.5 pieces per word. Returns src, tgt and
+-- whether the line was longer than the cap.
 function Model.EstimatePieces(wordCount)
-    local src = math.min(48, math.max(2, floor(wordCount * 1.5 + 0.5)))
-    return src, floor(src * 1.1 + 0.5) + 1
+    local wanted = floor(wordCount * 1.5 + 0.5)
+    local src = math.min(MAX_SRC_PIECES, math.max(2, wanted))
+    return src, Model.TargetFor(src), wanted > MAX_SRC_PIECES
 end

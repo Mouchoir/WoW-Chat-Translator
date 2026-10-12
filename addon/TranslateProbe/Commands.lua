@@ -22,7 +22,8 @@ local function PrintInfo()
     else
         ns.Print(L.INFO_BUCKET_NA)
     end
-    ns.Printf(L.INFO_SLICE, ns.Scheduler.EffectiveBudget(), GetFramerate(), ns.db.budgetMs)
+    local slice, every = ns.Scheduler.Plan()
+    ns.Printf(L.INFO_SLICE, slice, every, GetFramerate(), ns.db.budgetMs)
 
     local active = ns.LockdownLog.ActiveRestrictions()
     ns.Printf(L.INFO_LOCK, Yes(C_ChatInfo.InChatMessagingLockdown()), active ~= "" and active or L.NONE,
@@ -42,19 +43,17 @@ local function PrintInfo()
 end
 
 local function RunModel(pieces)
-    local srcPieces, tgtPieces = pieces, math.floor(pieces * 1.1 + 0.5) + 1
-    if not ns.Model.IsBuilt() then
+    local srcPieces, tgtPieces = pieces, ns.Model.TargetFor(pieces)
+    local queued = ns.Model.QueueBuild(function(job, ok)
+        if ok then
+            local s = job.stats
+            ns.Printf(L.MODEL_BUILT, ns.Model.Bytes() / 1048576, s.busyMs / 1000, s.wallMs / 1000, s.maxSliceMs)
+        else
+            ns.Printf(L.JOB_FAILED, job.err or "?")
+        end
+    end)
+    if queued then
         ns.Printf(L.MODEL_BUILD, ns.Model.ExpectedBytes() / 1048576)
-        ns.Scheduler.Enqueue({
-            run = function()
-                ns.Model.Build()
-            end,
-            done = function(job, ok)
-                if ok then
-                    ns.Printf(L.MODEL_BUILT, ns.Model.Bytes() / 1048576, job.stats.busyMs / 1000, job.stats.wallMs / 1000)
-                end
-            end,
-        })
     end
     ns.Scheduler.Enqueue({
         run = function(job)
@@ -62,15 +61,19 @@ local function RunModel(pieces)
         end,
         done = function(job, ok)
             if not ok then
+                ns.Printf(L.JOB_FAILED, job.err or "?")
                 return
             end
             local s = job.stats
             ns.Printf(L.MODEL_RESULT, srcPieces, tgtPieces, job.macs / 1e6, s.busyMs / 1000, s.wallMs / 1000,
                 s.frames, s.maxBudgetMs, s.maxSliceMs)
             ns.PushCapped(ns.db.results.models, {
-                when = date("%Y-%m-%d %H:%M"), src = srcPieces, tgt = tgtPieces, macs = job.macs,
-                busyMs = s.busyMs, wallMs = s.wallMs, frames = s.frames, maxSliceMs = s.maxSliceMs,
-                budgetMs = s.maxBudgetMs, fps = GetFramerate(),
+                when = date("%Y-%m-%d %H:%M"), src = srcPieces, tgt = tgtPieces,
+                shortlist = ns.Model.ShortlistRows(), macs = job.macs,
+                busyMs = s.busyMs, wallMs = s.wallMs, queuedMs = s.queuedMs, pausedMs = s.pausedMs,
+                frames = s.frames, maxSliceMs = s.maxSliceMs, minBudgetMs = s.minBudgetMs,
+                budgetMs = s.maxBudgetMs, every = s.maxEvery, fps = s.avgFps,
+                context = ns.LockdownLog.Context(), restrictions = ns.LockdownLog.ActiveRestrictions(),
             }, 50)
         end,
     })
@@ -91,21 +94,26 @@ local function GlossHelp()
     end
 end
 
+-- Upper case for display; string.upper only knows ASCII, so accented keys stay as typed.
+local function Label(key)
+    return key:find("[\128-\255]") and key or key:upper()
+end
+
 -- /tprobe gloss add|del|list|test ...
 local function Gloss(arg)
     local action, rest = arg:match("^(%S*)%s*(.-)$")
     action = action:lower()
     local custom = ns.db.glossary
     if action == "add" then
-        local key, text = rest:match("^(%w+)%s+(.-)$")
+        local key, text = rest:match("^(" .. ns.Glossary.KEY_PATTERN .. ")%s+(.-)$")
         if not key or text == "" then
             ns.Print(L.GLOSS_HELP_ADD)
             return
         end
         custom[key:lower()] = (text:gsub("|", "/"))
-        ns.Printf(L.GLOSS_ADDED, key:upper(), custom[key:lower()])
+        ns.Printf(L.GLOSS_ADDED, Label(key), custom[key:lower()])
     elseif action == "del" then
-        local key = rest:match("^(%w+)$")
+        local key = rest:match("^(" .. ns.Glossary.KEY_PATTERN .. ")$")
         if not key then
             ns.Print(L.GLOSS_HELP_DEL)
             return
@@ -116,7 +124,7 @@ local function Gloss(arg)
         else
             custom[key] = nil
         end
-        ns.Printf(L.GLOSS_REMOVED, key:upper())
+        ns.Printf(L.GLOSS_REMOVED, Label(key))
     elseif action == "list" then
         local keys = {}
         for key in pairs(custom) do
@@ -128,7 +136,7 @@ local function Gloss(arg)
             ns.Print(L.GLOSS_NO_CUSTOM)
         end
         for _, key in ipairs(keys) do
-            ns.Printf(L.GLOSS_ENTRY, key:upper(), custom[key] == false and L.GLOSS_DISABLED or custom[key])
+            ns.Printf(L.GLOSS_ENTRY, Label(key), custom[key] == false and L.GLOSS_DISABLED or custom[key])
         end
     elseif action == "test" and rest ~= "" then
         ns.Print(ns.Glossary.Describe(rest) or L.SUFFIX_NO_GLOSS)
@@ -185,7 +193,7 @@ local handlers = {
     end,
     free = function()
         if ns.Scheduler.IsBusy() then
-            ns.Print(L.ALREADY_RUNNING)
+            ns.Print(L.BUSY)
             return
         end
         ns.Model.Free()

@@ -6,7 +6,8 @@
 -- * The message event filter is only a notification. It never returns replacement arguments,
 --   so Blizzard's chat handler keeps its own untainted values (sender, /r target...).
 -- * Lines are found again through eventArgs[11], the lineID, which is never secret. This is
---   how Blizzard itself rewrites censored lines.
+--   how Blizzard itself rewrites censored lines. Copies that Blizzard makes when a chat is
+--   moved to a new window have no eventArgs; those are found by the exact button text.
 -- * TransformMessages runs our predicate and transform in protected calls, but a transform
 --   that errors leaves a nil hole in the history buffer. Transforms here only concatenate and
 --   cut plain strings, and predicates refuse secret or non-string messages first.
@@ -31,17 +32,24 @@ local LINK_PREFIX = "addon:" .. addonName .. ":"
 local BUTTON_MARK = "|H" .. LINK_PREFIX .. "t:"
 local SUFFIX_START = "|n|cff9fd4ff    |H" .. LINK_PREFIX .. "x:"
 local MAX_TRACKED = 1000
+local MAX_ERROR_CHARS = 120
 
-local tracked = {}       -- lineID -> text of a readable message we decorated (memory only)
-local trackedOrder = {}  -- FIFO of tracked lineIDs, to bound memory in busy channels
+local tracked = {}       -- lineID -> text of a decorated readable message (memory only)
+local trackedOrder = {}  -- FIFO of tracked lineIDs, to bound memory
+local pendingText = {}   -- lineID -> text, between the filter and the next-frame decoration
+local decorated = {}     -- lineIDs that received a button in the current decoration pass
 local results = {}       -- lineID -> suffix lines of the last finished click
 local running = {}       -- lineID -> true while its job is queued or running
-local toDecorate = {}    -- lineIDs waiting for their button on the next frame
 local decorateQueued = false
 local playerGUID
 
 local function ButtonLink(lineID)
     return " |cff66bbff" .. BUTTON_MARK .. ns.session .. ":" .. lineID .. "|h[T]|h|r"
+end
+
+-- Chat links end at the next "|": keep our generated text free of it.
+local function Safe(text)
+    return (tostring(text):gsub("|", "/"))
 end
 
 -- One link per line under the message; clicking any of them hides them all.
@@ -88,28 +96,48 @@ end
 -- message, r, g, b, infoID, accessID, typeID, event, eventArgs, MessageFormatter.
 local function NeedsButton(message, _, _, _, _, _, _, _, eventArgs)
     local lineID = LineIDOf(eventArgs)
-    return lineID ~= nil and toDecorate[lineID] == true and IsPlainString(message)
+    return lineID ~= nil and pendingText[lineID] ~= nil and IsPlainString(message)
         and not message:find(BUTTON_MARK, 1, true)
 end
 
 local function AddButton(message, r, g, b, infoID, accessID, typeID, event, eventArgs, ...)
-    return message .. ButtonLink(eventArgs[11]), r, g, b, infoID, accessID, typeID, event, eventArgs, ...
+    local lineID = eventArgs[11]
+    decorated[lineID] = true
+    return message .. ButtonLink(lineID), r, g, b, infoID, accessID, typeID, event, eventArgs, ...
 end
 
+-- Adds the buttons, then keeps only the lines some chat frame actually shows: the filter also
+-- runs for channel lines that no frame displays.
 local function DecoratePending()
     decorateQueued = false
     ChatFrameUtil.ForEachChatFrame(function(chatFrame)
         chatFrame:TransformMessages(NeedsButton, AddButton)
     end)
-    wipe(toDecorate)
+    for lineID, text in pairs(pendingText) do
+        if decorated[lineID] then
+            Track(lineID, text)
+        end
+    end
+    wipe(pendingText)
+    wipe(decorated)
 end
 
 -- Replaces whatever we wrote under the line with these lines, or removes it when nil.
+-- Returns how many history entries were rewritten.
 local function SetSuffix(lineID, lines)
+    local exactMark = BUTTON_MARK .. ns.session .. ":" .. lineID .. "|h"
+    local count = 0
     local function Matches(message, _, _, _, _, _, _, _, eventArgs)
-        return LineIDOf(eventArgs) == lineID and IsPlainString(message)
+        if not IsPlainString(message) then
+            return false
+        end
+        if eventArgs == nil then
+            return message:find(exactMark, 1, true) ~= nil
+        end
+        return LineIDOf(eventArgs) == lineID
     end
     local function Rewrite(message, ...)
+        count = count + 1
         local cut = message:find(SUFFIX_START, 1, true)
         if cut then
             message = message:sub(1, cut - 1)
@@ -122,8 +150,20 @@ local function SetSuffix(lineID, lines)
     ChatFrameUtil.ForEachChatFrame(function(chatFrame)
         chatFrame:TransformMessages(Matches, Rewrite)
     end)
+    return count
 end
 ChatButton.SetSuffix = SetSuffix
+
+function ChatButton.IsTracked(lineID)
+    return tracked[lineID] ~= nil
+end
+
+-- Shows lines under the message; a final result whose line is gone is printed instead.
+local function Show(lineID, lines, final)
+    if SetSuffix(lineID, lines) == 0 and final and lines then
+        ns.Print(table.concat(lines, " - "))
+    end
+end
 
 -- Message event filter, used only to learn that a readable player line arrived. The client
 -- skips addon filters while the text is secret, and we return nothing so nothing changes.
@@ -131,57 +171,97 @@ local function Filter(_, _, message, _, _, _, _, _, _, _, _, _, lineID, guid)
     if not IsPlainString(message) or message == "" then
         return
     end
-    if type(lineID) ~= "number" or issecretvalue(lineID) or lineID == 0 or tracked[lineID] then
+    if type(lineID) ~= "number" or issecretvalue(lineID) or lineID == 0 then
         return
     end
-    if guid and not issecretvalue(guid) and guid == playerGUID then
+    if tracked[lineID] or pendingText[lineID] then
+        return
+    end
+    if not issecretvalue(guid) and guid == playerGUID then
         return
     end
     if C_ChatInfo.IsChatLineCensored and C_ChatInfo.IsChatLineCensored(lineID) then
         return
     end
-    Track(lineID, message)
-    toDecorate[lineID] = true
+    pendingText[lineID] = message
     if not decorateQueued then
         decorateQueued = true
         C_Timer.After(0, DecoratePending)
     end
 end
 
+-- Text of a line we decorated; re-read from the client if it fell out of our memory.
+local function SourceText(lineID)
+    if tracked[lineID] then
+        return tracked[lineID]
+    end
+    if C_ChatInfo.InChatMessagingLockdown() then
+        return nil
+    end
+    local okValid, valid = pcall(C_ChatInfo.IsValidChatLine, lineID)
+    if not okValid or issecretvalue(valid) or not valid then
+        return nil
+    end
+    local okText, text = pcall(C_ChatInfo.GetChatLineText, lineID)
+    if okText and not issecretvalue(text) and type(text) == "string" and text ~= "" then
+        return text
+    end
+end
+
 local function GlossLine(text)
-    local gloss = text and ns.Glossary.Describe(text)
+    local gloss = ns.Glossary.Describe(text)
     return gloss and (L.SUFFIX_GLOSS .. gloss) or L.SUFFIX_NO_GLOSS
 end
 
 local function StartRun(lineID)
-    local text = tracked[lineID]
+    local text = SourceText(lineID)
+    if not text then
+        Show(lineID, { L.SUFFIX_TOO_OLD }, true)
+        return
+    end
     local gloss = GlossLine(text)
     if not ns.db.simulate then
         results[lineID] = { gloss }
-        SetSuffix(lineID, results[lineID])
+        Show(lineID, results[lineID], true)
         return
     end
-    local srcPieces, tgtPieces = ns.Model.EstimatePieces(text and CountWords(text) or 1)
+
+    local srcPieces, tgtPieces, truncated = ns.Model.EstimatePieces(CountWords(text))
+    local placeholder
+    if not ns.Model.IsBuilt() then
+        placeholder = L.SUFFIX_BUILDING
+    elseif ns.Scheduler.IsBusy() then
+        placeholder = L.SUFFIX_QUEUED:format(srcPieces)
+    else
+        placeholder = L.SUFFIX_RUNNING:format(srcPieces)
+    end
     running[lineID] = true
-    local queued = ns.Scheduler.IsBusy()
-    SetSuffix(lineID, { gloss, (queued and L.SUFFIX_QUEUED or L.SUFFIX_RUNNING):format(srcPieces) })
+    Show(lineID, { gloss, placeholder })
+    ns.Model.QueueBuild()
+
     ns.Scheduler.Enqueue({
+        start = function()
+            Show(lineID, { gloss, L.SUFFIX_RUNNING:format(srcPieces) })
+        end,
         run = function(job)
             job.macs = ns.Model.Forward(srcPieces, tgtPieces)
         end,
         done = function(job, ok)
             running[lineID] = nil
             if not ok then
-                SetSuffix(lineID, { gloss, L.SUFFIX_FAILED })
+                Show(lineID, { gloss, L.SUFFIX_FAILED:format(Safe(job.err or "?"):sub(1, MAX_ERROR_CHARS)) }, true)
                 return
             end
             local s = job.stats
             results[lineID] = { gloss, L.SUFFIX_RESULT:format(srcPieces, s.busyMs / 1000, s.wallMs / 1000, s.frames) }
-            SetSuffix(lineID, results[lineID])
+            Show(lineID, results[lineID], true)
             ns.PushCapped(ns.db.results.clicks, {
-                when = date("%Y-%m-%d %H:%M"), src = srcPieces, tgt = tgtPieces, macs = job.macs,
-                busyMs = s.busyMs, wallMs = s.wallMs, frames = s.frames,
-                maxSliceMs = s.maxSliceMs, budgetMs = s.maxBudgetMs, fps = GetFramerate(),
+                when = date("%Y-%m-%d %H:%M"), src = srcPieces, tgt = tgtPieces, truncated = truncated,
+                shortlist = ns.Model.ShortlistRows(), macs = job.macs,
+                busyMs = s.busyMs, wallMs = s.wallMs, queuedMs = s.queuedMs, pausedMs = s.pausedMs,
+                frames = s.frames, maxSliceMs = s.maxSliceMs, minBudgetMs = s.minBudgetMs,
+                budgetMs = s.maxBudgetMs, every = s.maxEvery, fps = s.avgFps,
+                context = ns.LockdownLog.Context(), restrictions = ns.LockdownLog.ActiveRestrictions(),
             }, 50)
         end,
     })
@@ -189,10 +269,10 @@ end
 
 -- EventRegistry "SetItemRef" receives clicks on every addon link; ours start with LINK_PREFIX.
 local function OnLinkClicked(_, link)
-    if type(link) ~= "string" or issecretvalue(link) then
+    if issecretvalue(link) or type(link) ~= "string" or link:sub(1, #LINK_PREFIX) ~= LINK_PREFIX then
         return
     end
-    local kind, session, id = link:match("^addon:" .. addonName .. ":(%a):(%d+):(%d+)$")
+    local kind, session, id = link:sub(#LINK_PREFIX + 1):match("^(%a):(%d+):(%d+)$")
     if not kind then
         return
     end
@@ -206,7 +286,7 @@ local function OnLinkClicked(_, link)
     elseif running[lineID] then
         ns.Print(L.ALREADY_RUNNING)
     elseif results[lineID] and not IsShiftKeyDown() then
-        SetSuffix(lineID, results[lineID])
+        Show(lineID, results[lineID], true)
     else
         StartRun(lineID)
     end

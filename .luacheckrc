@@ -6,14 +6,14 @@ exclude_files = { "node_modules", "tests" }
 
 read_globals = {
     -- Lua helpers the game adds
-    "wipe", "print", "date", "time", "issecretvalue", "debugprofilestop", "geterrorhandler",
+    "wipe", "print", "date", "time", "issecretvalue", "debugprofilestop", "debugstack", "geterrorhandler",
     table = { fields = { "create" } },
 
     -- Frames, timers, client
     "CreateFrame", "C_Timer", "GetLocale", "GetFramerate", "GetBuildInfo", "WOW_PROJECT_ID",
     "InCombatLockdown", "IsShiftKeyDown", "UnitGUID", "GetInstanceInfo", "GetRealZoneText",
     "GetScriptBucketThrottleLimits", "C_AddOnProfiler", "UpdateAddOnMemoryUsage", "GetAddOnMemoryUsage",
-    "C_RestrictedActions", "Enum",
+    "C_RestrictedActions", "C_InstanceEncounter", "C_PvP", "Enum",
 
     -- Chat
     "C_ChatInfo", "ChatFrameUtil", "EventRegistry",
