@@ -485,6 +485,15 @@ FireEvent("ADDON_RESTRICTION_STATE_CHANGED", 5, 0)
 slash("reset")
 Tick(60 * 31)
 check(#TranslateProbeDB.catchup == 0, "reset cancels scheduled catch-ups")
+slash("catchup")
+check(Printed(L.CATCHUP_NONE), "manual catch-up with nothing waiting says so")
+lockdown = true
+Deliver("CHAT_MSG_CHANNEL", "forced lock line", "Trader")
+lockdown = false
+slash("catchup")
+Tick(70)
+check(#TranslateProbeDB.catchup == 1 and TranslateProbeDB.catchup[1].readable == 1, "manual catch-up re-reads without a restriction event")
+slash("reset")
 instanceType = "none"
 
 rawprint("== click: glossary and simulated model under the line")

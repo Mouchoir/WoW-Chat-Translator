@@ -82,7 +82,7 @@ end
 local function Help()
     ns.Print(L.HELP_HEADER)
     for _, key in ipairs({ "HELP_INFO", "HELP_BENCH", "HELP_MODEL", "HELP_BUDGET", "HELP_LOG",
-        "HELP_SIMULATE", "HELP_NAMES", "HELP_TRANSLIT", "HELP_GLOSS", "HELP_REPORT", "HELP_RESET", "HELP_FREE", "HELP_CLICK" }) do
+        "HELP_SIMULATE", "HELP_NAMES", "HELP_TRANSLIT", "HELP_GLOSS", "HELP_CATCHUP", "HELP_REPORT", "HELP_RESET", "HELP_FREE", "HELP_CLICK" }) do
         ns.Print(L[key])
     end
 end
@@ -192,6 +192,9 @@ local handlers = {
         ns.Print(ns.db.simulate and L.SIMULATE_ON or L.SIMULATE_OFF)
     end,
     gloss = Gloss,
+    catchup = function()
+        ns.LockdownLog.CatchupNow()
+    end,
     report = function()
         ns.LockdownLog.Report()
         if ns.db.results.bench then

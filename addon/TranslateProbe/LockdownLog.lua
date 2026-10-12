@@ -245,6 +245,16 @@ function LockdownLog.SetEnabled(enabled)
     end
 end
 
+-- Manual catch-up, for when no restriction change is announced (a forced CVar test).
+function LockdownLog.CatchupNow()
+    if #pending == 0 then
+        ns.Print(L.CATCHUP_NONE)
+        return
+    end
+    ns.Printf(L.CATCHUP_SCHEDULED, #pending)
+    ScheduleCatchup()
+end
+
 function LockdownLog.Report()
     local contexts = {}
     for context in pairs(ns.db.stats) do
