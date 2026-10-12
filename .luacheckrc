@@ -13,7 +13,7 @@ read_globals = {
     "CreateFrame", "C_Timer", "GetLocale", "GetFramerate", "GetBuildInfo", "WOW_PROJECT_ID",
     "InCombatLockdown", "IsShiftKeyDown", "UnitGUID", "GetInstanceInfo", "GetRealZoneText",
     "GetScriptBucketThrottleLimits", "C_AddOnProfiler", "UpdateAddOnMemoryUsage", "GetAddOnMemoryUsage",
-    "C_RestrictedActions", "C_InstanceEncounter", "C_PvP", "Enum",
+    "C_RestrictedActions", "C_InstanceEncounter", "C_PvP", "C_Intl", "Enum",
 
     -- Chat
     "C_ChatInfo", "ChatFrameUtil", "EventRegistry",

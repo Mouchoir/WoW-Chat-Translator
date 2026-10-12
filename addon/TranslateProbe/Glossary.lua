@@ -195,17 +195,41 @@ Glossary.Lookup = function(word)
     return Lookup(word:lower(), true)
 end
 
--- Strips colors, links and raid icons so only the words typed by the player are scanned.
-local function PlainWords(text)
+-- The words typed by the player: colors, links (quests, items...), textures, atlases,
+-- protected Battle.net names and raid icons are removed.
+local function PlainText(text)
     text = text:gsub("|c%x%x%x%x%x%x%x%x", " "):gsub("|r", " ")
-    text = text:gsub("|H.-|h.-|h", " "):gsub("|T.-|t", " "):gsub("{.-}", " ")
+    text = text:gsub("|H.-|h.-|h", " "):gsub("|T.-|t", " "):gsub("|A.-|a", " ")
+    text = text:gsub("|K.-|k", " "):gsub("{.-}", " ")
     return text
+end
+Glossary.PlainText = PlainText
+
+-- Latin-letter spelling of a name or text written in another script (Hangul, Han,
+-- Cyrillic...), using the ICU transliterator built into the client. Nil when the text is
+-- already ASCII or the client cannot transliterate it.
+function Glossary.Romanize(text)
+    if type(text) ~= "string" or issecretvalue(text) or not text:find("[\128-\255]") then
+        return nil
+    end
+    if not (C_Intl and C_Intl.Transliterate) then
+        return nil
+    end
+    local ok, out = pcall(C_Intl.Transliterate, text, "Any-Latin")
+    if ok and not issecretvalue(out) and type(out) == "string" and out ~= "" and out ~= text then
+        return (out:gsub("|", "/"))
+    end
+end
+
+-- False for a line made only of links or icons, such as a shared quest.
+function Glossary.HasWords(text)
+    return PlainText(text):find(WORD) ~= nil
 end
 
 -- "LFM: cherche des membres (looking for more), DM: Les Mortemines (The Deadmines) / ..." or nil.
 function Glossary.Describe(text)
     local parts, seen = {}, {}
-    for word in PlainWords(text):gmatch(WORD) do
+    for word in PlainText(text):gmatch(WORD) do
         local key = word:lower()
         if not seen[key] then
             seen[key] = true

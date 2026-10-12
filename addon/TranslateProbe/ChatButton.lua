@@ -36,7 +36,9 @@ local MAX_ERROR_CHARS = 120
 
 local tracked = {}       -- lineID -> text of a decorated readable message (memory only)
 local trackedOrder = {}  -- FIFO of tracked lineIDs, to bound memory
+local senders = {}       -- lineID -> sender name of a tracked line (memory only)
 local pendingText = {}   -- lineID -> text, between the filter and the next-frame decoration
+local pendingSender = {} -- lineID -> sender name, same lifetime as pendingText
 local decorated = {}     -- lineIDs that received a button in the current decoration pass
 local results = {}       -- lineID -> suffix lines of the last finished click
 local running = {}       -- lineID -> true while its job is queued or running
@@ -83,12 +85,12 @@ local function CountWords(text)
     return words
 end
 
-local function Track(lineID, text)
-    tracked[lineID] = text
+local function Track(lineID, text, sender)
+    tracked[lineID], senders[lineID] = text, sender
     trackedOrder[#trackedOrder + 1] = lineID
     while #trackedOrder > MAX_TRACKED do
         local old = table.remove(trackedOrder, 1)
-        tracked[old], results[old] = nil, nil
+        tracked[old], senders[old], results[old] = nil, nil, nil
     end
 end
 
@@ -115,10 +117,11 @@ local function DecoratePending()
     end)
     for lineID, text in pairs(pendingText) do
         if decorated[lineID] then
-            Track(lineID, text)
+            Track(lineID, text, pendingSender[lineID])
         end
     end
     wipe(pendingText)
+    wipe(pendingSender)
     wipe(decorated)
 end
 
@@ -167,8 +170,8 @@ end
 
 -- Message event filter, used only to learn that a readable player line arrived. The client
 -- skips addon filters while the text is secret, and we return nothing so nothing changes.
-local function Filter(_, _, message, _, _, _, _, _, _, _, _, _, lineID, guid)
-    if not IsPlainString(message) or message == "" then
+local function Filter(_, event, message, sender, _, _, _, _, _, _, _, _, lineID, guid)
+    if not IsPlainString(message) or message == "" or not ns.Glossary.HasWords(message) then
         return
     end
     if type(lineID) ~= "number" or issecretvalue(lineID) or lineID == 0 then
@@ -184,6 +187,10 @@ local function Filter(_, _, message, _, _, _, _, _, _, _, _, _, lineID, guid)
         return
     end
     pendingText[lineID] = message
+    -- Battle.net names are protected strings: never touch them.
+    if event ~= "CHAT_MSG_BN_WHISPER" and IsPlainString(sender) then
+        pendingSender[lineID] = sender
+    end
     if not decorateQueued then
         decorateQueued = true
         C_Timer.After(0, DecoratePending)
@@ -208,9 +215,24 @@ local function SourceText(lineID)
     end
 end
 
-local function GlossLine(text)
+-- Instant lines: glossary, then the sender name in Latin letters when that option is on.
+local function InstantLines(lineID, text)
     local gloss = ns.Glossary.Describe(text)
-    return gloss and (L.SUFFIX_GLOSS .. gloss) or L.SUFFIX_NO_GLOSS
+    local lines = { gloss and (L.SUFFIX_GLOSS .. gloss) or L.SUFFIX_NO_GLOSS }
+    local roman = ns.db.names and ns.Glossary.Romanize(senders[lineID])
+    if roman then
+        lines[#lines + 1] = L.NAME_LINE:format(roman)
+    end
+    return lines
+end
+
+local function With(lines, extra)
+    local out = {}
+    for i, line in ipairs(lines) do
+        out[i] = line
+    end
+    out[#out + 1] = extra
+    return out
 end
 
 local function StartRun(lineID)
@@ -219,14 +241,14 @@ local function StartRun(lineID)
         Show(lineID, { L.SUFFIX_TOO_OLD }, true)
         return
     end
-    local gloss = GlossLine(text)
+    local instant = InstantLines(lineID, text)
     if not ns.db.simulate then
-        results[lineID] = { gloss }
+        results[lineID] = instant
         Show(lineID, results[lineID], true)
         return
     end
 
-    local srcPieces, tgtPieces, truncated = ns.Model.EstimatePieces(CountWords(text))
+    local srcPieces, tgtPieces, truncated = ns.Model.EstimatePieces(CountWords(ns.Glossary.PlainText(text)))
     local placeholder
     if not ns.Model.IsBuilt() then
         placeholder = L.SUFFIX_BUILDING
@@ -236,12 +258,12 @@ local function StartRun(lineID)
         placeholder = L.SUFFIX_RUNNING:format(srcPieces)
     end
     running[lineID] = true
-    Show(lineID, { gloss, placeholder })
+    Show(lineID, With(instant, placeholder))
     ns.Model.QueueBuild()
 
     ns.Scheduler.Enqueue({
         start = function()
-            Show(lineID, { gloss, L.SUFFIX_RUNNING:format(srcPieces) })
+            Show(lineID, With(instant, L.SUFFIX_RUNNING:format(srcPieces)))
         end,
         run = function(job)
             job.macs = ns.Model.Forward(srcPieces, tgtPieces)
@@ -249,11 +271,11 @@ local function StartRun(lineID)
         done = function(job, ok)
             running[lineID] = nil
             if not ok then
-                Show(lineID, { gloss, L.SUFFIX_FAILED:format(Safe(job.err or "?"):sub(1, MAX_ERROR_CHARS)) }, true)
+                Show(lineID, With(instant, L.SUFFIX_FAILED:format(Safe(job.err or "?"):sub(1, MAX_ERROR_CHARS))), true)
                 return
             end
             local s = job.stats
-            results[lineID] = { gloss, L.SUFFIX_RESULT:format(srcPieces, s.busyMs / 1000, s.wallMs / 1000, s.frames) }
+            results[lineID] = With(instant, L.SUFFIX_RESULT:format(srcPieces, s.busyMs / 1000, s.wallMs / 1000, s.frames))
             Show(lineID, results[lineID], true)
             ns.PushCapped(ns.db.results.clicks, {
                 when = date("%Y-%m-%d %H:%M"), src = srcPieces, tgt = tgtPieces, truncated = truncated,

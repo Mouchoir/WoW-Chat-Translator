@@ -160,6 +160,13 @@ C_PvP = {
         return matchState
     end,
 }
+-- Stand-in for the ICU transliterator: every run of non-ASCII bytes becomes "ro".
+C_Intl = {
+    Transliterate = function(text, id)
+        assert(id == "Any-Latin", "unexpected transliterator " .. tostring(id))
+        return (text:gsub("[\128-\255]+", "ro"))
+    end,
+}
 -- fengari has no collectgarbage("count"): report a fixed allocation, the test only checks
 -- that the bench reads the fields.
 C_AddOnProfiler = {
@@ -575,8 +582,34 @@ check(Printed("HOT = Hall of Thanes / chaud"), "gloss list shows custom entries"
 slash("gloss test lfm wsg")
 check(Printed("WSG"), "gloss test prints the meanings")
 
+rawprint("== links-only lines and sender names")
+local questOnly = Deliver("CHAT_MSG_CHANNEL", "|cffffff00|Hquest:123:31|h[[31+] Understanding Our Present]|h|r",
+    "하늘노래 바람검")
+Tick(1)
+check(#LinksIn(EntryFor(ChatFrame1, questOnly).message) == 0, "no button on a line made only of a shared quest")
+check(G.HasWords("{rt1} |cff00ff00|Hitem:5|h[Linen]|h|r") == false and G.HasWords("wts |Hitem:5|h[Linen]|h") == true,
+    "links, colors and raid icons are not words")
+
 slash("simulate off")
 check(TranslateProbeDB.simulate == false, "test mode off")
+slash("names on")
+check(TranslateProbeDB.names == true, "names option on")
+local korean = Deliver("CHAT_MSG_CHANNEL", "여기도 지금 호드 많나여~", "와우하자 애들아")
+Tick(1)
+Click(LinksIn(EntryFor(ChatFrame1, korean).message)[1])
+local named = EntryFor(ChatFrame1, korean).message
+check(named:find(L.NAME_LINE:format("ro ro"), 1, true) and Lines(named) == 2, "sender name spelled in Latin letters under the line")
+local latinName = Deliver("CHAT_MSG_SAY", "insane", "Dre Blackforest")
+Tick(1)
+Click(LinksIn(EntryFor(ChatFrame1, latinName).message)[1])
+check(Lines(EntryFor(ChatFrame1, latinName).message) == 1, "no name line for a name already in Latin letters")
+slash("names off")
+slash("translit привет")
+check(Printed("ro"), "translit command spells text")
+slash("translit hello")
+check(Printed(L.TRANSLIT_NA), "translit says when there is nothing to spell")
+check(TranslateProbeDB.results.client and TranslateProbeDB.results.client.limits.luaScriptBucketThrottleMaxMsPerSecondNormal == 500,
+    "client build and script limits saved")
 local lfm = Deliver("CHAT_MSG_CHANNEL", "LFM DM need tank", "Bob")
 Tick(1)
 Click(LinksIn(EntryFor(ChatFrame1, lfm).message)[1])

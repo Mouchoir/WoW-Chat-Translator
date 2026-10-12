@@ -11,6 +11,7 @@ local DEFAULTS = {
     budgetMs = 4,     -- Lua time per frame for background work, before the script budget cap
     logging = true,   -- record whether incoming chat text is readable
     simulate = true,  -- a [T] click also times a simulated model pass
+    names = false,    -- a [T] click also spells the sender name in Latin letters
 }
 
 function ns.Print(text)

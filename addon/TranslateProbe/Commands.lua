@@ -82,7 +82,7 @@ end
 local function Help()
     ns.Print(L.HELP_HEADER)
     for _, key in ipairs({ "HELP_INFO", "HELP_BENCH", "HELP_MODEL", "HELP_BUDGET", "HELP_LOG",
-        "HELP_SIMULATE", "HELP_GLOSS", "HELP_REPORT", "HELP_RESET", "HELP_FREE", "HELP_CLICK" }) do
+        "HELP_SIMULATE", "HELP_NAMES", "HELP_TRANSLIT", "HELP_GLOSS", "HELP_REPORT", "HELP_RESET", "HELP_FREE", "HELP_CLICK" }) do
         ns.Print(L[key])
     end
 end
@@ -170,6 +170,20 @@ local handlers = {
         end
         ns.Print(ns.db.logging and L.LOG_ON or L.LOG_OFF)
     end,
+    names = function(arg)
+        arg = arg:lower()
+        if arg == "on" or arg == "off" then
+            ns.db.names = arg == "on"
+        end
+        ns.Print(ns.db.names and L.NAMES_ON or L.NAMES_OFF)
+    end,
+    translit = function(arg)
+        if arg == "" then
+            ns.Print(L.HELP_TRANSLIT)
+            return
+        end
+        ns.Print(ns.Glossary.Romanize(arg) or L.TRANSLIT_NA)
+    end,
     simulate = function(arg)
         arg = arg:lower()
         if arg == "on" or arg == "off" then
@@ -215,4 +229,11 @@ end
 
 ns.OnLoad(function()
     ns.db.results.models = ns.db.results.models or {}
+    -- Keep the client's script budget with the results, for reading the file later.
+    local limits, copy = ns.Scheduler.GetBucketLimits(), {}
+    for key, value in pairs(limits or {}) do
+        copy[key] = value
+    end
+    local version, build = GetBuildInfo()
+    ns.db.results.client = { build = version .. "." .. build, limits = copy }
 end)

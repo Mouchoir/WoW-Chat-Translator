@@ -28,13 +28,15 @@ dev.cmd
 | `/tprobe budget <ms>` | Lua time per frame for background work (default 4, capped at half the per-second and burst script allowances; below 0.5 ms per frame it skips frames instead) |
 | `/tprobe log on\|off` | Chat readability log (on by default) |
 | `/tprobe simulate on\|off` | Whether a `[T]` click also times the simulated model (on by default) |
+| `/tprobe names on\|off` | Whether a `[T]` click also spells a non-Latin sender name in Latin letters, with the client's ICU transliterator `C_Intl.Transliterate(name, "Any-Latin")` (off by default) |
+| `/tprobe translit <text>` | Spell any text in Latin letters, to see which scripts the client can transliterate |
 | `/tprobe gloss add <abbr> <meaning>` | Add or replace a glossary entry; separate several meanings with `/` |
 | `/tprobe gloss del <abbr>` | Remove your entry, or disable a built-in one |
 | `/tprobe gloss list` / `test <text>` | Your entries / what a message would give |
 | `/tprobe report` | Readability log summary, catch-up results, last bench |
 | `/tprobe reset` / `free` | Clear logs and results / release the simulated model |
 
-Click `[T]` after a player message: the glossary line appears under it at once, then the simulated model timing (the first click of a session builds the model first, in a separate job that is not counted). Click the lines to hide them, `[T]` again to show them, Shift-click `[T]` to run again.
+Lines made only of links or icons (a shared quest, an item) get no `[T]`. Click `[T]` after a player message: the glossary line appears under it at once, then the simulated model timing (the first click of a session builds the model first, in a separate job that is not counted). Click the lines to hide them, `[T]` again to show them, Shift-click `[T]` to run again.
 
 ## In-game test session
 
