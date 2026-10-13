@@ -8,7 +8,7 @@ local _, ns = ...
 local Engine = {}
 ns.Engine = Engine
 
-local byte, sub = string.byte, string.sub
+local byte = string.byte
 local floor, sqrt, exp, log, sin, cos = math.floor, math.sqrt, math.exp, math.log, math.sin, math.cos
 local Check = ns.Scheduler.Check
 local Kernels = ns.Kernels
@@ -32,15 +32,16 @@ function Engine.IsReady(pair)
     return models[pair] ~= nil
 end
 
+-- True when the pack is loaded or installed (its addon folder exists).
 function Engine.HasPack(pair)
-    if TranslateProbeModels and TranslateProbeModels[pair] then
+    if models[pair] or (TranslateProbeModels and TranslateProbeModels[pair]) then
         return true
     end
-    if C_AddOns and C_AddOns.GetAddOnInfo then
-        local name = C_AddOns.GetAddOnInfo(packAddOn(pair))
-        return name ~= nil
+    if not (C_AddOns and C_AddOns.GetAddOnInfo) then
+        return false
     end
-    return false
+    local ok, name, _, _, _, reason = pcall(C_AddOns.GetAddOnInfo, packAddOn(pair))
+    return ok and name ~= nil and reason ~= "MISSING"
 end
 
 function Engine.Free(pair)
@@ -260,7 +261,7 @@ end
 
 local function Relu(v, n)
     for i = 1, n do
-        if not (v[i] > 0) then
+        if not (v[i] > 0) then -- luacheck: ignore 581 (NaN becomes 0 like the reference)
             v[i] = 0.0
         end
     end

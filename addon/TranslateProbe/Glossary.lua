@@ -221,6 +221,15 @@ function Glossary.Romanize(text)
     end
 end
 
+-- The text a reader sees: link brackets kept ("[Linen Cloth]"), codes, icons and protected
+-- Battle.net names removed. This is what the translator gets.
+function Glossary.VisibleText(text)
+    text = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    text = text:gsub("|H.-|h(.-)|h", "%1"):gsub("|T.-|t", ""):gsub("|A.-|a", "")
+    text = text:gsub("|K.-|k", ""):gsub("{.-}", "")
+    return text
+end
+
 -- False for a line made only of links or icons, such as a shared quest.
 function Glossary.HasWords(text)
     return PlainText(text):find(WORD) ~= nil

@@ -496,24 +496,70 @@ check(#TranslateProbeDB.catchup == 1 and TranslateProbeDB.catchup[1].readable ==
 slash("reset")
 instanceType = "none"
 
-rawprint("== click: glossary and simulated model under the line")
+rawprint("== click: glossary and real translation under the line")
+-- The real engine is checked token by token by tests/native/run_engine.py; here a stand-in
+-- with the same interface drives the chat flow (language, chain, cache, queue, errors).
+local installed = { TranslateProbe_enfr = true, TranslateProbe_deen = true, TranslateProbe_esen = true,
+    TranslateProbe_ruen = true, TranslateProbe_zhen = true, TranslateProbe_koen = true }
+C_AddOns = {
+    GetAddOnInfo = function(name)
+        if installed[name] then
+            return name, name, "", true, "DEMAND_LOADED"
+        end
+        return name, "", "", false, "MISSING"
+    end,
+}
+local engineCalls, readyPairs = {}, {}
+ns.Engine.Translate = function(chain, text)
+    engineCalls[#engineCalls + 1] = table.concat(chain, ">") .. ":" .. text
+    for _, pair in ipairs(chain) do
+        readyPairs[pair] = true
+        ns.Scheduler.Check()
+    end
+    if text:find("BOOM", 1, true) then
+        error("boom")
+    end
+    return "T(" .. text .. ")", 1234
+end
+ns.Engine.IsReady = function(pair)
+    return readyPairs[pair] == true
+end
+local target = TranslateProbeDB.target
+check(target == (fr and "fr" or "en"), "target language follows the client locale")
+local deLabel = "DE>" .. (fr and "FR" or "EN")
+
+check(ns.Lang.Detect("hallo zusammen, wer will mit in die Todesminen") == "de", "German detected")
+check(ns.Lang.Detect("Hello, how are you?") == "en", "English detected")
+check(ns.Lang.Detect("salut, quelqu'un pour le donjon ?") == "fr", "French detected")
+check(ns.Lang.Detect("¿Alguien quiere hacer la mazmorra?") == "es", "Spanish detected")
+check(ns.Lang.Detect("Привет всем") == "ru" and ns.Lang.Detect("你好，谢谢") == "zh"
+    and ns.Lang.Detect("여기도 지금 호드 많나여~") == "ko", "Russian, Chinese and Korean detected by script")
+local chain = ns.Lang.Chain("de", "fr")
+check(chain and chain[1] == "de-en" and chain[2] == "en-fr", "German to French goes through English")
+local none, why = ns.Lang.Chain("fr", "fr")
+check(none == nil and why == "same", "same language needs no translation")
+local _, why2, missing = ns.Lang.Chain("fr", "en")
+check(why2 == "unsupported" and missing == "fr-en", "a missing pack is reported")
+
 local button = LinksIn(EntryFor(ChatFrame1, readable).message)[1]
 Click(button)
-local building = EntryFor(ChatFrame1, readable).message
-check(Lines(building) == 2 and building:find(L.SUFFIX_BUILDING:sub(1, 12), 1, true), "first click says the model is being built")
+local loading = EntryFor(ChatFrame1, readable).message
+check(Lines(loading) == 2 and loading:find(L.TR_LOADING:format(deLabel), 1, true), "first click says the model is loading")
 local done = TickUntil(function()
     local e = EntryFor(ChatFrame1, readable)
-    return e and e.message:find(L.SUFFIX_RESULT:sub(1, 12), 1, true) and not ns.Scheduler.IsBusy()
+    return e and e.message:find("T(hallo", 1, true) and not ns.Scheduler.IsBusy()
 end, 5000)
-check(done, "result replaces the placeholder")
+check(done, "translation replaces the placeholder")
 local finished = EntryFor(ChatFrame1, readable).message
-check(Lines(finished) == 2, "two lines under the message: glossary + timing")
-check(finished:find(L.SUFFIX_NO_GLOSS, 1, true), "glossary line says nothing known for a German sentence")
+check(finished:find(L.TR_LINE:format(deLabel, "T(hallo zusammen, wer will mit in die Todesminen)"), 1, true),
+    "translation line shows the language pair and the text")
+check(Lines(finished) == 3 and finished:find(L.SUFFIX_NO_GLOSS, 1, true), "glossary, translation and timing lines")
+check(engineCalls[1] == (fr and "de-en>en-fr" or "de-en") .. ":hallo zusammen, wer will mit in die Todesminen",
+    "the chain and the visible text reach the engine")
 check(EntryFor(ChatFrame3, readable).message == finished, "same result in every chat frame")
 local click = TranslateProbeDB.results.clicks[1]
-check(click and click.macs == ns.Model.EstimateMacs(click.src, click.tgt) and click.context == "none",
-    "click row times only the forward pass, with its context")
-check(builds == 1, "model built once")
+check(click and click.source == "de" and click.macs == 1234 and click.loaded and click.context == "none",
+    "click row records language, work and context, never the text")
 check(ChatFrame1.holes == 0 and ChatFrame3.holes == 0, "no history holes from transforms")
 check(issecretvalue(EntryFor(ChatFrame1, locked).message), "secret entries untouched by transforms")
 
@@ -522,7 +568,32 @@ check(suffixLink and suffixLink:find(":x:", 1, true), "result line is a link")
 Click(suffixLink)
 check(Lines(EntryFor(ChatFrame1, readable).message) == 0, "clicking the result hides it")
 Click(button)
-check(EntryFor(ChatFrame1, readable).message == finished and not ns.Scheduler.IsBusy(), "clicking [T] again shows the cached result")
+check(EntryFor(ChatFrame1, readable).message == finished and not ns.Scheduler.IsBusy(), "clicking [T] again shows the result")
+
+local again = Deliver("CHAT_MSG_CHANNEL", "hallo zusammen, wer will mit in die Todesminen", "Otto")
+Tick(1)
+Click(LinksIn(EntryFor(ChatFrame1, again).message)[1])
+check(#engineCalls == 1 and not ns.Scheduler.IsBusy()
+    and EntryFor(ChatFrame1, again).message:find("T(hallo", 1, true), "a repeated line is translated from memory, instantly")
+
+local french = Deliver("CHAT_MSG_SAY", "salut, quelqu'un pour le donjon ?", "Pierre")
+Tick(1)
+Click(LinksIn(EntryFor(ChatFrame1, french).message)[1])
+local frenchMsg = EntryFor(ChatFrame1, french).message
+check(fr and frenchMsg:find(L.TR_SAME:format("FR"), 1, true) or (not fr and frenchMsg:find(L.TR_UNSUPPORTED:format("FR", "EN", "fr-en"), 1, true)),
+    "a French line is left alone in French, reported as unsupported to English")
+
+local q = {}
+for k = 1, 4 do
+    q[k] = Deliver("CHAT_MSG_CHANNEL", "danke für die hilfe nummer " .. k, "Otto")
+end
+Tick(1)
+for k = 1, 4 do
+    Click(LinksIn(EntryFor(ChatFrame1, q[k]).message)[1])
+end
+check(EntryFor(ChatFrame1, q[4]).message:find(L.TR_QUEUE_FULL, 1, true), "a fourth waiting translation is refused")
+TickUntil(function() return not ns.Scheduler.IsBusy() end, 5000)
+check(EntryFor(ChatFrame1, q[3]).message:find("T(danke", 1, true), "queued translations all finish")
 
 Click("addon:TranslateProbe:t:1:" .. readable)
 check(Printed(L.OLD_SESSION), "links from an older session are refused")
@@ -555,7 +626,7 @@ for _, e in ipairs(ChatFrame3.history) do
         copied = e
     end
 end
-check(Lines(copied.message) == 2 and copied.message:find("DM", 1, true), "a moved line still gets its result")
+check(Lines(copied.message) >= 2 and copied.message:find("DM", 1, true), "a moved line still gets its result")
 
 rawprint("== glossary")
 local G = ns.Glossary
@@ -598,6 +669,8 @@ Tick(1)
 check(#LinksIn(EntryFor(ChatFrame1, questOnly).message) == 0, "no button on a line made only of a shared quest")
 check(G.HasWords("{rt1} |cff00ff00|Hitem:5|h[Linen]|h|r") == false and G.HasWords("wts |Hitem:5|h[Linen]|h") == true,
     "links, colors and raid icons are not words")
+check(G.VisibleText("WTS |cffffffff|Hitem:2589|h[Linen Cloth]|h|r x20 {rt1}") == "WTS [Linen Cloth] x20 ",
+    "the translator gets link names in brackets, without codes or icons")
 
 slash("simulate off")
 check(TranslateProbeDB.simulate == false, "test mode off")
@@ -606,12 +679,17 @@ check(TranslateProbeDB.names == true, "names option on")
 local korean = Deliver("CHAT_MSG_CHANNEL", "여기도 지금 호드 많나여~", "와우하자 애들아")
 Tick(1)
 Click(LinksIn(EntryFor(ChatFrame1, korean).message)[1])
+TickUntil(function() return not ns.Scheduler.IsBusy() end, 5000)
 local named = EntryFor(ChatFrame1, korean).message
-check(named:find(L.NAME_LINE:format("ro ro"), 1, true) and Lines(named) == 2, "sender name spelled in Latin letters under the line")
-local latinName = Deliver("CHAT_MSG_SAY", "insane", "Dre Blackforest")
+check(named:find(L.NAME_LINE:format("ro ro"), 1, true) and named:find("T(", 1, true) and Lines(named) == 3,
+    "sender name in Latin letters, then the translation")
+local latinName = Deliver("CHAT_MSG_SAY", "insane in the membrane", "Dre Blackforest")
 Tick(1)
 Click(LinksIn(EntryFor(ChatFrame1, latinName).message)[1])
-check(Lines(EntryFor(ChatFrame1, latinName).message) == 1, "no name line for a name already in Latin letters")
+TickUntil(function() return not ns.Scheduler.IsBusy() end, 5000)
+local latinMsg = EntryFor(ChatFrame1, latinName).message
+check(not latinMsg:find(L.NAME_LINE:format(""), 1, true) and Lines(latinMsg) == 2, "no name line for a name already in Latin letters")
+check(not latinMsg:find("[test]", 1, true), "without test mode no timing line")
 slash("names off")
 slash("translit привет")
 check(Printed("ro"), "translit command spells text")
@@ -619,12 +697,11 @@ slash("translit hello")
 check(Printed(L.TRANSLIT_NA), "translit says when there is nothing to spell")
 check(TranslateProbeDB.results.client and TranslateProbeDB.results.client.limits.luaScriptBucketThrottleMaxMsPerSecondNormal == 500,
     "client build and script limits saved")
-local lfm = Deliver("CHAT_MSG_CHANNEL", "LFM DM need tank", "Bob")
-Tick(1)
-Click(LinksIn(EntryFor(ChatFrame1, lfm).message)[1])
-local glossOnly = EntryFor(ChatFrame1, lfm).message
-check(not ns.Scheduler.IsBusy() and Lines(glossOnly) == 1 and glossOnly:find("DM", 1, true),
-    "without test mode a click shows only the glossary, instantly")
+slash("target en")
+check(TranslateProbeDB.target == "en", "target command switches the language")
+slash("target xx")
+check(TranslateProbeDB.target == "en" and Printed(L.TARGET_IS:format("EN", "fr, en")), "unknown target ignored")
+slash("target " .. target)
 slash("simulate on")
 
 rawprint("== kernels")
@@ -656,6 +733,8 @@ end
 check(sameLocal, "one-token kernel gives bit-identical sums")
 check(sameBatch, "four-token kernel gives bit-identical sums")
 
+ns.Model.QueueBuild()
+TickUntil(function() return ns.Model.IsBuilt() end, 5000)
 local function RunForward(referenceMode)
     ns.Model.SetReference(referenceMode)
     local result
@@ -710,16 +789,11 @@ TickUntil(function() return #TranslateProbeDB.results.models == 4 and not ns.Sch
 check(builds == 2 and CountPrinted(L.MODEL_BUILD:format(ns.Model.ExpectedBytes() / 1048576)) == 1,
     "two quick model commands build once")
 
-local failForward = ns.Model.Forward
-ns.Model.Forward = function()
-    error("boom")
-end
-local failing = Deliver("CHAT_MSG_SAY", "anything", "Hans")
+local failing = Deliver("CHAT_MSG_SAY", "BOOM danke für die hilfe", "Hans")
 Tick(1)
 Click(LinksIn(EntryFor(ChatFrame1, failing).message)[1])
 TickUntil(function() return not ns.Scheduler.IsBusy() end, 100)
-check(EntryFor(ChatFrame1, failing).message:find("boom", 1, true), "a failed run shows its error under the line")
-ns.Model.Forward = failForward
+check(EntryFor(ChatFrame1, failing).message:find("boom", 1, true), "a failed translation shows its error under the line")
 local errorCount = #errors
 wipe(errors)
 

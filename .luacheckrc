@@ -16,10 +16,11 @@ read_globals = {
     "C_RestrictedActions", "C_InstanceEncounter", "C_PvP", "C_Intl", "Enum",
 
     -- Chat
-    "C_ChatInfo", "ChatFrameUtil", "EventRegistry",
+    "C_ChatInfo", "ChatFrameUtil", "EventRegistry", "C_EncodingUtil", "C_AddOns",
 }
 
 globals = {
     -- SavedVariable and slash handlers (globals WoW reads/writes)
     "TranslateProbeDB", "SLASH_TRANSLATEPROBE1", "SLASH_TRANSLATEPROBE2", "SlashCmdList",
+    "TranslateProbeModels",   -- filled by the LoadOnDemand model packs
 }

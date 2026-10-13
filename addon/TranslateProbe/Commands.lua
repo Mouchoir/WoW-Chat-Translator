@@ -82,7 +82,7 @@ end
 local function Help()
     ns.Print(L.HELP_HEADER)
     for _, key in ipairs({ "HELP_INFO", "HELP_BENCH", "HELP_MODEL", "HELP_BUDGET", "HELP_LOG",
-        "HELP_SIMULATE", "HELP_NAMES", "HELP_TRANSLIT", "HELP_GLOSS", "HELP_CATCHUP", "HELP_REPORT", "HELP_RESET", "HELP_FREE", "HELP_CLICK" }) do
+        "HELP_TARGET", "HELP_SIMULATE", "HELP_NAMES", "HELP_TRANSLIT", "HELP_GLOSS", "HELP_CATCHUP", "HELP_REPORT", "HELP_RESET", "HELP_FREE", "HELP_CLICK" }) do
         ns.Print(L[key])
     end
 end
@@ -169,6 +169,15 @@ local handlers = {
             ns.LockdownLog.SetEnabled(arg == "on")
         end
         ns.Print(ns.db.logging and L.LOG_ON or L.LOG_OFF)
+    end,
+    target = function(arg)
+        arg = arg:lower()
+        for _, t in ipairs(ns.Lang.TARGETS) do
+            if t == arg then
+                ns.db.target = t
+            end
+        end
+        ns.Printf(L.TARGET_IS, ns.Lang.NAMES[ns.db.target] or ns.db.target, table.concat(ns.Lang.TARGETS, ", "))
     end,
     names = function(arg)
         arg = arg:lower()

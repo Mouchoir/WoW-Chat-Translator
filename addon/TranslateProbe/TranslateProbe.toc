@@ -12,6 +12,10 @@ Kernels.lua
 Model.lua
 Bench.lua
 Glossary.lua
+Base64.lua
+Tokenizer.lua
+Engine.lua
+Lang.lua
 ChatButton.lua
 LockdownLog.lua
 Commands.lua

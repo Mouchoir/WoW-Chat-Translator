@@ -12,6 +12,7 @@ local DEFAULTS = {
     logging = true,   -- record whether incoming chat text is readable
     simulate = true,  -- a [T] click also times a simulated model pass
     names = false,    -- a [T] click also spells the sender name in Latin letters
+    target = nil,     -- translation target language, set from the client locale on first load
 }
 
 function ns.Print(text)
@@ -58,6 +59,7 @@ loader:SetScript("OnEvent", function(self, _, name)
     TranslateProbeDB = TranslateProbeDB or {}
     ApplyDefaults(TranslateProbeDB)
     ns.db = TranslateProbeDB
+    ns.db.target = ns.db.target or ns.Lang.DefaultTarget()
     for _, init in ipairs(ns.inits) do
         init()
     end

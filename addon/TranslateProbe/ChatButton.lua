@@ -44,6 +44,10 @@ local results = {}       -- lineID -> suffix lines of the last finished click
 local running = {}       -- lineID -> true while its job is queued or running
 local decorateQueued = false
 local playerGUID
+local cache, cacheOrder = {}, {} -- chain + text -> translation, for repeated lines (memory only)
+local MAX_CACHE = 300
+local pendingJobs = 0
+local MAX_PENDING_JOBS = 3
 
 local function ButtonLink(lineID)
     return " |cff66bbff" .. BUTTON_MARK .. ns.session .. ":" .. lineID .. "|h[T]|h|r"
@@ -235,6 +239,21 @@ local function With(lines, extra)
     return out
 end
 
+local function Remember(key, translation)
+    if cache[key] == nil then
+        cacheOrder[#cacheOrder + 1] = key
+        if #cacheOrder > MAX_CACHE then
+            cache[table.remove(cacheOrder, 1)] = nil
+        end
+    end
+    cache[key] = translation
+end
+
+local function LangLabel(code)
+    return ns.Lang.NAMES[code] or (code and code:upper()) or "?"
+end
+
+-- Glossary at once, then the real translation (source detected, chain of model packs).
 local function StartRun(lineID)
     local text = SourceText(lineID)
     if not text then
@@ -242,44 +261,70 @@ local function StartRun(lineID)
         return
     end
     local instant = InstantLines(lineID, text)
-    if not ns.db.simulate then
-        results[lineID] = instant
+    local input = ns.Glossary.VisibleText(text)
+    local source, target = ns.Lang.Detect(text), ns.db.target
+    local chain, why, missing = ns.Lang.Chain(source, target)
+    if not chain then
+        local line
+        if why == "same" then
+            line = L.TR_SAME:format(LangLabel(source))
+        elseif why == "unsupported" then
+            line = L.TR_UNSUPPORTED:format(LangLabel(source), LangLabel(target), missing)
+        else
+            line = L.TR_NOTHING
+        end
+        results[lineID] = With(instant, line)
         Show(lineID, results[lineID], true)
         return
     end
-
-    local srcPieces, tgtPieces, truncated = ns.Model.EstimatePieces(CountWords(ns.Glossary.PlainText(text)))
-    local placeholder
-    if not ns.Model.IsBuilt() then
-        placeholder = L.SUFFIX_BUILDING
-    elseif ns.Scheduler.IsBusy() then
-        placeholder = L.SUFFIX_QUEUED:format(srcPieces)
-    else
-        placeholder = L.SUFFIX_RUNNING:format(srcPieces)
+    local label = LangLabel(source) .. ">" .. LangLabel(target)
+    local key = table.concat(chain, ">") .. "\n" .. input
+    if cache[key] then
+        results[lineID] = With(instant, L.TR_LINE:format(label, cache[key]))
+        Show(lineID, results[lineID], true)
+        return
     end
+    if pendingJobs >= MAX_PENDING_JOBS then
+        Show(lineID, With(instant, L.TR_QUEUE_FULL), true)
+        return
+    end
+    local ready = true
+    for _, pair in ipairs(chain) do
+        ready = ready and ns.Engine.IsReady(pair)
+    end
+    local placeholder = (not ready and L.TR_LOADING) or (ns.Scheduler.IsBusy() and L.TR_QUEUED) or L.TR_RUNNING
+    pendingJobs = pendingJobs + 1
     running[lineID] = true
-    Show(lineID, With(instant, placeholder))
-    ns.Model.QueueBuild()
+    Show(lineID, With(instant, placeholder:format(label)))
 
     ns.Scheduler.Enqueue({
         start = function()
-            Show(lineID, With(instant, L.SUFFIX_RUNNING:format(srcPieces)))
+            if ready then
+                Show(lineID, With(instant, L.TR_RUNNING:format(label)))
+            end
         end,
         run = function(job)
-            job.macs = ns.Model.Forward(srcPieces, tgtPieces)
+            job.translation, job.macs = ns.Engine.Translate(chain, input)
         end,
         done = function(job, ok)
+            pendingJobs = pendingJobs - 1
             running[lineID] = nil
             if not ok then
                 Show(lineID, With(instant, L.SUFFIX_FAILED:format(Safe(job.err or "?"):sub(1, MAX_ERROR_CHARS))), true)
                 return
             end
             local s = job.stats
-            results[lineID] = With(instant, L.SUFFIX_RESULT:format(srcPieces, s.busyMs / 1000, s.wallMs / 1000, s.frames))
-            Show(lineID, results[lineID], true)
+            local translation = Safe(job.translation)
+            Remember(key, translation)
+            local lines = With(instant, L.TR_LINE:format(label, translation))
+            if ns.db.simulate then
+                lines[#lines + 1] = L.TR_TIMING:format(s.busyMs / 1000, s.wallMs / 1000, s.frames)
+            end
+            results[lineID] = lines
+            Show(lineID, lines, true)
             ns.PushCapped(ns.db.results.clicks, {
-                when = date("%Y-%m-%d %H:%M"), src = srcPieces, tgt = tgtPieces, truncated = truncated,
-                shortlist = ns.Model.ShortlistRows(), macs = job.macs,
+                when = date("%Y-%m-%d %H:%M"), source = source, target = target, chain = table.concat(chain, ">"),
+                words = CountWords(input), macs = job.macs, loaded = not ready,
                 busyMs = s.busyMs, wallMs = s.wallMs, queuedMs = s.queuedMs, pausedMs = s.pausedMs,
                 frames = s.frames, maxSliceMs = s.maxSliceMs, minBudgetMs = s.minBudgetMs,
                 budgetMs = s.maxBudgetMs, every = s.maxEvery, fps = s.avgFps,

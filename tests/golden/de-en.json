@@ -1,0 +1,92 @@
+{
+ "pair": "de-en",
+ "entries": [
+  {
+   "text": "Hallo zusammen, wer will mit in die Todesminen?",
+   "src_ids": [
+    2403,
+    113,
+    889,
+    26,
+    7058,
+    114,
+    55,
+    30,
+    39,
+    11182,
+    1200,
+    41,
+    130,
+    2
+   ],
+   "shortlist": 504,
+   "out_ids": [
+    7076,
+    113,
+    26,
+    25,
+    272,
+    25,
+    506,
+    27,
+    38,
+    1393,
+    62,
+    29,
+    127,
+    451,
+    10279,
+    27,
+    130
+   ],
+   "translation": "Hello, who wants to put on the death mines?"
+  },
+  {
+   "text": "Danke für die Hilfe!",
+   "src_ids": [
+    18847,
+    57,
+    39,
+    1752,
+    149,
+    2
+   ],
+   "shortlist": 240,
+   "out_ids": [
+    963,
+    1724,
+    50,
+    29,
+    25,
+    536,
+    149
+   ],
+   "translation": "Thanks for the help!"
+  },
+  {
+   "text": "Suche Gruppe für die Elite-Quest",
+   "src_ids": [
+    2238,
+    1863,
+    57,
+    39,
+    12102,
+    34,
+    6094,
+    452,
+    2
+   ],
+   "shortlist": 352,
+   "out_ids": [
+    2151,
+    695,
+    50,
+    29,
+    12102,
+    3085,
+    452
+   ],
+   "translation": "Search group for the Elite Quest"
+  }
+ ]
+}
