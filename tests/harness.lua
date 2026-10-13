@@ -107,7 +107,7 @@ local instanceType = "none"
 local encounter = false
 local matchState = 0
 local bucket = {
-    luaScriptBucketThrottleMaxMsPerSecondNormal = 500, luaScriptBucketThrottleMaxMsBurstNormal = 1000,
+    luaScriptBucketThrottleMaxMsPerSecondNormal = 800, luaScriptBucketThrottleMaxMsBurstNormal = 20000,
     luaScriptBucketThrottleMaxMsPerSecondRestricted = 500, luaScriptBucketThrottleMaxMsBurstRestricted = 1000,
 }
 
@@ -149,7 +149,13 @@ C_RestrictedActions = {
     IsAddOnRestrictionActive = function(t)
         return t == 5 and lockdown
     end,
+    GetAddOnRestrictionState = function(t)
+        return (t == 5 and lockdown) and 2 or 0
+    end,
 }
+GetTime = function()
+    return gameTime
+end
 C_InstanceEncounter = {
     IsEncounterInProgress = function()
         return encounter
@@ -414,7 +420,7 @@ end
 
 rawprint("== load (" .. LOCALE_UNDER_TEST .. ")")
 check(Printed(L.LOADED), "prints the loaded line")
-check(TranslateProbeDB and TranslateProbeDB.budgetMs == 4 and TranslateProbeDB.logging == true
+check(TranslateProbeDB and TranslateProbeDB.budgetMs == 8 and TranslateProbeDB.speed == "safe" and TranslateProbeDB.logging == true
     and TranslateProbeDB.simulate == true, "saved variables get defaults")
 check(not fr or L.LOADED:find("Tape", 1, true), "French strings on frFR")
 check(SLASH_TRANSLATEPROBE1 == "/tprobe" and slash ~= nil, "slash command registered")
@@ -564,15 +570,15 @@ local loading = EntryFor(ChatFrame1, readable).message
 check(Lines(loading) == 2 and loading:find(L.TR_LOADING:format(deLabel), 1, true), "first click says the model is loading")
 local done = TickUntil(function()
     local e = EntryFor(ChatFrame1, readable)
-    return e and e.message:find("T(hallo", 1, true) and not ns.Scheduler.IsBusy()
+    return e and e.message:find("T(Hallo", 1, true) and not ns.Scheduler.IsBusy()
 end, 5000)
 check(done, "translation replaces the placeholder")
 local finished = EntryFor(ChatFrame1, readable).message
-check(finished:find(L.TR_LINE:format(deLabel, "T(hallo zusammen, wer will mit in die Todesminen)"), 1, true),
+check(finished:find(L.TR_LINE:format(deLabel, "T(Hallo zusammen, wer will mit in die Todesminen.)"), 1, true),
     "translation line shows the language pair and the text")
 check(Lines(finished) == 3 and finished:find(L.SUFFIX_NO_GLOSS, 1, true), "glossary, translation and timing lines")
-check(engineCalls[1] == (fr and "de-en>en-fr" or "de-en") .. ":hallo zusammen, wer will mit in die Todesminen",
-    "the chain and the visible text reach the engine")
+check(engineCalls[1] == (fr and "de-en>en-fr" or "de-en") .. ":Hallo zusammen, wer will mit in die Todesminen.",
+    "the chain and the cleaned visible text reach the engine")
 check(EntryFor(ChatFrame3, readable).message == finished, "same result in every chat frame")
 local click = TranslateProbeDB.results.clicks[1]
 check(click and click.source == "de" and click.macs == 1234 and click.loaded and click.context == "none",
@@ -591,7 +597,7 @@ local again = Deliver("CHAT_MSG_CHANNEL", "hallo zusammen, wer will mit in die T
 Tick(1)
 Click(LinksIn(EntryFor(ChatFrame1, again).message)[1])
 check(#engineCalls == 1 and not ns.Scheduler.IsBusy()
-    and EntryFor(ChatFrame1, again).message:find("T(hallo", 1, true), "a repeated line is translated from memory, instantly")
+    and EntryFor(ChatFrame1, again).message:find("T(Hallo", 1, true), "a repeated line is translated from memory, instantly")
 
 local french = Deliver("CHAT_MSG_SAY", "salut, quelqu'un pour le donjon ?", "Pierre")
 Tick(1)
@@ -610,7 +616,7 @@ for k = 1, 4 do
 end
 check(EntryFor(ChatFrame1, q[4]).message:find(L.TR_QUEUE_FULL, 1, true), "a fourth waiting translation is refused")
 TickUntil(function() return not ns.Scheduler.IsBusy() end, 5000)
-check(EntryFor(ChatFrame1, q[3]).message:find("T(danke", 1, true), "queued translations all finish")
+check(EntryFor(ChatFrame1, q[3]).message:find("T(Danke", 1, true), "queued translations all finish")
 
 Click("addon:TranslateProbe:t:1:" .. readable)
 check(Printed(L.OLD_SESSION), "links from an older session are refused")
@@ -712,7 +718,7 @@ slash("translit привет")
 check(Printed("ro"), "translit command spells text")
 slash("translit hello")
 check(Printed(L.TRANSLIT_NA), "translit says when there is nothing to spell")
-check(TranslateProbeDB.results.client and TranslateProbeDB.results.client.limits.luaScriptBucketThrottleMaxMsPerSecondNormal == 500,
+check(TranslateProbeDB.results.client and TranslateProbeDB.results.client.limits.luaScriptBucketThrottleMaxMsPerSecondNormal == 800,
     "client build and script limits saved")
 slash("target en")
 check(TranslateProbeDB.target == "en", "target command switches the language")
@@ -774,12 +780,26 @@ local batched, steps = ns.Model.EstimateMacsSplit(6, 8)
 check(batched + steps == ns.Model.EstimateMacs(6, 8) and batched > 0 and steps > 0, "work splits into batchable and step parts")
 
 rawprint("== scheduler")
-bucket.luaScriptBucketThrottleMaxMsPerSecondRestricted = 20
-local slice, every = ns.Scheduler.Plan()
-check(slice == 0.5 and every == 3, "low per-second allowance skips frames instead of raising the slice")
-bucket.luaScriptBucketThrottleMaxMsPerSecondRestricted = 500
-slice, every = ns.Scheduler.Plan()
-check(math.abs(slice - 4) < 1e-9 and every == 1, "normal allowance keeps the setting")
+local refill, ceiling, pace = ns.Scheduler.Pace()
+check(pace == "safe" and math.abs(refill - 450) < 1e-9 and ceiling == 500, "safe pace: 90% of the Restricted refill, half its burst")
+slash("speed fast")
+refill, ceiling, pace = ns.Scheduler.Pace()
+check(pace == "fast" and math.abs(refill - 720) < 1e-9 and ceiling == 5000, "fast pace uses the Normal limits when unrestricted")
+lockdown = true
+refill, ceiling, pace = ns.Scheduler.Pace()
+check(pace == "safe", "fast pace falls back to safe while a restriction is active")
+lockdown = false
+FireEvent("LUA_WARNING", "insecure scripts exceeded execution limit for addon TranslateProbe")
+refill, ceiling, pace = ns.Scheduler.Pace()
+check(pace == "safe" and ns.Scheduler.IsThrottled() and Printed(L.THROTTLED), "an overrun warning switches back to safe for the session")
+slash("speed safe")
+local clean = ns.Clean.ForTranslation
+check(clean("i agree i am leatherworker dont have it", "en") == "I agree I am leatherworker don't have it.", "English chat shorthand is fixed")
+check(clean("u r late lol", "en") == "You are late lol." and clean("LFM DM need tank", "en") == "LFM DM need tank.",
+    "shorthand expanded, game tags left alone")
+check(clean("how much was it?", "en") == "How much was it?" and clean("danke für die hilfe", "de") == "Danke für die hilfe.",
+    "capital first letter, full stop only when missing")
+check(clean("你好", "zh") == "你好", "non-Latin lines untouched")
 
 rawprint("== slash commands")
 slash("model 4")

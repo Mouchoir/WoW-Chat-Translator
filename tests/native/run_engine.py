@@ -53,11 +53,15 @@ end
 
 def main():
     pair = sys.argv[1]
-    packs = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, 'build', 'addons')
+    free_texts = sys.argv[3:] if len(sys.argv) > 3 and sys.argv[2] == '--text' else None
+    packs = sys.argv[2] if len(sys.argv) > 2 and not free_texts else os.path.join(ROOT, 'build', 'addons')
     code = pair.replace('-', '')
     pack_dir = os.path.join(packs, 'TranslateProbe_' + code)
-    with open(os.path.join(ROOT, 'tests', 'golden', pair + '.json'), encoding='utf-8') as f:
-        golden = json.load(f)['entries']
+    if free_texts:
+        golden = [{'text': t, 'src_ids': None, 'out_ids': None, 'shortlist': None} for t in free_texts]
+    else:
+        with open(os.path.join(ROOT, 'tests', 'golden', pair + '.json'), encoding='utf-8') as f:
+            golden = json.load(f)['entries']
 
     os.add_dll_directory(os.path.dirname(DLL))
     d = ctypes.CDLL(DLL)
@@ -132,7 +136,7 @@ def main():
         src_ids, out_ids, short, macs, ms, translation = res.split('|', 5)
         src_ids = [int(x) for x in src_ids.split(',') if x]
         out_ids = [int(x) for x in out_ids.split(',') if x]
-        ok = src_ids == e['src_ids'] and out_ids == e['out_ids'] and int(short) == e['shortlist']
+        ok = free_texts is not None or (src_ids == e["src_ids"] and out_ids == e["out_ids"] and int(short) == e["shortlist"])
         failures += 0 if ok else 1
         print('%s %6s ms %6.1f M MACs (%5.1fs wall) %s -> %s' % (
             'ok  ' if ok else 'FAIL', ms, int(float(macs)) / 1e6, time.time() - t1, e['text'], translation))

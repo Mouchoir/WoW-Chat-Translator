@@ -7,6 +7,7 @@ exclude_files = { "node_modules", "tests" }
 read_globals = {
     -- Lua helpers the game adds
     "wipe", "print", "date", "time", "issecretvalue", "debugprofilestop", "debugstack", "geterrorhandler",
+    "GetTime", "ERROR_SCRIPT_EXECUTION_LIMIT",
     table = { fields = { "create" } },
 
     -- Frames, timers, client

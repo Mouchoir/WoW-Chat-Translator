@@ -261,8 +261,8 @@ local function StartRun(lineID)
         return
     end
     local instant = InstantLines(lineID, text)
-    local input = ns.Glossary.VisibleText(text)
     local source, target = ns.Lang.Detect(text), ns.db.target
+    local input = ns.Clean.ForTranslation(ns.Glossary.VisibleText(text), source)
     local chain, why, missing = ns.Lang.Chain(source, target)
     if not chain then
         local line

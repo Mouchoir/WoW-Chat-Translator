@@ -8,7 +8,8 @@ ns.session = tostring(time())
 ns.inits = {}
 
 local DEFAULTS = {
-    budgetMs = 4,     -- Lua time per frame for background work, before the script budget cap
+    budgetMs = 8,     -- longest Lua slice per frame for background work (ms)
+    speed = "safe",   -- "safe": Restricted script budget everywhere; "fast": Normal one when unrestricted
     logging = true,   -- record whether incoming chat text is readable
     simulate = true,  -- a [T] click also times a simulated model pass
     names = false,    -- a [T] click also spells the sender name in Latin letters
@@ -47,6 +48,10 @@ local function ApplyDefaults(db)
     db.transitions = db.transitions or {} -- addon restriction state changes
     db.catchup = db.catchup or {}         -- re-reads of secret lines after a lockdown
     db.results = db.results or {}         -- bench, model and click timings
+    db.results.throttles = db.results.throttles or {}
+    if db.budgetMs == 4 and not db.sliceMigrated then  -- old default was 4 ms
+        db.budgetMs, db.sliceMigrated = 8, true
+    end
 end
 
 local loader = CreateFrame("Frame")

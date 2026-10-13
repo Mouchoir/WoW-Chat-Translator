@@ -22,8 +22,12 @@ local function PrintInfo()
     else
         ns.Print(L.INFO_BUCKET_NA)
     end
-    local slice, every = ns.Scheduler.Plan()
-    ns.Printf(L.INFO_SLICE, slice, every, GetFramerate(), ns.db.budgetMs)
+    local refill, ceiling, pace = ns.Scheduler.Pace()
+    local _, debt = ns.Scheduler.Plan()
+    ns.Printf(L.INFO_SLICE, pace, ns.db.budgetMs, refill, ceiling, debt)
+    if ns.Scheduler.IsThrottled() then
+        ns.Print(L.THROTTLED)
+    end
 
     local active = ns.LockdownLog.ActiveRestrictions()
     ns.Printf(L.INFO_LOCK, Yes(C_ChatInfo.InChatMessagingLockdown()), active ~= "" and active or L.NONE,
@@ -82,7 +86,7 @@ end
 local function Help()
     ns.Print(L.HELP_HEADER)
     for _, key in ipairs({ "HELP_INFO", "HELP_BENCH", "HELP_MODEL", "HELP_BUDGET", "HELP_LOG",
-        "HELP_TARGET", "HELP_SIMULATE", "HELP_NAMES", "HELP_TRANSLIT", "HELP_GLOSS", "HELP_CATCHUP", "HELP_REPORT", "HELP_RESET", "HELP_FREE", "HELP_CLICK" }) do
+        "HELP_TARGET", "HELP_SPEED", "HELP_SIMULATE", "HELP_NAMES", "HELP_TRANSLIT", "HELP_GLOSS", "HELP_CATCHUP", "HELP_REPORT", "HELP_RESET", "HELP_FREE", "HELP_CLICK" }) do
         ns.Print(L[key])
     end
 end
@@ -192,6 +196,13 @@ local handlers = {
             return
         end
         ns.Print(ns.Glossary.Romanize(arg) or L.TRANSLIT_NA)
+    end,
+    speed = function(arg)
+        arg = arg:lower()
+        if ns.Scheduler.SPEEDS[arg] then
+            ns.db.speed = arg
+        end
+        ns.Print(ns.db.speed == "fast" and L.SPEED_FAST or L.SPEED_SAFE)
     end,
     simulate = function(arg)
         arg = arg:lower()

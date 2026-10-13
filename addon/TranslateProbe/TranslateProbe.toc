@@ -17,6 +17,7 @@ Tokenizer.lua
 Engine.lua
 LangData.lua
 Lang.lua
+Clean.lua
 ChatButton.lua
 LockdownLog.lua
 Commands.lua
