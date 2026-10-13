@@ -627,6 +627,56 @@ check(not ns.Scheduler.IsBusy() and Lines(glossOnly) == 1 and glossOnly:find("DM
     "without test mode a click shows only the glossary, instantly")
 slash("simulate on")
 
+rawprint("== kernels")
+local K = ns.Kernels
+local rows, cols = 70, 48
+local bytes = {}
+for i = 1, rows * cols do
+    bytes[i] = string.char(math.random(0, 255))
+end
+local S = table.concat(bytes)
+local xs, refs, outs = {}, {}, {}
+for t = 1, 4 do
+    xs[t], refs[t], outs[t] = {}, {}, {}
+    for i = 1, cols do
+        xs[t][i] = math.random() - 0.5
+    end
+    K.Row16(S, cols, xs[t], refs[t], 1, rows)
+end
+local local16 = {}
+K.Local16(S, cols, xs[1], local16, 1, rows)
+K.Batch4(S, cols, xs[1], xs[2], xs[3], xs[4], outs[1], outs[2], outs[3], outs[4], 1, rows)
+local sameLocal, sameBatch = true, true
+for j = 1, rows do
+    if local16[j] ~= refs[1][j] then sameLocal = false end
+    for t = 1, 4 do
+        if outs[t][j] ~= refs[t][j] then sameBatch = false end
+    end
+end
+check(sameLocal, "one-token kernel gives bit-identical sums")
+check(sameBatch, "four-token kernel gives bit-identical sums")
+
+local function RunForward(referenceMode)
+    ns.Model.SetReference(referenceMode)
+    local result
+    ns.Scheduler.Enqueue({ run = function()
+        local macs, out = ns.Model.Forward(6, 8, { 3, 17, 250, 9, 400, 77 })
+        result = { macs = macs, out = out }
+    end })
+    TickUntil(function() return result ~= nil end, 5000)
+    ns.Model.SetReference(false)
+    return result
+end
+local fast, ref = RunForward(false), RunForward(true)
+local sameTokens = fast and ref and #fast.out == #ref.out
+for i = 1, (fast and #fast.out or 0) do
+    if fast.out[i] ~= ref.out[i] then sameTokens = false end
+end
+check(sameTokens and fast.macs == ref.macs and fast.macs == ns.Model.EstimateMacs(6, 8),
+    "batched model pass gives the same tokens and work as the reference pass")
+local batched, steps = ns.Model.EstimateMacsSplit(6, 8)
+check(batched + steps == ns.Model.EstimateMacs(6, 8) and batched > 0 and steps > 0, "work splits into batchable and step parts")
+
 rawprint("== scheduler")
 bucket.luaScriptBucketThrottleMaxMsPerSecondRestricted = 20
 local slice, every = ns.Scheduler.Plan()
@@ -676,7 +726,7 @@ wipe(errors)
 slash("bench")
 check(TickUntil(function() return TranslateProbeDB.results.bench ~= nil end, 20000), "bench finishes")
 local bench = TranslateProbeDB.results.bench
-check(bench and bench.int8Rate > 0 and bench.floatRate > 0 and bench.byteRate > 0, "bench rates measured")
+check(bench and bench.int8Rate > 0 and bench.floatRate > 0 and bench.byteRate > 0 and bench.local16Rate > 0 and bench.batch4Rate > 0, "bench rates measured, batched kernels included")
 check(bench and bench.memory and bench.memory.slot > 0 and bench.memory.stringByte > 0, "bench memory measured")
 check(bench and bench.maxSliceMs ~= nil, "bench records its longest slice")
 

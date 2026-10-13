@@ -174,30 +174,63 @@ function Model.QueueBuild(onDone)
     return true
 end
 
--- y = W x for int8 weights stored row by row in one string, 16 bytes per string.byte call.
--- Bytes hold q + 128; the offset is removed once per row through sum(x).
+local Kernels = ns.Kernels
+local reference = false   -- true: the original one-row kernel, used by tests as the ground truth
+
+-- Tests compare the fast kernels with the reference: both must give bit-identical results.
+function Model.SetReference(on)
+    reference = on and true or false
+end
+
+-- y = W x. Bytes hold q + 128; the offset is removed once per row through sum(x).
 local function MatVec(M, x, y)
     local S, cols, rows, scale = M.s, M.cols, M.rows, M.scale
     local sumx = 0
     for i = 1, cols do
         sumx = sumx + x[i]
     end
+    if reference then
+        Kernels.Row16(S, cols, x, y, 1, rows, Check)
+    else
+        Kernels.Local16(S, cols, x, y, 1, rows, Check)
+    end
     local offset = 128 * sumx
     for j = 1, rows do
-        local acc, base = 0, (j - 1) * cols
-        for i = 1, cols, 16 do
-            local p = base + i
-            local a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16 = byte(S, p, p + 15)
-            acc = acc + a1 * x[i] + a2 * x[i + 1] + a3 * x[i + 2] + a4 * x[i + 3]
-                + a5 * x[i + 4] + a6 * x[i + 5] + a7 * x[i + 6] + a8 * x[i + 7]
-                + a9 * x[i + 8] + a10 * x[i + 9] + a11 * x[i + 10] + a12 * x[i + 11]
-                + a13 * x[i + 12] + a14 * x[i + 13] + a15 * x[i + 14] + a16 * x[i + 15]
-        end
-        y[j] = scale * (acc - offset)
-        Check()
+        y[j] = scale * (y[j] - offset)
     end
     macs = macs + rows * cols
     return y
+end
+
+-- Four tokens through the same matrix, each extracted byte serving all four.
+local function MatVec4(M, xa, xb, xc, xd, ya, yb, yc, yd)
+    local S, cols, rows, scale = M.s, M.cols, M.rows, M.scale
+    local sa, sb, sc, sd = 0, 0, 0, 0
+    for i = 1, cols do
+        sa, sb, sc, sd = sa + xa[i], sb + xb[i], sc + xc[i], sd + xd[i]
+    end
+    Kernels.Batch4(S, cols, xa, xb, xc, xd, ya, yb, yc, yd, 1, rows, Check)
+    local oa, ob, oc, od = 128 * sa, 128 * sb, 128 * sc, 128 * sd
+    for j = 1, rows do
+        ya[j], yb[j] = scale * (ya[j] - oa), scale * (yb[j] - ob)
+        yc[j], yd[j] = scale * (yc[j] - oc), scale * (yd[j] - od)
+    end
+    macs = macs + 4 * rows * cols
+end
+
+-- Y[t] = W X[t] for t = 1..n, four tokens at a time when possible.
+local function MatVecMany(M, X, Y, n)
+    local t = 1
+    if not reference then
+        while t + 3 <= n do
+            MatVec4(M, X[t], X[t + 1], X[t + 2], X[t + 3], Y[t], Y[t + 1], Y[t + 2], Y[t + 3])
+            t = t + 4
+        end
+    end
+    while t <= n do
+        MatVec(M, X[t], Y[t])
+        t = t + 1
+    end
 end
 
 local function NewVector(n)
@@ -208,16 +241,24 @@ local function NewVector(n)
     return v
 end
 
+local function NewVectors(count, n)
+    local list = {}
+    for t = 1, count do
+        list[t] = NewVector(n)
+    end
+    return list
+end
+
 -- Embedding row of a token: block string and byte offset of that row inside it.
 local function EmbeddingRow(tok)
     local RPB, D = cfg.ROWS_PER_BLOCK, cfg.D
     return weights.E[floor((tok - 1) / RPB) + 1], ((tok - 1) % RPB) * D
 end
 
-local function Embed(tok)
+local function Embed(tok, x)
     local D = cfg.D
     local block, base = EmbeddingRow(tok)
-    local x = NewVector(D)
+    x = x or NewVector(D)
     for i = 1, D do
         x[i] = (byte(block, base + i) - 128) * 0.01
     end
@@ -299,6 +340,8 @@ local function Attend(q, keys, values, n, ctx, scores)
     return ctx
 end
 
+-- Every source token goes through the same matrices, so each layer runs them batched. All
+-- buffers are allocated once per pass and reused by every layer.
 local function Encode(src)
     local D, FF = cfg.D, cfg.FF
     local n = #src
@@ -306,42 +349,49 @@ local function Encode(src)
     for t = 1, n do
         X[t] = Embed(src[t])
     end
-    local ctx, scores, hidden, tmp = NewVector(D), NewVector(n), NewVector(FF), NewVector(D)
+    local Q, K, V = NewVectors(n, D), NewVectors(n, D), NewVectors(n, D)
+    local C, O, Hd = NewVectors(n, D), NewVectors(n, D), NewVectors(n, FF)
+    local scores = NewVector(n)
     for l = 1, cfg.ENC do
         local layer = weights.enc[l]
-        local Q, K, V = {}, {}, {}
+        MatVecMany(layer.q, X, Q, n)
+        MatVecMany(layer.k, X, K, n)
+        MatVecMany(layer.v, X, V, n)
         for t = 1, n do
-            Q[t] = MatVec(layer.q, X[t], NewVector(D))
-            K[t] = MatVec(layer.k, X[t], NewVector(D))
-            V[t] = MatVec(layer.v, X[t], NewVector(D))
+            Attend(Q[t], K, V, n, C[t], scores)
         end
+        MatVecMany(layer.o, C, O, n)
         for t = 1, n do
-            Attend(Q[t], K, V, n, ctx, scores)
-            local x = LayerNorm(AddInto(X[t], MatVec(layer.o, ctx, tmp)))
-            Relu(MatVec(layer.f1, x, hidden), FF)
-            X[t] = LayerNorm(AddInto(x, MatVec(layer.f2, hidden, tmp)))
+            LayerNorm(AddInto(X[t], O[t]))
+        end
+        MatVecMany(layer.f1, X, Hd, n)
+        for t = 1, n do
+            Relu(Hd[t], FF)
+        end
+        MatVecMany(layer.f2, Hd, O, n)
+        for t = 1, n do
+            LayerNorm(AddInto(X[t], O[t]))
         end
     end
     return X
 end
 
+-- The decoder makes one token at a time, so only the one-token kernel applies there.
 local function Decode(enc, steps)
     local D, FF = cfg.D, cfg.FF
     local n = #enc
     local crossK, crossV, cells = {}, {}, {}
     for l = 1, cfg.DEC do
-        crossK[l], crossV[l] = {}, {}
-        for u = 1, n do
-            crossK[l][u] = MatVec(weights.dec[l].ck, enc[u], NewVector(D))
-            crossV[l][u] = MatVec(weights.dec[l].cv, enc[u], NewVector(D))
-        end
+        crossK[l], crossV[l] = NewVectors(n, D), NewVectors(n, D)
+        MatVecMany(weights.dec[l].ck, enc, crossK[l], n)
+        MatVecMany(weights.dec[l].cv, enc, crossV[l], n)
         cells[l] = NewVector(D)
     end
     local ctx, scores, hidden, tmp = NewVector(D), NewVector(n), NewVector(FF), NewVector(D)
-    local fx, wx, q = NewVector(D), NewVector(D), NewVector(D)
-    local shortlist, tok = weights.shortlist, 1
-    for _ = 1, steps do
-        local x = Embed(tok)
+    local fx, wx, q, x = NewVector(D), NewVector(D), NewVector(D), NewVector(D)
+    local shortlist, tok, out = weights.shortlist, 1, {}
+    for step = 1, steps do
+        Embed(tok, x)
         for l = 1, cfg.DEC do
             local layer, c = weights.dec[l], cells[l]
             -- SSRU: f = sigmoid(Wf x), c = f*c + (1-f)*(W x), out = relu(c)
@@ -353,11 +403,11 @@ local function Decode(enc, steps)
                 c[i] = ci
                 tmp[i] = ci > 0 and ci or 0
             end
-            x = LayerNorm(AddInto(x, tmp))
+            LayerNorm(AddInto(x, tmp))
             Attend(MatVec(layer.cq, x, q), crossK[l], crossV[l], n, ctx, scores)
-            x = LayerNorm(AddInto(x, MatVec(layer.co, ctx, tmp)))
+            LayerNorm(AddInto(x, MatVec(layer.co, ctx, tmp)))
             Relu(MatVec(layer.f1, x, hidden), FF)
-            x = LayerNorm(AddInto(x, MatVec(layer.f2, hidden, tmp)))
+            LayerNorm(AddInto(x, MatVec(layer.f2, hidden, tmp)))
         end
         -- Output projection over the shortlist rows of the tied embedding, greedy pick.
         local best, bestRow = -1e30, 1
@@ -381,22 +431,34 @@ local function Decode(enc, steps)
         end
         macs = macs + #shortlist * D
         tok = shortlist[bestRow]
+        out[step] = tok
     end
+    return out
 end
 
 -- One full translation pass: srcPieces in, tgtPieces out. Returns the multiply-adds done.
 -- The model must already be built (Model.QueueBuild), so a timed job never includes the build.
-function Model.Forward(srcPieces, tgtPieces)
+function Model.Forward(srcPieces, tgtPieces, src)
     if not weights then
         error("simulated model is not built")
     end
     macs = 0
-    local src = {}
-    for t = 1, srcPieces do
-        src[t] = floor(random() * cfg.V) + 1
+    if not src then
+        src = {}
+        for t = 1, srcPieces do
+            src[t] = floor(random() * cfg.V) + 1
+        end
     end
-    Decode(Encode(src), tgtPieces)
-    return macs
+    local out = Decode(Encode(src), tgtPieces)
+    return macs, out
+end
+
+-- Multiply-adds of the batchable part (encoder and cross-attention keys/values) and of the
+-- one-token decoder steps, for projections with per-kernel speeds.
+function Model.EstimateMacsSplit(srcPieces, tgtPieces)
+    local D, FF, n = cfg.D, cfg.FF, srcPieces
+    local batched = cfg.ENC * n * (4 * D * D + 2 * D * FF + 2 * n * D) + cfg.DEC * n * 2 * D * D
+    return batched, Model.EstimateMacs(srcPieces, tgtPieces) - batched
 end
 
 -- Multiply-adds of one pass, from the shapes alone (matches what Forward counts).

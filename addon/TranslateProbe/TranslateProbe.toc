@@ -8,6 +8,7 @@
 Locales.lua
 Core.lua
 Scheduler.lua
+Kernels.lua
 Model.lua
 Bench.lua
 Glossary.lua
