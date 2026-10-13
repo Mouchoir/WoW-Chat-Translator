@@ -15,6 +15,7 @@ Glossary.lua
 Base64.lua
 Tokenizer.lua
 Engine.lua
+LangData.lua
 Lang.lua
 ChatButton.lua
 LockdownLog.lua

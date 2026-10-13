@@ -1,46 +1,48 @@
 -- Source language of a chat line, and the chain of model packs that translates it into the
 -- user's target language (Mozilla's models all go through English: de -> en -> fr).
--- Scripts decide first (Hangul, kana, Han, Cyrillic); Latin text is scored with common chat
--- words and letters specific to each language. Unknown Latin text counts as English.
+-- Scripts decide first (Hangul, kana, Han, Cyrillic). Latin text is scored with character
+-- trigram profiles (LangData.lua, built by tools/make_langid.py from the client's localized UI
+-- strings), plus strong hints: common chat words of each language and English game slang,
+-- and a small prior toward English, the usual language of public channels.
 local _, ns = ...
 
 local Lang = {}
 ns.Lang = Lang
 
-local byte = string.byte
+local byte, sub = string.byte, string.sub
 
 -- Languages the user can pick as target, and sources we may detect.
 Lang.TARGETS = { "fr", "en" }
-Lang.NAMES = { en = "EN", fr = "FR", de = "DE", es = "ES", ru = "RU", zh = "ZH", ko = "KO", ja = "JA", uk = "UK" }
+Lang.NAMES = { en = "EN", fr = "FR", de = "DE", es = "ES", it = "IT", pt = "PT", ru = "RU", zh = "ZH", ko = "KO",
+    ja = "JA", uk = "UK" }
 
-local WORDS = {
-    en = { "the", "and", "you", "is", "are", "for", "to", "of", "in", "it", "i", "me", "my", "we", "any", "anyone",
-        "need", "want", "have", "with", "this", "that", "what", "who", "how", "thanks", "thx", "please", "pls",
-        "can", "do", "not", "no", "yes", "on", "at", "be", "get", "go", "just", "will", "there", "here", "guys",
-        "lol", "lf", "lfm", "lfg", "wts", "wtb", "selling", "buying", "looking", "group", "quest", "dungeon", "help" },
-    fr = { "le", "la", "les", "un", "une", "des", "du", "et", "est", "je", "tu", "il", "elle", "nous", "vous",
-        "pour", "pas", "que", "qui", "quoi", "avec", "dans", "sur", "mais", "ou", "oui", "non", "merci", "salut",
-        "bonjour", "cherche", "besoin", "groupe", "donjon", "mdr", "svp", "stp", "quelqu'un", "c'est", "ça" },
-    de = { "der", "die", "das", "und", "ist", "ich", "du", "wir", "ihr", "sie", "nicht", "mit", "für", "auf",
-        "ein", "eine", "zu", "von", "wer", "was", "wie", "danke", "bitte", "hallo", "suche", "gruppe", "noch",
-        "auch", "kann", "hat", "jemand", "zusammen" },
-    es = { "el", "los", "las", "y", "yo", "por", "para", "con", "una", "uno", "alguien", "gracias", "hola",
-        "busco", "grupo", "quiere", "hay", "si", "mazmorra", "misión", "ayuda", "vamos", "pero", "muy" },
-}
-local LOOKUP = {}
-for lang, list in pairs(WORDS) do
-    for _, w in ipairs(list) do
-        LOOKUP[w] = LOOKUP[w] or {}
-        LOOKUP[w][#LOOKUP[w] + 1] = lang
-    end
+local ENGLISH_PRIOR = 2.0
+local SLANG_BONUS = 3.0
+local WORD_BONUS = 4.0
+
+-- English game slang: counts for English and is not scored by trigrams.
+local SLANG = {}
+for w in ("lf lfg lfm wts wtb wtt pst inv pls plz ty thx np gg wp gz afk brb omw idk nvm lol ok kk rdy "
+    .. "bg dm tank heal healer dps ffs omg wtf"):gmatch("%S+") do
+    SLANG[w] = true
 end
 
--- Letters that point to one language (UTF-8).
-local LETTERS = {
-    de = { "ß", "ä", "ö", "ü" },
-    es = { "ñ", "¿", "¡", "á", "í", "ó", "ú" },
-    fr = { "é", "è", "ê", "à", "ç", "ù", "œ", "â", "î", "ô", "û", "ë", "ï" },
+-- Short everyday chat words that point to one language.
+local WORDS = {
+    en = "hello hi hey yes yeah no thanks thank you please insane nice sorry mate guys anyone where what",
+    de = "danke bitte ja nein hallo moin servus klar genau jemand gruppe suche brauche wer was wo",
+    fr = "merci oui non salut bonjour bonsoir besoin cherche quelqu'un groupe svp stp mdr ouais",
+    es = "hola gracias sí si vale alguien grupo busco necesito dónde amigo",
+    it = "ciao grazie sì qualcuno gruppo cerco",
+    pt = "olá obrigado obrigada sim alguém grupo procuro",
 }
+local HINT = {}
+for lang, list in pairs(WORDS) do
+    for w in list:gmatch("%S+") do
+        HINT[w] = HINT[w] or {}
+        HINT[w][#HINT[w] + 1] = lang
+    end
+end
 
 -- Code point at s[i] and its byte length (s is assumed to be UTF-8).
 local function CodePoint(s, i)
@@ -94,23 +96,54 @@ function Lang.Detect(text)
     elseif latin == 0 then
         return nil
     end
-    local score = { en = 0, fr = 0, de = 0, es = 0 }
-    for word in s:lower():gmatch("[%a\128-\255']+") do
-        for _, lang in ipairs(LOOKUP[word] or {}) do
-            score[lang] = score[lang] + 1
-        end
+    return Lang.DetectLatin(s)
+end
+
+-- UTF-8 characters of a word.
+local function Chars(word)
+    local chars, i = {}, 1
+    while i <= #word do
+        local _, len = CodePoint(word, i)
+        chars[#chars + 1] = sub(word, i, i + len - 1)
+        i = i + len
     end
-    for lang, letters in pairs(LETTERS) do
-        for _, letter in ipairs(letters) do
-            if s:find(letter, 1, true) then
-                score[lang] = score[lang] + 1
+    return chars
+end
+
+-- Best Latin-script language of plain text: trigram log-probabilities plus hints.
+function Lang.DetectLatin(text)
+    local data = ns.LangData
+    local score = {}
+    for lang in pairs(data.trigrams) do
+        score[lang] = 0
+    end
+    score.en = (score.en or 0) + ENGLISH_PRIOR
+    text = text:gsub("https?://%S+", " "):lower()
+    for word in text:gmatch("[%a\128-\255']+") do
+        word = word:gsub("^'+", ""):gsub("'+$", "")
+        if word ~= "" then
+            if SLANG[word] then
+                score.en = score.en + SLANG_BONUS
+            else
+                for _, lang in ipairs(HINT[word] or {}) do
+                    score[lang] = score[lang] + WORD_BONUS
+                end
+                local chars = Chars(word)
+                table.insert(chars, 1, " ")
+                chars[#chars + 1] = " "
+                for k = 1, #chars - 2 do
+                    local g = chars[k] .. chars[k + 1] .. chars[k + 2]
+                    for lang, table3 in pairs(data.trigrams) do
+                        score[lang] = score[lang] + (table3[g] or data.floor[lang])
+                    end
+                end
             end
         end
     end
     local best, bestScore = "en", score.en
-    for _, lang in ipairs({ "fr", "de", "es" }) do
-        if score[lang] > bestScore then
-            best, bestScore = lang, score[lang]
+    for lang, value in pairs(score) do
+        if value > bestScore then
+            best, bestScore = lang, value
         end
     end
     return best

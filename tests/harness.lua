@@ -534,6 +534,23 @@ check(ns.Lang.Detect("salut, quelqu'un pour le donjon ?") == "fr", "French detec
 check(ns.Lang.Detect("¿Alguien quiere hacer la mazmorra?") == "es", "Spanish detected")
 check(ns.Lang.Detect("Привет всем") == "ru" and ns.Lang.Detect("你好，谢谢") == "zh"
     and ns.Lang.Detect("여기도 지금 호드 많나여~") == "ko", "Russian, Chinese and Korean detected by script")
+local samples = {
+    { "de", "(inkl. Speedruns/Split-Raids/BG intern). Kein ewiges PUG-Suchen mehr! Bei Interesse bewerben: https://discord.gg/AnimaDE" },
+    { "en", "youre lucky to live here" }, { "en", "LFM DM need tank" }, { "en", "insane" }, { "en", "gg" },
+    { "en", "lol ok" }, { "en", "WTS [Linen Cloth] x20, pst" }, { "en", "where is the flight master" },
+    { "de", "danke" }, { "de", "ja klar" }, { "de", "Suche Gruppe für die Elite-Quest" }, { "de", "wer hat lust auf strat" },
+    { "fr", "merci beaucoup" }, { "fr", "je cherche un groupe pour la quête" }, { "fr", "besoin d'un heal" },
+    { "es", "Gracias por la ayuda" }, { "es", "dónde está el maestro de vuelo" },
+    { "it", "qualcuno per il dungeon?" }, { "pt", "alguém quer fazer a masmorra?" },
+}
+local wrong = {}
+for _, sample in ipairs(samples) do
+    local got = ns.Lang.Detect(sample[2])
+    if got ~= sample[1] then
+        wrong[#wrong + 1] = sample[2] .. " -> " .. tostring(got)
+    end
+end
+check(#wrong == 0, "chat lines detected in their language (" .. table.concat(wrong, "; ") .. ")")
 local chain = ns.Lang.Chain("de", "fr")
 check(chain and chain[1] == "de-en" and chain[2] == "en-fr", "German to French goes through English")
 local none, why = ns.Lang.Chain("fr", "fr")
