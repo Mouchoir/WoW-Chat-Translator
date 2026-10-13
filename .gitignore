@@ -4,3 +4,4 @@ node_modules/
 scripts/dev.local.ps1
 models/
 build/
+__pycache__/
