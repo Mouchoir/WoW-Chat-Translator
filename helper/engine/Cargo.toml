@@ -1,0 +1,37 @@
+[package]
+name = "tp_engine"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "TranslateProbe local translation engine: llama-server lifecycle, prompt, placeholders, cache and queue"
+
+[dependencies]
+tp_bridge = { path = "../bridge" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# No TLS: the engine only talks to its own llama-server on 127.0.0.1.
+ureq = { version = "3.4.2", default-features = false, features = ["json"] }
+
+[dependencies.windows]
+version = "0.62.2"
+features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_System_Threading",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Performance",
+  "Win32_System_SystemInformation",
+  "Win32_System_LibraryLoader",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

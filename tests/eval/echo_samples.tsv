@@ -1,0 +1,19 @@
+# E1b echo set: 14 synthetic lines made mostly of chat abbreviations, in another language than
+# the target. Models tend to send such lines back unchanged. Same format as chat_samples.tsv
+# (pairs computed with the real Glossary.Extract). Used to compare the E1b variants that pass
+# the main corpus: evalprompt --samples tests\eval\echo_samples.tsv
+id	target	marked_text	pairs_json	expect
+ec01	fr	omw, 2 min	[["omw","j'arrive"]]	tr;use:omw=arrive|en route|chemin
+ec02	fr	idk where he is, ask the raid lead	[["idk","je ne sais pas"]]	tr;use:idk=sais pas|sait pas|aucune idee;word=raid
+ec03	fr	np, have fun	[["np","pas de souci"]]	tr;use:np=souci|probleme|de rien|t'inquiete;word=amus|profit|bon jeu
+ec04	fr	ty all, see you tomorrow	[["ty","merci"]]	tr;use:ty=merci;word=demain
+ec05	fr	nvm, found one	[["nvm","laisse tomber"]]	tr;use:nvm=laisse tomber|oublie|pas grave|tant pis;word=trouv
+ec06	en	qqn pour strat ce soir ? besoin heal	[["strat","Stratholme / strategy"]]	tr;keep:strat;word=tonight|anyone|someone|need
+ec07	en	jsp, demande au chef de raid	[]	tr;word=ask
+ec08	en	brb, je mange	[["brb","be right back"]]	tr;use:brb=back;word=eat|lunch|dinner|food
+ec09	de	brb, pls wait for me	[["brb","be right back"],["pls","please"]]	tr;use:brb=zuruck|gleich;use:pls=bitte;word=wart
+ec10	de	ty for the summ	[["ty","thank you"],["summ","summon"]]	tr;use:ty=danke;keep:summ;word=fur
+ec11	es	omw, 5 min	[["omw","on my way"]]	tr;use:omw=camino|voy|llego
+ec12	ru	gz all, gg	[["gz","congratulations"],["gg","good game"]]	tr;use:gz=поздрав;keep:gg
+ec13	zh	thx all, gg	[["thx","thanks"],["gg","good game"]]	tr;use:thx=谢;keep:gg
+ec14	ko	ty for the group	[["ty","thank you"]]	tr;use:ty=감사|고마|고맙;word=파티|그룹

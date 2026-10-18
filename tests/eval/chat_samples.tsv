@@ -1,0 +1,57 @@
+# E1/E1b evaluation corpus for tp_engine (design section P3, docs/ENGINE.md section 10). 40
+# synthetic lines, written for this test: no real chat, no real player names. Tab-separated.
+# marked_text:  and  stand for the 0x02/0x03 marks the addon puts around links and {...} groups.
+# pairs_json: the glossary pairs the addon sends for this line and target, computed with the real
+#   Glossary.Extract (built-in entries and false friends; meanings in French for fr, English for
+#   every other target). en02 adds one user entry (mp = whisper).
+# expect, ";"-separated: "same" (already in the target language) or "tr" (needs a translation), then
+#   use:<term>=a|b  must-use pair: one alternative must appear in the shown text (lowercase, Latin
+#                   accents removed). Chat words, false friends and full names are must-use.
+#   keep:<term>     keep-allowed pair: a game abbreviation players type as-is in every language
+#                   (LFM, WTS, pst, DPS, HC, AFK, GG...); it may stay as typed (the addon's
+#                   glossary row explains it). Same list as prompt::keep_allowed in the engine.
+#   name=a|b        official localized name (dungeon, zone, city) that must appear.
+#   word=a|b        content word showing the line was really translated.
+#   Every pair is classified exactly once. The shown text is the output, or the source line when
+#   the answer is Same.
+id	target	marked_text	pairs_json	expect
+fr01	fr	lfm hc deadmines need 1 tank and 2 dps, pst	[["lfm","cherche des membres"],["dps","personnage qui inflige des dégâts"],["pst","chuchotez-moi"]]	tr;keep:lfm;keep:dps;keep:pst;name=mortemines
+fr02	fr	wts \2[Linen Cloth]\3 x20 cheap, pst	[["wts","vend"],["cheap","pas cher"],["pst","chuchotez-moi"]]	tr;keep:wts;use:cheap=pas cher|bon marche|peu cher|petit prix|prix bas;keep:pst
+fr03	fr	anyone know where the portal to Stormwind is in Orgrimmar?	[]	tr;name=hurlevent
+fr04	fr	thx for the group guys, gg	[["thx","merci"],["gg","bien joué"]]	tr;use:thx=merci;keep:gg
+fr05	fr	mark \2{skull}\3 first then \2{cross}\3, dont pull the patrol	[]	tr;word=patrouill
+fr06	fr	wtb \2[Copper Ore]\3 and \2[Tin Ore]\3, paying well	[["wtb","achète"]]	tr;keep:wtb
+fr07	fr	brb 5 min, need to feed the cat	[["brb","je reviens"]]	tr;use:brb=reviens|reviendr|retour
+fr08	fr	can someone summon me to \2[Blackrock Depths]\3? i will tip	[]	tr;word=quelqu|qqn|qq1
+fr09	fr	LF healer for heroic dungeon, the group finder is broken lol	[["LF","cherche"]]	tr;keep:LF;word=donjon
+fr10	fr	gz on \2[Thunderfury, Blessed Blade of the Windseeker]\3 !!	[["gz","félicitations"]]	tr;use:gz=felicit|bravo|chapeau
+fr11	fr	salut tout le monde, quelqu'un pour faire le donjon ce soir ?	[]	same
+fr12	fr	inv me pls, i have the key for \2[Upper Blackrock Spire]\3	[["inv","invite / inventaire"],["pls","s'il te plaît"]]	tr;keep:inv;use:pls=plait|stp|svp
+fr13	fr	afk 10 min, dinner is ready	[["afk","absent"]]	tr;keep:afk;word=diner|repas|manger|bouffe|a table
+fr14	fr	有人一起去刷\2[熔火之心]\3吗？缺坦克	[]	tr;word=tank
+fr15	fr	suche Gruppe für die Todesminen, bin Heiler	[]	tr;name=mortemines
+fr16	fr	кто-нибудь продаёт \2[Runecloth]\3? куплю дорого	[]	tr;word=vend|achet
+en01	en	cherche groupe pour les Mortemines, il manque un tank	[]	tr;name=deadmines
+en02	en	vds \2[Étoffe de lin]\3 pas cher, mp moi	[["mp","whisper"]]	tr;use:mp=whisper|message|pm|dm|tell|msg
+en03	en	kann mir jemand \2[Seidenstoff]\3 verkaufen? zahle gut	[]	tr;word=sell|pay
+en04	en	alguien para la Masacre? falta un sanador	[]	tr;name=dire maul
+en05	en	ищу группу в \2[Глубины Черной горы]\3, нужен танк	[]	tr;word=group|party
+en06	en	求组\2[熔火之心]\3，来个治疗	[]	tr;word=heal
+en07	en	파티 구해요 \2[검은바위 나락]\3 탱커 있어요	[]	tr;word=party|group
+en08	en	anyone selling \2[Silk Cloth]\3? paying 5g a stack	[]	same
+en09	en	lf heal pour hc, pst	[["lf","looking for"],["pst","please send tell"]]	tr;keep:lf;keep:pst;word=for hc|for heroic|for a heroic|for the heroic
+en10	en	wts \2[Arkanitbarren]\3, billig, schreibt mir	[["wts","want to sell"]]	tr;keep:wts;word=cheap|low price|bargain
+de01	de	lfm \2[Stratholme]\3 need healer, pst, thx	[["lfm","looking for more"],["pst","please send tell"],["thx","thanks"]]	tr;keep:lfm;keep:pst;use:thx=danke|dank
+de02	de	hat jemand Lust auf eine Runde im \2[Arathibecken]\3?	[]	same
+de03	de	\2{skull}\3 kill first, then \2{moon}\3 gets sheeped	[]	tr;word=zuerst|erst
+de04	de	merci pour le groupe, à demain	[]	tr;word=danke|gruppe
+es01	es	wtb \2[Mageweave Cloth]\3, pst with price, ty	[["wtb","want to buy"],["pst","please send tell"],["ty","thank you"]]	tr;keep:wtb;keep:pst;use:ty=gracias
+es02	es	hola a todos, ¿alguien quiere hacer la mazmorra conmigo?	[]	same
+es03	es	need 1 more dps for \2[Zul'Farrak]\3	[["dps","damage dealer"]]	tr;keep:dps;word=necesit|falta|busc
+ru01	ru	lfg \2[Molten Core]\3, i am a warrior tank, brb	[["lfg","looking for group"],["brb","be right back"]]	tr;keep:lfg;use:brb=верн|отойд
+ru02	ru	thanks for the help, have a nice evening	[]	tr;word=спасиб
+zh01	zh	wts \2[Linen Cloth]\3 cheap, pst	[["wts","want to sell"],["pst","please send tell"]]	tr;keep:wts;keep:pst;word=便宜|低价|实惠|廉价
+zh02	zh	where is the flight master in Ironforge?	[]	tr;name=铁炉堡
+zh03	zh	on fait \2{skull}\3 en premier	[]	tr;word=先
+ko01	ko	안녕하세요 같이 던전 가실 분?	[]	same
+ko02	ko	lfm \2[Ragefire Chasm]\3 need tank, thx	[["lfm","looking for more"],["thx","thanks"]]	tr;keep:lfm;use:thx=감사|고마|고맙|땡큐
