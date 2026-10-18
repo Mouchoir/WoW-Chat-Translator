@@ -24,11 +24,13 @@ local WATCH_SECONDS = 0.5
 local SCAN_SECONDS = 15        -- read-only slot scan from the watcher, at most this often
 local INDENT = "    "           -- the 4 spaces before each row (ChatButton's SUFFIX_START)
 local FALLBACK_ROWS = 2
+local MAX_ROWS = 6              -- TRANSLATE rows 1..6 (4 until 2026-10-18: German into French was cut)
+Reserve.MAX_ROWS = MAX_ROWS
 local TEX_PROBE = "|TInterface\\Buttons\\WHITE8X8:10:100|t"   -- 100 texture units wide
 
 -- Source script > target script -> how much longer the translation usually is.
 local FACTOR = {
-    ["latin>latin"] = 1.25, ["cyrillic>latin"] = 1.2, ["latin>cyrillic"] = 1.2,
+    ["latin>latin"] = 1.35, ["cyrillic>latin"] = 1.2, ["latin>cyrillic"] = 1.2,
     ["han>latin"] = 2.2, ["kana>latin"] = 2.2, ["hangul>latin"] = 1.8,
     ["han>cyrillic"] = 2.2, ["hangul>cyrillic"] = 1.8,
     ["latin>han"] = 0.8, ["cyrillic>han"] = 0.8, ["latin>hangul"] = 1.0,
@@ -124,7 +126,7 @@ function Reserve.Metrics(chatFrame)
     end
 end
 
--- Number of reserved rows (1..4) for a line: its width in plates, times how much longer the
+-- Number of reserved rows (1..MAX_ROWS) for a line: its width in plates, times how much longer the
 -- target script usually is.
 function Reserve.EstimateRows(chatFrame, visibleText, target)
     local m = Reserve.Metrics(chatFrame)
@@ -140,10 +142,12 @@ function Reserve.EstimateRows(chatFrame, visibleText, target)
     local rowsSrc = width * m.eff / (m.plateW * m.tex * m.eff)
     local script = ns.Lang.Script(visibleText)
     local f = script and FACTOR[script .. ">" .. ns.Lang.TargetScript(target)] or DEFAULT_FACTOR
-    return min(4, max(1, ceil(rowsSrc * f - 0.15)))
+    return min(MAX_ROWS, max(1, ceil(rowsSrc * f - 0.15)))
 end
 
--- The K reserved rows of a slot: tag, then the plate.
+-- The K reserved rows of a slot: tag, then the plate. The tag's row field has 2 bits, so rows 4
+-- and 5 carry 0 and 1 again (Bridge.TagDigits takes row % 4); the helper numbers a card's rows on
+-- from its first visible tag (docs\BRIDGE.md).
 function Reserve.Rows(m, slot, K)
     local rows, sessBit = {}, ns.sessionId % 2
     for r = 0, K - 1 do

@@ -32,7 +32,11 @@ local function Flags(shift)
     return (shift and FLAG_NO_CACHE or 0) + (ns.Reserve.PLATE and FLAG_PLATE or 0)
 end
 
+-- Every TRANSLATE goes out with a VIEW just before it, changed or not: a helper started (or
+-- restarted) after the last VIEW knows the chat rectangles at the first click, instead of
+-- staying in its discovery scan (about 15 more bytes on the strip).
 local function SendTranslate(a, marked, glossPairs)
+    ns.Reserve.SyncView(true)
     ns.Bridge.Send(ns.Bridge.TranslateMessage(a.reqId, a.slot, a.K, a.flags, a.target, marked, glossPairs))
 end
 
@@ -149,7 +153,6 @@ function Request.Start(lineID, chatFrame, shift)
     end
     deferredRow[lineID] = nil
 
-    ns.Reserve.SyncView(false)    -- first send of the session, or the chat moved
     a = { reqId = NextReqId(), slot = slot, K = K, target = target, flags = Flags(shift) }
     active[lineID] = a
     byReq[a.reqId] = lineID

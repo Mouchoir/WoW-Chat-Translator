@@ -1,4 +1,4 @@
--- Slash commands: /tprobe (alias /tpr).
+-- Slash commands: /tprobe (alias /tpr). /tpr alone opens the options panel (Options.lua).
 local _, ns = ...
 local L = ns.L
 
@@ -43,10 +43,18 @@ end
 
 local function Help()
     ns.Print(L.HELP_HEADER)
-    for _, key in ipairs({ "HELP_INFO", "HELP_TARGET", "HELP_NAMES", "HELP_SHOW", "HELP_MODE", "HELP_TRANSLIT",
-        "HELP_GLOSS", "HELP_TEST", "HELP_TEST_ROWS", "HELP_TEST_LOCKDOWN", "HELP_CLEAR", "HELP_APP", "HELP_DEBUG",
-        "HELP_CLICK" }) do
+    for _, key in ipairs({ "HELP_OPTIONS", "HELP_INFO", "HELP_TARGET", "HELP_NAMES", "HELP_SHOW", "HELP_MODE",
+        "HELP_TRANSLIT", "HELP_GLOSS", "HELP_TEST", "HELP_TEST_ROWS", "HELP_TEST_LOCKDOWN", "HELP_CLEAR", "HELP_APP",
+        "HELP_DEBUG", "HELP_HELP", "HELP_CLICK" }) do
         ns.Print(L[key])
+    end
+end
+
+-- /tpr and /tpr options: the options panel, or the command list when the panel is missing.
+local function OpenOptions()
+    if not ns.Options.Open() then
+        ns.Print(L.OPTIONS_NA)
+        Help()
     end
 end
 
@@ -62,19 +70,23 @@ local function Label(key)
     return key:find("[\128-\255]") and key or key:upper()
 end
 
--- /tpr gloss add|del|list|test ...
+-- /tpr gloss add|del|list|test ... Meanings are stored for the current target language (the
+-- options panel stores the same way, through the same Glossary functions).
 local function Gloss(arg)
     local action, rest = arg:match("^(%S*)%s*(.-)$")
     action = action:lower()
     local custom = ns.db.glossary
+    local target = ns.db.target
     if action == "add" then
         local key, text = rest:match("^(" .. ns.Glossary.KEY_PATTERN .. ")%s+(.-)$")
-        if not key or text == "" then
+        if not key or ns.Glossary.CleanMeaning(text) == "" then
             ns.Print(L.GLOSS_HELP_ADD)
             return
         end
-        custom[key:lower()] = ns.Bridge.Utf8Cut((text:gsub("|", "/")), 120)
-        ns.Printf(L.GLOSS_ADDED, Label(key), custom[key:lower()])
+        key = key:lower()
+        local stored = ns.Glossary.SetMeaning(key, target, text) or ns.Glossary.BuiltinMeaning(key, target) or ""
+        ns.Printf(L.GLOSS_ADDED, Label(key), stored)
+        ns.Options.Changed("glossary")
     elseif action == "del" then
         local key = rest:match("^(" .. ns.Glossary.KEY_PATTERN .. ")$")
         if not key then
@@ -82,12 +94,9 @@ local function Gloss(arg)
             return
         end
         key = key:lower()
-        if ns.Glossary.IsBuiltin(key) then
-            custom[key] = false
-        else
-            custom[key] = nil
-        end
+        ns.Glossary.Remove(key)
         ns.Printf(L.GLOSS_REMOVED, Label(key))
+        ns.Options.Changed("glossary")
     elseif action == "list" then
         local keys = {}
         for key in pairs(custom) do
@@ -99,7 +108,11 @@ local function Gloss(arg)
             ns.Print(L.GLOSS_NO_CUSTOM)
         end
         for _, key in ipairs(keys) do
-            ns.Printf(L.GLOSS_ENTRY, Label(key), custom[key] == false and L.GLOSS_DISABLED or custom[key])
+            local value = custom[key]
+            -- a built-in key without a user meaning for this target sends its built-in one
+            local shown = value == false and L.GLOSS_DISABLED or ns.Glossary.UserMeaning(value, target)
+                or ns.Glossary.BuiltinMeaning(key, target) or L.GLOSS_NO_MEANING:format(TargetName(target))
+            ns.Printf(L.GLOSS_ENTRY, Label(key), shown)
         end
     elseif action == "test" and rest ~= "" then
         ns.Print(ns.Glossary.Describe(rest, ns.db.target) or L.SUFFIX_NO_GLOSS)
@@ -189,18 +202,22 @@ local function OnOff(arg, key, onText, offText)
     arg = arg:lower()
     if arg == "on" or arg == "off" then
         ns.db[key] = arg == "on"
+        ns.Options.Changed(key)
     end
     ns.Print(ns.db[key] and onText or offText)
 end
 
 local handlers = {
+    [""] = OpenOptions,
+    options = OpenOptions,
     info = PrintInfo,
     help = Help,
     target = function(arg)
         arg = arg:lower()
         for _, t in ipairs(ns.Lang.TARGETS) do
             if t:lower() == arg then
-                ns.db.target = t
+                ns.Options.SetTarget(t)
+                ns.Options.Changed("target")
             end
         end
         ns.Printf(L.TARGET_IS, TargetName(ns.db.target), table.concat(ns.Lang.TARGETS, ", "))
@@ -214,8 +231,8 @@ local handlers = {
     mode = function(arg)
         arg = arg:lower()
         if MODES[arg] then
-            ns.db.mode = arg
-            ns.Bridge.SetMode(arg)
+            ns.Options.SetMode(arg)
+            ns.Options.Changed("mode")
         else
             ns.Print(L.HELP_MODE)
         end

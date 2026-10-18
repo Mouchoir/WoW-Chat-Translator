@@ -78,8 +78,15 @@ local fixture = {
     results = { models = {}, clicks = {}, throttles = {}, bench = { int8Rate = 1.5, floatRate = 3.2, maxSliceMs = 8 },
         client = { build = "1.60.1.70338", limits = { luaScriptBucketThrottleMaxMsPerSecondNormal = 800 } } },
     target = "xx", names = "yes", mode = "turbo", helpShown = "x", glossShow = 1, futureKey = { 1, 2, 3 },
+    display = "tab",   -- the chat tab display mode of an unreleased build, dropped since
     glossary = { hot = "Hall of Thanes", zz = false, ["été"] = "summer", ["bad key"] = "x", num = 5,
-        long = string.rep("a", 121), [7] = "x" },
+        long = string.rep("a", 121), [7] = "x",
+        -- per-target meanings: invalid targets and meanings dropped, the rest kept
+        wbx = { fr = "boss du monde", de = "Weltboss", ["*"] = "world boss", xx = "bad target", en = string.rep("e", 121),
+            ru = 5 },
+        nomeaning = {},
+        -- "" hides the every-target meaning for one target; without "*" it means nothing
+        hidden = { ["*"] = "all", fr = "" }, lonely = { fr = "", de = "Sinn" } },
 }
 for i = 1, 400 do
     fixture.log[i] = { t = 1760000000 + i, e = "CHANNEL", s = i % 2, l = 0, r = "", c = "none" }
@@ -253,11 +260,11 @@ local function Utf8Len(s)
     end
     return n
 end
--- Expected K with the mock font metrics (0.5 x font height per character).
+-- Expected K with the mock font metrics (0.5 x font height per character), at most 6 rows.
 local function ExpectedK(text, plateW, fontH, factor)
     local width = 0.5 * fontH * Utf8Len(G.VisibleText(text))
     local rowsSrc = width / plateW     -- not rounded up before the factor
-    return math.min(4, math.max(1, math.ceil(rowsSrc * factor - 0.15)))
+    return math.min(6, math.max(1, math.ceil(rowsSrc * factor - 0.15)))
 end
 local function RowsFor(cf, lineID, slot, K, instant)
     local m = Reserve.Metrics(cf)
@@ -277,7 +284,7 @@ check(not fr or L.LOADED:find("Tape", 1, true), "French strings on frFR")
 check(SLASH_TRANSLATEPROBE1 == "/tprobe" and SLASH_TRANSLATEPROBE2 == "/tpr" and slashFn ~= nil, "slash command registered")
 check(type(ns.sessionId) == "number" and ns.sessionId >= 1 and ns.sessionId <= 65535 and ns.session == tostring(ns.sessionId),
     "session id is a u16 and its string form is used in links")
-check(ns.ADDON_BUILD == 1 and Bridge.VERSION == 2 and Bridge.TEST_SLOT == 127, "addon build 1, bridge v2")
+check(ns.ADDON_BUILD == 2 and Bridge.VERSION == 2 and Bridge.TEST_SLOT == 127, "addon build 2, bridge v2")
 check(CountPrinted((L.INIT_FAILED:gsub("%%s", ""))) == 0, "no init failure printed")
 
 section("bridge builders")
@@ -331,15 +338,28 @@ for key in pairs(db) do
     end
 end
 check(#extra == 0, "only whitelisted keys are left (" .. table.concat(extra, ", ") .. ")")
-check(db.schema == 2 and db.mode == "auto" and db.names == false and db.glossShow == true and db.helpShown == nil,
-    "schema 2, invalid settings back to their defaults")
+check(db.schema == 3 and db.mode == "auto" and db.names == false and db.glossShow == true and db.helpShown == nil,
+    "schema 3, invalid settings back to their defaults")
 check(db.target == (fr and "fr" or "en"), "an unknown target falls back to the client locale")
 check(db.glossary.hot == "Hall of Thanes" and db.glossary.zz == false and db.glossary["été"] == "summer",
     "valid glossary entries kept")
 check(db.glossary["bad key"] == nil and db.glossary.num == nil and db.glossary.long == nil and db.glossary[7] == nil,
     "invalid glossary entries dropped")
+check(db.display == nil, "the dropped display setting (chat tab mode) is purged")
+local wbx = db.glossary.wbx
+local wbxKeys = {}
+for k in pairs(type(wbx) == "table" and wbx or {}) do
+    wbxKeys[#wbxKeys + 1] = k
+end
+table.sort(wbxKeys)
+check(table.concat(wbxKeys, ",") == "*,de,fr" and wbx.fr == "boss du monde" and type(db.glossary.nomeaning) == "table",
+    "per-target glossary meanings kept, invalid targets and meanings dropped")
 check(Size(db) < 2048, "saved variables now under 2 KB (" .. Size(db) .. " bytes)")
-db.glossary.hot, db.glossary.zz = nil, nil
+check(type(db.glossary.hidden) == "table" and db.glossary.hidden.fr == "" and db.glossary.hidden["*"] == "all"
+    and type(db.glossary.lonely) == "table" and db.glossary.lonely.fr == nil and db.glossary.lonely.de == "Sinn",
+    "an empty marker is kept next to an every-target meaning, dropped without one")
+db.glossary.hot, db.glossary.zz, db.glossary.wbx, db.glossary.nomeaning = nil, nil, nil, nil
+db.glossary.hidden, db.glossary.lonely = nil, nil
 
 section("session hygiene")
 local old1 = M.History(ChatFrame1)[1]
@@ -395,7 +415,7 @@ local view = msgs[1].views and msgs[1].views[1]
 check(msgs[1].views and #msgs[1].views == 1 and view.id == 1 and view.x == 28 and view.y == 686 and view.w == 563
     and view.h == 253 and view.fontPx == 20 and view.rowPx == 20, "VIEW: the shown chat frame in physical px")
 local tr = msgs[2]
-local K = ExpectedK(clickText, 290, 14, 1.25)
+local K = ExpectedK(clickText, 290, 14, 1.35)
 check(tr.slot == 0 and tr.rows == K and tr.reqId == 1 and tr.flags == 2, "TRANSLATE: slot 0, K rows, plate flag, no noCache")
 check(tr.target == db.target, "TRANSLATE: target is the saved target")
 check(tr.text:find("\2[Linen Cloth]\3", 1, true) and tr.text:find("\2{skull}\3", 1, true), "real item link and {skull} are marked")
@@ -485,6 +505,9 @@ M.Click(ButtonOf(clicked))
 msgs = Since(n0, "translate")
 check(#msgs == 1 and msgs[1].reqId == tr1.reqId and msgs[1].slot == tr1.slot and msgs[1].flags == 2,
     "a plain re-click sends the same request again")
+local resent = Since(n0)
+check(#resent == 2 and resent[1].kind == "view" and resent[2].kind == "translate",
+    "every TRANSLATE follows a VIEW, unchanged or not (a restarted helper leaves discovery at once)")
 check(EntryFor(ChatFrame1, clicked).message == e1c, "rows unchanged by a re-click")
 M.Tick(61)
 n0 = #sent
@@ -658,21 +681,34 @@ n0 = #sent
 M.Click(ButtonOf(longLine))
 msgs = Since(n0, "translate")
 check(#msgs == 1 and msgs[1].ok and #msgs[1].text <= 1024 and Count(msgs[1].text, "\2") == Count(msgs[1].text, "\3")
-    and msgs[1].rows == 4, "a long line: text cut on its own, 4 rows reserved")
+    and msgs[1].rows == 6, "a long line: text cut on its own, 6 rows reserved")
+local longEntry = EntryFor(ChatFrame1, longLine).message
+local longSlot = msgs[1].slot
+check(Lines(longEntry) == 6 and Count(longEntry, "|TInterface\\Buttons\\WHITE8X8:") == 9 * 6
+    and longEntry:find(RowsFor(ChatFrame1, longLine, longSlot, 6), 1, true),
+    "6 reserved rows under the line, each a tag and a plate")
+check(Bridge.TagMarkup(longSlot, 4, 1, 4, 14) == Bridge.TagMarkup(longSlot, 0, 1, 4, 14)
+    and Bridge.TagMarkup(longSlot, 5, 1, 4, 14) == Bridge.TagMarkup(longSlot, 1, 1, 4, 14)
+    and Bridge.TagMarkup(longSlot, 3, 1, 4, 14) ~= Bridge.TagMarkup(longSlot, 0, 1, 4, 14),
+    "rows 4 and 5 carry tag rows 0 and 1 (the tag's row field has 2 bits)")
 M.Tick(61)
 M.Click("addon:TranslateProbe:x:" .. ns.session .. ":" .. longLine)
 
 section("rows estimate")
-check(ExpectedK("gg", 290, 14, 1.25) == 1 and Reserve.EstimateRows(ChatFrame1, "gg", "fr") == 1,
+check(ExpectedK("gg", 290, 14, 1.35) == 1 and Reserve.EstimateRows(ChatFrame1, "gg", "fr") == 1,
     "a short Latin line reserves one row (the width ratio is not rounded up first)")
 -- mock widths: 7 units per character against a 290-unit plate
 check(Reserve.EstimateRows(ChatFrame1, string.rep("w", 50), "fr") == 2
     and Reserve.EstimateRows(ChatFrame1, string.rep("word ", 18), "en") == 3,
-    "Latin into Latin: width in plates x1.25, rounded up")
+    "Latin into Latin: width in plates x1.35, rounded up")
+local german = string.rep("wort ", 26)
+check(ExpectedK(german, 290, 14, 1.25) == 4 and Reserve.EstimateRows(ChatFrame1, german, "fr") == 5,
+    "a line that x1.25 sized to 4 rows (German into French, cut in game) now gets 5")
 check(Reserve.EstimateRows(ChatFrame1, "gg", "ko") == 1 and Reserve.EstimateRows(ChatFrame1, "gg", "zh") == 1,
     "Latin into Korean or Chinese: 1 row")
 check(Reserve.EstimateRows(ChatFrame1, string.rep("你", 50), "en") == 3, "Chinese into English: x2.2")
-check(Reserve.EstimateRows(ChatFrame1, string.rep("word ", 200), "en") == 4, "never more than 4 rows")
+check(Reserve.MAX_ROWS == 6 and Reserve.EstimateRows(ChatFrame1, string.rep("word ", 200), "en") == 6,
+    "never more than 6 rows")
 check(Reserve.EstimateRows(ChatFrame1, string.rep("1", 70), "en") == 3, "no letters: the default factor (x1.3)")
 check(Reserve.EstimateRows(ChatFrame1, "", "en") == 1, "an empty text reserves one row")
 do
@@ -798,7 +834,11 @@ check(G.Extract("lfm", "de")[1][2] == "looking for more" and G.Extract("lfm", "z
 check(G.Extract("dm", "fr")[1][2] == "Les Mortemines / Hache-Tripes / message privé", "several meanings joined with /")
 slash("gloss add hot Hall of Thanes")
 check(G.Describe("hot") == L.GLOSS_PAIR:format("HOT", "Hall of Thanes"), "custom entry replaces a built-in")
-local ordered = G.Extract("lfm and hot", "fr")
+local otherTarget = fr and "en" or "fr"
+check(type(db.glossary.hot) == "table" and db.glossary.hot[db.target] == "Hall of Thanes"
+    and G.Extract("hot", otherTarget)[1][2] ~= "Hall of Thanes",
+    "gloss add stores the meaning for the current target only (other targets keep the built-in)")
+local ordered = G.Extract("lfm and hot", db.target)
 check(ordered[1][1] == "hot" and ordered[1][2] == "Hall of Thanes" and ordered[2][1] == "lfm", "user entries first in the pairs")
 slash("gloss del hot")
 check(G.Describe("hot") == nil and db.glossary.hot == false and #G.Extract("hot", "fr") == 0,
@@ -824,8 +864,8 @@ local big = string.rep("m", 150)
 for k = 1, 5 do
     slash("gloss add uu" .. k .. " " .. big)
 end
-check(#db.glossary.uu1 == 120, "custom meanings are kept to 120 bytes")
-local capped = G.Extract("uu1 uu2 uu3 uu4 uu5", "en")
+check(#G.UserMeaning(db.glossary.uu1, db.target) == 120, "custom meanings are kept to 120 bytes")
+local capped = G.Extract("uu1 uu2 uu3 uu4 uu5", db.target)
 local used = 0
 for _, p in ipairs(capped) do
     used = used + 2 + #p[1] + #p[2]
@@ -833,11 +873,270 @@ end
 check(#capped == 4 and used <= 512, "pairs stop before 512 bytes")
 local longKey = string.rep("k", 50)
 slash("gloss add " .. longKey .. " long key")
-check(#G.Extract(longKey, "en")[1][1] == 48, "terms cut to 48 bytes")
+check(#G.Extract(longKey, db.target)[1][1] == 48, "terms cut to 48 bytes")
 for k = 1, 5 do
     slash("gloss del uu" .. k)
 end
 slash("gloss del " .. longKey)
+
+---------------------------------------------------------------------------------------------
+section("options panel")
+local S = M.Settings()
+local Options = ns.Options
+local main = Options.Category()
+check(main and #S.addOn == 1 and S.addOn[1] == main and main.kind == "vertical" and main.name == "TranslateProbe",
+    "one add-on category registered without errors (vertical layout, named after the addon)")
+local function Setting(key)
+    return S.settings["TranslateProbe_" .. key]
+end
+check(Setting("target") and Setting("glossShow") and Setting("names") and Setting("mode") and Setting("display") == nil,
+    "settings: target, glossary row, names and bridge mode, no display setting")
+local kinds, targetInit = {}, nil
+for _, init in ipairs(S.initializers) do
+    kinds[#kinds + 1] = init.kind .. ":" .. init.setting.variable:gsub("^TranslateProbe_", "")
+    if init.setting == Setting("target") then
+        targetInit = init
+    end
+end
+check(table.concat(kinds, ",") == "dropdown:target,checkbox:glossShow,checkbox:names,dropdown:mode",
+    "controls in order: target dropdown, two checkboxes, bridge mode dropdown")
+local values, labels = {}, {}
+for i, o in ipairs(targetInit and targetInit.options() or {}) do
+    values[i], labels[i] = o.value, o.label
+end
+check(table.concat(values, ",") == table.concat(ns.Lang.TARGETS, ",") and table.concat(labels, ",")
+    == "English,Français,Deutsch,Español,Italiano,Português,Русский,한국어,简体中文,繁體中文",
+    "target dropdown: every target, each named in its own language")
+local home = db.target
+Setting("target"):SetValue("de")
+check(db.target == "de" and Setting("target"):GetValue() == "de", "the target dropdown sets the saved target")
+Setting("target"):SetValue("xx")
+check(db.target == "de", "an unknown target value is ignored")
+Setting("glossShow"):SetValue(false)
+check(db.glossShow == false and Setting("glossShow"):GetValue() == false, "glossary row checkbox")
+Setting("glossShow"):SetValue(true)
+Setting("names"):SetValue(true)
+check(db.names == true and Setting("names"):GetValue() == true, "romanized names checkbox")
+Setting("names"):SetValue(false)
+Setting("mode"):SetValue("robust")
+check(db.mode == "robust" and Bridge.ModeName() == "robust", "bridge mode dropdown")
+Setting("mode"):SetValue("auto")
+check(db.mode == "auto" and Bridge.ModeName() == "dense", "bridge mode back to auto")
+
+local openedBefore = #S.opened
+slash("")
+slash("options")
+check(#S.opened == openedBefore + 2 and S.opened[#S.opened] == main:GetID(),
+    "/tpr and /tpr options open the panel on the addon's page")
+local realOpen = Settings.OpenToCategory
+Settings.OpenToCategory = nil
+local helpBefore = CountPrinted(L.HELP_CLICK)
+slash("")
+check(Printed(L.OPTIONS_NA) and CountPrinted(L.HELP_CLICK) == helpBefore + 1,
+    "without the settings panel, /tpr prints the command list")
+Settings.OpenToCategory = realOpen
+
+local gcat
+for _, c in ipairs(S.categories) do
+    if c.parent == main then
+        gcat = c
+    end
+end
+check(gcat and gcat.kind == "canvas" and gcat.name == L.GLOSS_PAGE, "glossary subpage registered (canvas layout)")
+check(not (Options.Page() and Options.Page().built), "the glossary page is built only when first shown")
+M.ShowCanvas(gcat)
+local page = Options.Page()
+check(page and page.built and page.title:GetText() == L.GLOSS_PAGE_TITLE:format("Deutsch"),
+    "glossary page shown: its title names the target in its own language")
+local function RowFor(key)
+    Options.RefreshGlossary()
+    for i, entry in ipairs(page.entries) do
+        if entry.key == key then
+            page.offset = i - 1
+            Options.RefreshGlossary()
+            for _, row in ipairs(page.rows) do
+                if row.entry and row.entry.key == key and row:IsShown() then
+                    return row
+                end
+            end
+        end
+    end
+end
+local function KeyCount(t)
+    local n = 0
+    for _ in pairs(t) do
+        n = n + 1
+    end
+    return n
+end
+local lfmRow = RowFor("lfm")
+check(lfmRow and lfmRow.edit:GetText() == "looking for more" and lfmRow.mark:GetText() == L.GLOSS_MARK_PIVOT
+    and lfmRow.button:GetText() == L.GLOSS_BTN_DISABLE,
+    "de: a built-in shows the English meaning it sends, marked as English, with Disable")
+page.addKey:SetText("wb")
+page.addMeaning:SetText("Weltboss")
+M.Press(page.addMeaning, "OnEnterPressed")
+check(type(db.glossary.wb) == "table" and db.glossary.wb.de == "Weltboss" and KeyCount(db.glossary.wb) == 1,
+    "Add stores the new abbreviation with its meaning for the current target")
+check(page.addKey:GetText() == "" and page.addMeaning:GetText() == "", "the add row is emptied")
+local wbRow
+for _, row in ipairs(page.rows) do
+    if row.entry and row.entry.key == "wb" and row:IsShown() then
+        wbRow = row
+    end
+end
+check(wbRow and wbRow.edit:GetText() == "Weltboss" and wbRow.mark:GetText() == L.GLOSS_MARK_USER
+    and wbRow.button:GetText() == L.GLOSS_BTN_DELETE, "the new entry is in view, marked as the user's, with Delete")
+check(G.Extract("need wb", "de")[1][2] == "Weltboss" and #G.Extract("wb", "fr") == 0 and G.Describe("wb", "en") == nil,
+    "the meaning serves de only")
+
+Setting("target"):SetValue("fr")
+wbRow = RowFor("wb")
+check(page.title:GetText() == L.GLOSS_PAGE_TITLE:format("Français") and wbRow and wbRow.edit:GetText() == "",
+    "switching the target refreshes the page: the abbreviation stays, its meaning is empty in fr")
+wbRow.edit:SetText("boss du monde")
+M.Press(wbRow.edit, "OnEnterPressed")
+check(db.glossary.wb.de == "Weltboss" and db.glossary.wb.fr == "boss du monde" and G.Extract("wb", "fr")[1][2] == "boss du monde"
+    and G.Extract("wb", "de")[1][2] == "Weltboss", "a meaning typed for fr is stored next to the de one")
+lfmRow = RowFor("lfm")
+check(lfmRow.edit:GetText() == "cherche des membres" and lfmRow.mark:GetText() == "", "fr: a built-in shows its French meaning")
+lfmRow.edit:SetText("cherche du monde")
+M.Press(lfmRow.edit, "OnEnterPressed")
+lfmRow = RowFor("lfm")
+check(type(db.glossary.lfm) == "table" and db.glossary.lfm.fr == "cherche du monde" and KeyCount(db.glossary.lfm) == 1
+    and lfmRow.mark:GetText() == L.GLOSS_MARK_EDITED, "editing a built-in stores a meaning for this target, marked edited")
+check(G.Extract("lfm", "fr")[1][2] == "cherche du monde" and G.Extract("lfm", "de")[1][2] == "looking for more"
+    and G.Describe("lfm", "fr") == L.GLOSS_PAIR:format("LFM", "cherche du monde"), "other targets keep the built-in meaning")
+lfmRow.edit:SetText("")
+M.Press(lfmRow.edit, "OnEnterPressed")
+check(db.glossary.lfm == nil and G.Extract("lfm", "fr")[1][2] == "cherche des membres", "an empty meaning gives the built-in one back")
+lfmRow = RowFor("lfm")
+lfmRow.edit:SetText("oops")
+M.Press(lfmRow.edit, "OnEscapePressed")
+check(lfmRow.edit:GetText() == "cherche des membres" and db.glossary.lfm == nil, "Escape restores the meaning, nothing stored")
+lfmRow.button:Click()
+lfmRow = RowFor("lfm")
+check(db.glossary.lfm == false and #G.Extract("lfm", "fr") == 0 and not lfmRow.edit:IsEnabled()
+    and lfmRow.button:GetText() == L.GLOSS_BTN_ENABLE and lfmRow.mark:GetText() == L.GLOSS_MARK_DISABLED,
+    "Disable turns a built-in off, in the prompt too")
+lfmRow.button:Click()
+check(db.glossary.lfm == nil and G.Extract("lfm", "fr")[1][2] == "cherche des membres", "Enable turns it back on")
+
+db.glossary.oldk = "old meaning"   -- the format before per-target meanings
+local oldRow = RowFor("oldk")
+check(oldRow and oldRow.edit:GetText() == "old meaning" and oldRow.mark:GetText() == L.GLOSS_MARK_USER .. ", " .. L.GLOSS_MARK_SHARED
+    and G.Extract("oldk", "de")[1][2] == "old meaning" and G.Extract("oldk", "ko")[1][2] == "old meaning"
+    and G.Describe("oldk", "en") == L.GLOSS_PAIR:format("OLDK", "old meaning"),
+    "an old one-string entry still serves every target, marked as such")
+oldRow.edit:SetText("nouveau sens")
+M.Press(oldRow.edit, "OnEnterPressed")
+check(type(db.glossary.oldk) == "table" and db.glossary.oldk["*"] == "old meaning" and db.glossary.oldk.fr == "nouveau sens"
+    and G.Extract("oldk", "fr")[1][2] == "nouveau sens" and G.Extract("oldk", "de")[1][2] == "old meaning",
+    "editing it for fr keeps the old meaning for the other targets")
+oldRow = RowFor("oldk")
+oldRow.edit:SetText("")
+M.Press(oldRow.edit, "OnEnterPressed")
+check(db.glossary.oldk == "old meaning", "clearing the fr meaning gives the old string back, unchanged")
+oldRow = RowFor("oldk")
+oldRow.edit:SetText("")
+M.Press(oldRow.edit, "OnEnterPressed")
+oldRow = RowFor("oldk")
+check(type(db.glossary.oldk) == "table" and db.glossary.oldk["*"] == "old meaning" and db.glossary.oldk.fr == ""
+    and oldRow.edit:GetText() == "" and #G.Extract("oldk", "fr") == 0 and G.Describe("oldk", "fr") == nil
+    and G.Extract("oldk", "de")[1][2] == "old meaning" and G.Extract("oldk", "ko")[1][2] == "old meaning",
+    "clearing an all-languages meaning hides it for this target only, the others keep it")
+oldRow.edit:SetText("sens fr")
+M.Press(oldRow.edit, "OnEnterPressed")
+check(db.glossary.oldk.fr == "sens fr" and db.glossary.oldk["*"] == "old meaning", "a meaning typed over the hidden one replaces it")
+oldRow = RowFor("oldk")
+oldRow.edit:SetText("")
+M.Press(oldRow.edit, "OnEnterPressed")
+check(db.glossary.oldk == "old meaning", "clearing it again gives the old string back")
+slash("target de")
+slash("gloss add lfm cherche du monde")
+slash("target fr")
+local listed = L.GLOSS_ENTRY:format("LFM", "cherche des membres")
+local listedBefore = CountPrinted(listed)
+slash("gloss list")
+check(CountPrinted(listed) == listedBefore + 1,
+    "gloss list: a built-in edited for another target shows the built-in meaning this target sends")
+slash("gloss del lfm")
+G.Enable("lfm")
+
+-- typing in one row, then clicking a button: the typed text is saved first, to its own entry
+lfmRow = RowFor("lfm")
+local libRow
+for i, row in ipairs(page.rows) do
+    if row == lfmRow then
+        libRow = page.rows[i + 1]
+    end
+end
+check(libRow and libRow.entry and libRow.entry.key == "lib", "the row below LFM is LIB")
+lfmRow.edit:SetFocus()
+lfmRow.edit:SetText("cherche du monde")
+libRow.button:Click()
+check(type(db.glossary.lfm) == "table" and db.glossary.lfm.fr == "cherche du monde" and db.glossary.lib == false
+    and not lfmRow.edit:HasFocus(), "a click on another row's button saves the text being typed first")
+RowFor("lib").button:Click()
+lfmRow = RowFor("lfm")
+lfmRow.edit:SetFocus()
+lfmRow.edit:SetText("cherche encore")
+page.addKey:SetText("zzq")
+page.addMeaning:SetText("essai")
+page.addButton:Click()
+check(db.glossary.lfm.fr == "cherche encore" and type(db.glossary.zzq) == "table" and db.glossary.zzq.fr == "essai"
+    and db.glossary.lib == nil, "Add also saves the text being typed in a row first")
+slash("gloss del zzq")
+lfmRow = RowFor("lfm")
+lfmRow.edit:SetText("")
+M.Press(lfmRow.edit, "OnEnterPressed")
+check(db.glossary.lfm == nil and db.glossary.zzq == nil, "test entries removed")
+
+wbRow = RowFor("wb")
+wbRow.edit:SetFocus()
+wbRow.edit:SetText("boss mondial")
+M.HideCanvas(gcat)
+check(db.glossary.wb.fr == "boss mondial", "leaving the page saves the meaning being typed")
+M.ShowCanvas(gcat)
+page.addKey:SetText("two words")
+page.addMeaning:SetText("x")
+page.addButton:Click()
+check(page.status:GetText() == L.GLOSS_BAD_KEY and db.glossary["two words"] == nil and db.glossary.two == nil,
+    "an abbreviation must be one word")
+page.addKey:SetText("capk")
+page.addMeaning:SetText("   ")
+page.addButton:Click()
+check(page.status:GetText() == L.GLOSS_NEED_MEANING and db.glossary.capk == nil, "a meaning is required")
+page.addMeaning:SetText(string.rep("é", 100) .. "|x")
+page.addButton:Click()
+check(type(db.glossary.capk) == "table" and db.glossary.capk.fr == string.rep("é", 60) and page.status:GetText() == "",
+    "panel meanings are kept to 120 bytes, cut on a UTF-8 boundary")
+page.offset = 0
+Options.RefreshGlossary()
+local total = #page.entries
+check(total > 12 and page.range:GetText() == L.GLOSS_RANGE:format(1, 12, total) and not page.prev:IsEnabled()
+    and page.next:IsEnabled(), "12 rows at a time, Previous off at the top")
+page.next:Click()
+check(page.offset == 12 and page.prev:IsEnabled() and page.rows[1].entry == page.entries[13], "Next shows the following rows")
+page.frame.scripts.OnMouseWheel(page.frame, 1)
+check(page.offset == 9 and page.rows[1].entry == page.entries[10], "the mouse wheel scrolls 3 rows")
+
+local notifiedBefore = #S.notified
+slash("show off")
+slash("show on")
+slash("target de")
+local notified = {}
+for k = notifiedBefore + 1, #S.notified do
+    notified[S.notified[k]] = true
+end
+check(notified.TranslateProbe_glossShow and notified.TranslateProbe_target
+    and page.title:GetText() == L.GLOSS_PAGE_TITLE:format("Deutsch"), "commands update the panel")
+slash("gloss del wb")
+slash("gloss del capk")
+slash("gloss del oldk")
+check(db.glossary.wb == nil and db.glossary.capk == nil and db.glossary.oldk == nil, "user entries deleted")
+Setting("target"):SetValue(home)
+M.HideCanvas(gcat)
 
 ---------------------------------------------------------------------------------------------
 section("commands")
@@ -914,15 +1213,16 @@ check(#Reserve.View() == 0, "a secret chat rectangle is left out of VIEW")
 M.SetLockdown(false)
 M.SetRectSecret(ChatFrame1, false)
 slash("info")
-check(Printed("1.60.1") and Printed(L.INFO_VERSION:format("0.2.0", 1, ns.sessionId))
+check(Printed("1.60.1") and Printed(L.INFO_VERSION:format("0.3.0", 2, ns.sessionId))
     and Printed(L.INFO_FRAME:format("ChatFrame1", L.YES, L.YES)), "info prints version, client and chat frames")
 check(Printed(L.INFO_REQUESTS:format(Request.Count(), Reserve.SlotsInUse())), "info prints requests and slots")
 slash("debug")
 check(Printed((L.DEBUG_REQUESTS:match("^[^%%]*"))) and Printed((L.DEBUG_SLOTS:match("^[^%%]*"))), "debug prints the counters")
 slash("app")
 check(Printed(L.APP_1) and Printed(L.APP_4), "app explains the helper")
-slash("")
-check(Printed(L.HELP_CLICK) and Printed(L.HELP_TEST_ROWS), "help lists the commands and the click hint")
+slash("help")
+check(Printed(L.HELP_CLICK) and Printed(L.HELP_TEST_ROWS) and Printed(L.HELP_OPTIONS) and Printed(L.HELP_HELP),
+    "help lists the commands (options included) and the click hint")
 slash("names on")
 check(db.names == true, "names option on")
 slash("names off")
@@ -942,6 +1242,35 @@ for _, cf in ipairs(M.ChatFrames()) do
 end
 check(Since(n0, "clear")[1] ~= nil and not anyRow and Request.Count() == 0 and Reserve.SlotsInUse() == 0
     and Printed(L.CLEARED), "clear sends CLEAR and removes every row of this session")
+
+---------------------------------------------------------------------------------------------
+section("no chat tab display")
+local tabInToc = false
+for _, file in ipairs(ADDON_FILES) do
+    if file == "Tab.lua" then
+        tabInToc = true
+    end
+end
+check(not tabInToc and ns.Tab == nil, "Tab.lua is gone from the TOC and from the namespace")
+check(L.TAB_NAME == nil and L.DISPLAY_TAB == nil and L.HELP_SHOW_TAB == nil and L.OPT_DISPLAY == nil,
+    "no chat tab string left")
+local helpMentionsTab = false
+for key, value in pairs(L) do
+    if type(value) == "string" and key:find("^HELP_") and value:find("tab|inline", 1, true) then
+        helpMentionsTab = true
+    end
+end
+check(not helpMentionsTab, "the help no longer offers /tpr show tab")
+local showBefore = db.glossShow
+slash("show tab")
+check(db.display == nil and db.glossShow == showBefore, "/tpr show tab changes nothing (show takes on|off)")
+local trackedLine = Deliver("CHAT_MSG_SAY", "tab check line for a click", "Tabby")
+M.Tick(1)
+M.Click(ButtonOf(trackedLine))
+check(select("#", Request.Get(trackedLine)) == 5 and EntryFor(ChatFrame1, trackedLine).message:find(SUFFIX_START, 1, true),
+    "a click puts the rows under the line")
+M.Tick(61)
+M.Click("addon:TranslateProbe:x:" .. ns.session .. ":" .. trackedLine)
 
 ---------------------------------------------------------------------------------------------
 section("slots")

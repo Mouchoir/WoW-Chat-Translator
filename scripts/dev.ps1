@@ -63,6 +63,25 @@ foreach ($path in $targets) {
     $destination = Join-Path $resolved $addonName
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
 
+    # Back up the saved variables first: a newer build can store a format an older one drops at
+    # load (schema 3, docs\ADDON.md decision 21), so a rollback must be able to restore them.
+    # They hold settings and glossary entries only, never chat text (a few KB per copy).
+    $wtf = Join-Path (Split-Path (Split-Path $resolved -Parent) -Parent) 'WTF\Account'
+    if (Test-Path -LiteralPath $wtf) {
+        $backupDir = Join-Path $env:LOCALAPPDATA 'TranslateProbe\savedvariables-backup'
+        $flavour = Split-Path (Split-Path (Split-Path $resolved -Parent) -Parent) -Leaf
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        Get-ChildItem -LiteralPath $wtf -Directory | ForEach-Object {
+            $saved = Join-Path $_.FullName "SavedVariables\$addonName.lua"
+            if (Test-Path -LiteralPath $saved) {
+                New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+                $copy = Join-Path $backupDir ('{0}-{1}-{2}.lua' -f $flavour, $_.Name, $stamp)
+                Copy-Item -LiteralPath $saved -Destination $copy
+                Write-Host "Saved variables backed up -> $copy"
+            }
+        }
+    }
+
     robocopy $source $destination /MIR /NFL /NDL /NJH /NJS /NP /XF *.zip | Out-Host
     $code = $LASTEXITCODE
     if ($code -gt 7) {

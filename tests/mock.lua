@@ -27,6 +27,15 @@
 --   Mock.SetCVar(name, value); Mock.SetShift(down)
 -- Extras: Mock.Fire(event, ...), Mock.Secret(), Mock.SetRectSecret(cf, on), Mock.Frames(),
 --   Mock.echo (default true: prints and errors also go to stdout), Mock.rawprint (stdout).
+-- Settings API (12.x Blizzard_Settings.lua): categories, proxy settings, dropdowns, checkboxes,
+--   canvas subcategories, OpenToCategory; arguments are checked more strictly than the client
+--   does (types, defaults among the options, no duplicate variable), to catch misuse early.
+--   Mock.Settings() -> { categories, addOn, settings, initializers, opened, notified };
+--   Mock.ShowCanvas(category) shows a canvas page the way the panel does (OnRefresh);
+--   Mock.HideCanvas(category) leaves it (a focused edit box inside loses its focus).
+-- Widgets: EditBox focus (SetFocus/ClearFocus fire OnEditFocusLost), Button:Click, Enable/Disable.
+--   Mock.Press(editBox, script) runs OnEnterPressed / OnEscapePressed. CreateFrame and
+--   CreateFontString refuse templates and font objects the mock does not know (typo guard).
 -- print() records the line (Mock.Printed) and adds it to DEFAULT_CHAT_FRAME's history.
 -- Defaults: 1920 x 1080 px, UI scale 1, ChatFrame1 shown, ChatFrame3 hidden (a docked tab),
 --   chat font 14, chat clip rectangle (20, 100, 400, 180) scaled units.
@@ -481,6 +490,86 @@ function Methods:GetStringHeight()
     return self:GetNumLines() * (self.fontSize or 0)
 end
 
+-- Widgets (edit boxes, buttons)
+local focused
+function Methods:SetParent(parent)
+    self.parent = parent or UIParent
+end
+function Methods:EnableMouse(on)
+    self.mouse = on
+end
+function Methods:EnableMouseWheel(on)
+    self.mouseWheel = on
+end
+function Methods:HookScript(k, fn)
+    local old = self.scripts[k]
+    self.scripts[k] = function(...)
+        if old then
+            old(...)
+        end
+        return fn(...)
+    end
+end
+function Methods:SetAutoFocus(on)
+    self.autoFocus = on
+end
+function Methods:SetMaxLetters(n)
+    self.maxLetters = n
+end
+function Methods:HighlightText() end
+function Methods:SetCursorPosition() end
+function Methods:SetTextInsets() end
+function Methods:SetFontObject(font)
+    self.fontObject = font
+end
+function Methods:SetTextColor(r, g, b, a)
+    self.textColor = { r, g, b, a or 1 }
+end
+function Methods:HasFocus()
+    return focused == self
+end
+function Methods:ClearFocus()
+    if focused == self then
+        focused = nil
+        if self.scripts.OnEditFocusLost then
+            Call(self.scripts.OnEditFocusLost, self)
+        end
+    end
+end
+function Methods:SetFocus()
+    if focused and focused ~= self then
+        focused:ClearFocus()
+    end
+    focused = self
+    if self.scripts.OnEditFocusGained then
+        Call(self.scripts.OnEditFocusGained, self)
+    end
+end
+function Methods:Enable()
+    self.disabled = nil
+end
+function Methods:Disable()
+    self.disabled = true
+    if focused == self then
+        self:ClearFocus()
+    end
+end
+function Methods:SetEnabled(on)
+    if on then
+        self:Enable()
+    else
+        self:Disable()
+    end
+end
+function Methods:IsEnabled()
+    return not self.disabled
+end
+function Methods:Click(button)
+    if not self.disabled and self.scripts.OnClick then
+        Call(self.scripts.OnClick, self, button or "LeftButton", false)
+    end
+end
+
 local MethodsMT = { __index = Methods }
 
 local function NewRegion(kind, parent)
@@ -498,9 +587,10 @@ local function NewFrame(frameType, name, parent)
         textures[#textures + 1] = t
         return t
     end
-    function f:CreateFontString(_, layer)
+    function f:CreateFontString(_, layer, font)
+        assert(font == nil or M.KNOWN_FONTS[font], "unknown font object " .. tostring(font))
         local fs = NewRegion("fontstring", self)
-        fs.layer, fs.text = layer, ""
+        fs.layer, fs.text, fs.fontObject = layer, "", font
         return fs
     end
     frames[#frames + 1] = f
@@ -514,8 +604,24 @@ UIParent = NewFrame("Frame", "UIParent", nil)
 UIParent.isRoot = true
 UIParent.scale = state.uiScale
 
-CreateFrame = function(frameType, name, parent)
-    return NewFrame(frameType, name, parent or UIParent)
+-- Templates and font objects the addon may use (each checked in the 12.x UI source, see
+-- docs\ADDON.md); anything else is a typo or an unchecked dependency.
+M.KNOWN_TEMPLATES = { InputBoxTemplate = "EditBox", UIPanelButtonTemplate = "Button" }
+M.KNOWN_FONTS = {
+    GameFontNormal = true, GameFontNormalSmall = true, GameFontNormalLarge = true, GameFontHighlight = true,
+    GameFontHighlightSmall = true,
+}
+CreateFrame = function(frameType, name, parent, template)
+    if template ~= nil then
+        assert(M.KNOWN_TEMPLATES[template] == frameType, "unknown template " .. tostring(template) .. " for "
+            .. tostring(frameType))
+    end
+    local f = NewFrame(frameType, name, parent or UIParent)
+    f.template = template
+    if frameType == "EditBox" then
+        f.text = ""     -- the client returns "" for an empty edit box, never nil
+    end
+    return f
 end
 
 local function Fire(event, ...)
@@ -733,6 +839,156 @@ end
 NewChatFrame("ChatFrame1", 1, true)
 NewChatFrame("ChatFrame3", 3, false)
 DEFAULT_CHAT_FRAME = ChatFrame1
+
+---------------------------------------------------------------------------- Settings API
+local settingsState = { categories = {}, addOn = {}, settings = {}, initializers = {}, opened = {}, notified = {} }
+local function NewCategory(name, kind, frame, parent)
+    local category = { name = name, kind = kind, frame = frame, parent = parent, subcategories = {} }
+    settingsState.categories[#settingsState.categories + 1] = category
+    category.ID = #settingsState.categories
+    function category:GetID()
+        return self.ID
+    end
+    function category:GetName()
+        return self.name
+    end
+    if parent then
+        parent.subcategories[#parent.subcategories + 1] = category
+    end
+    return category, { category = category }
+end
+local VAR_TYPES = { boolean = true, string = true, number = true }
+Settings = {
+    VarType = { Boolean = "boolean", String = "string", Number = "number" },
+    RegisterVerticalLayoutCategory = function(name)
+        assert(type(name) == "string" and name ~= "", "category name")
+        return NewCategory(name, "vertical")
+    end,
+    RegisterCanvasLayoutCategory = function(frame, name)
+        assert(type(frame) == "table" and type(name) == "string", "canvas category")
+        return NewCategory(name, "canvas", frame)
+    end,
+    RegisterCanvasLayoutSubcategory = function(parent, frame, name)
+        assert(type(parent) == "table" and parent.kind and type(frame) == "table" and type(name) == "string",
+            "canvas subcategory")
+        return NewCategory(name, "canvas", frame, parent)
+    end,
+    RegisterAddOnCategory = function(category)
+        for _, c in ipairs(settingsState.addOn) do
+            assert(c ~= category, "category registered twice")
+        end
+        settingsState.addOn[#settingsState.addOn + 1] = category
+    end,
+    RegisterProxySetting = function(category, variable, varType, name, default, getValue, setValue)
+        assert(type(category) == "table" and category.kind, "proxy setting: category")
+        assert(type(variable) == "string" and settingsState.settings[variable] == nil, "proxy setting: variable "
+            .. tostring(variable))
+        assert(VAR_TYPES[varType] and type(default) == varType, "proxy setting: type of " .. variable)
+        assert(type(name) == "string" and type(getValue) == "function" and type(setValue) == "function",
+            "proxy setting: name and accessors")
+        local setting = { category = category, variable = variable, varType = varType, name = name, default = default }
+        function setting:GetValue()
+            return getValue()
+        end
+        function setting:SetValue(value)
+            assert(type(value) == varType, "SetValue: type")
+            setValue(value)
+        end
+        function setting:GetVariable()
+            return variable
+        end
+        function setting:GetVariableType()
+            return varType
+        end
+        function setting:GetName()
+            return name
+        end
+        function setting:GetDefaultValue()
+            return default
+        end
+        settingsState.settings[variable] = setting
+        return setting
+    end,
+    CreateControlTextContainer = function()
+        local container = { data = {} }
+        function container:Add(value, label, tooltip)
+            self.data[#self.data + 1] = { value = value, label = label, text = label, tooltip = tooltip }
+        end
+        function container:GetData()
+            return self.data
+        end
+        return container
+    end,
+    CreateDropdown = function(category, setting, options, tooltip)
+        assert(type(category) == "table" and type(setting) == "table" and type(options) == "function", "dropdown")
+        local data = options()
+        assert(type(data) == "table" and #data > 0, "dropdown: options")
+        local hasDefault = false
+        for _, option in ipairs(data) do
+            assert(type(option.label) == "string" and option.label ~= "" and type(option.value) == setting.varType,
+                "dropdown: option")
+            hasDefault = hasDefault or option.value == setting.default
+        end
+        assert(hasDefault, "dropdown: the default is not an option")
+        local init = { kind = "dropdown", category = category, setting = setting, options = options, tooltip = tooltip }
+        settingsState.initializers[#settingsState.initializers + 1] = init
+        return init
+    end,
+    CreateCheckbox = function(category, setting, tooltip)
+        assert(type(category) == "table" and setting:GetVariableType() == "boolean", "checkbox")
+        local init = { kind = "checkbox", category = category, setting = setting, tooltip = tooltip }
+        settingsState.initializers[#settingsState.initializers + 1] = init
+        return init
+    end,
+    GetSetting = function(variable)
+        return settingsState.settings[variable]
+    end,
+    NotifyUpdate = function(variable)
+        settingsState.notified[#settingsState.notified + 1] = variable
+    end,
+    OpenToCategory = function(categoryID)
+        assert(type(categoryID) == "number", "OpenToCategory takes a category ID")
+        settingsState.opened[#settingsState.opened + 1] = categoryID
+    end,
+}
+function M.Settings()
+    return settingsState
+end
+-- Shows a canvas page the way the settings panel does (SettingsPanelMixin:DisplayLayout):
+-- reparent to the canvas, anchor to all of it, show, then OnRefresh (CallRefreshOnFrame).
+function M.ShowCanvas(category)
+    local frame = category.frame
+    frame:SetParent(UIParent)
+    frame:ClearAllPoints()
+    frame:SetAllPoints(UIParent)
+    frame:Show()
+    if frame.OnRefresh then
+        Call(frame.OnRefresh, frame)
+    end
+end
+-- Leaves a canvas page the way the panel does (ClearCurrentCategoryCanvas): no parent, hidden.
+-- A focused edit box loses its focus (OnEditFocusLost), as when a parent is hidden on the client.
+function M.HideCanvas(category)
+    local frame = category.frame
+    if focused and focused ~= frame then
+        local p = focused
+        while p and p ~= frame do
+            p = p.parent
+        end
+        if p == frame then
+            focused:ClearFocus()
+        end
+    end
+    frame:SetParent(nil)
+    frame:ClearAllPoints()
+    frame:Hide()
+end
+-- Runs an edit box script such as OnEnterPressed or OnEscapePressed.
+function M.Press(editBox, script)
+    if editBox.scripts[script] then
+        Call(editBox.scripts[script], editBox)
+    end
+end
 
 -- print goes to the default chat frame, like on the client.
 print = function(...)

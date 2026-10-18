@@ -12,6 +12,20 @@ Lang.TARGETS = { "en", "fr", "de", "es", "it", "pt", "ru", "ko", "zh", "zh-TW" }
 Lang.NAMES = {
     en = "EN", fr = "FR", de = "DE", es = "ES", it = "IT", pt = "PT", ru = "RU", ko = "KO", zh = "ZH", ["zh-TW"] = "ZH-TW",
 }
+-- Each language's name in that language (data, not UI strings: a reader looks for their own).
+Lang.NATIVE = {
+    en = "English", fr = "Français", de = "Deutsch", es = "Español", it = "Italiano", pt = "Português",
+    ru = "Русский", ko = "한국어", zh = "简体中文", ["zh-TW"] = "繁體中文",
+}
+
+function Lang.IsTarget(code)
+    for _, t in ipairs(Lang.TARGETS) do
+        if t == code then
+            return true
+        end
+    end
+    return false
+end
 
 local BY_LOCALE = {
     enUS = "en", enGB = "en", frFR = "fr", deDE = "de", esES = "es", esMX = "es", itIT = "it",

@@ -2,8 +2,11 @@
 -- line, and sent to the helper as prompt pairs so the model reads them right.
 -- Matching is per whole word and ignores case for ASCII letters. Words keep their accented
 -- letters (WoW's %w is ASCII only, so "stéréo" must not split into "st" + "r" + "o").
--- Users add, override or disable entries with /tpr gloss (TranslateProbeDB.glossary); user
--- entries have no language and are sent as typed for any target.
+-- Users add, override or disable entries with /tpr gloss or the options panel
+-- (TranslateProbeDB.glossary[key]): false disables a key; a string is one meaning for every
+-- target (the format before per-target meanings, still honoured as it is); a table holds a
+-- meaning per target ({ fr = "...", de = "..." }, plus "*" for an every-target meaning kept from
+-- the old format). A user key with no meaning for the current target is skipped there.
 -- The built-in meanings below are bilingual data (en + fr), not UI strings. Meanings follow the
 -- translation target: French for "fr", English for every other target (a pivot the model reads).
 -- This file also builds the marked text the helper translates (PromptText).
@@ -153,6 +156,30 @@ local function DbTarget()
     return ns.db and ns.db.target or "en"
 end
 
+local function UserTable()
+    return ns.db and ns.db.glossary
+end
+
+-- Meaning of a user glossary value for a target: a string for every target, or the table's
+-- meaning for that target, else its "*" meaning. An empty string in the table means "no meaning
+-- for this target" (it hides the "*" one there only). Nil when there is none (or the value is
+-- false).
+function Glossary.UserMeaning(value, target)
+    local meaning
+    if type(value) == "string" then
+        meaning = value
+    elseif type(value) == "table" then
+        meaning = value[target]
+        if meaning == nil then
+            meaning = value["*"]
+        end
+    end
+    if meaning ~= "" then
+        return meaning
+    end
+end
+local UserMeaning = Glossary.UserMeaning
+
 local function One(one, target, value)
     local en, fr = one.en, one.fr
     if value then
@@ -204,11 +231,14 @@ end
 -- so accented words only match user entries. forPrompt: prompt meaning with the target's false
 -- friends; otherwise the display form.
 local function Find(key, allowPlural, target, forPrompt)
-    local custom = ns.db and ns.db.glossary and ns.db.glossary[key]
+    local glossary = UserTable()
+    local custom = glossary and glossary[key]
     if custom == false then
         return nil
-    elseif type(custom) == "string" then
-        return custom, true
+    end
+    local mine = UserMeaning(custom, target)
+    if mine then
+        return mine, true
     end
     if key:find("[\128-\255]") then
         return nil
@@ -407,6 +437,160 @@ function Glossary.Count()
         n = n + 1
     end
     return n
+end
+
+---------------------------------------------------------------------------- user entries
+-- Shared by /tpr gloss and the options panel, so both store the same thing.
+
+-- A meaning as stored: pipes become "/" (chat links end at "|"), outer spaces trimmed, at most
+-- 120 bytes (the purge drops longer values at the next load).
+function Glossary.CleanMeaning(text)
+    if type(text) ~= "string" then
+        return ""
+    end
+    text = text:gsub("|", "/"):gsub("^%s+", ""):gsub("%s+$", "")
+    return ns.Bridge.Utf8Cut(text, ns.MAX_MEANING or MAX_MEANING)
+end
+
+-- Lowercase key of a typed abbreviation, or nil when it is not one whole word.
+function Glossary.NormalizeKey(word)
+    if type(word) ~= "string" then
+        return nil
+    end
+    word = word:gsub("^%s+", ""):gsub("%s+$", "")
+    if not word:find("^" .. WORD .. "$") then
+        return nil
+    end
+    return word:lower()
+end
+
+-- Built-in prompt meaning of a key for a target, or nil.
+function Glossary.BuiltinMeaning(key, target)
+    local entry = BUILTIN[key]
+    return entry and Glossary.MeaningFor(entry, target) or nil
+end
+
+local function CountKeys(t)
+    local n = 0
+    for _ in pairs(t) do
+        n = n + 1
+    end
+    return n
+end
+
+-- Stores the meaning of key for one target and returns what that target now gets from the user
+-- entry (nil when nothing). An empty text removes the meaning shown for that target, and only
+-- there: its own one (an every-target meaning, if any, shows again), else the every-target one,
+-- hidden for this target by an empty marker ("") while it keeps serving the others. An old
+-- every-target string becomes "*" when one target gets its own meaning. The built-in meaning
+-- itself is not stored as an override. A built-in key left without user meanings goes back to
+-- its built-in ones; a user key keeps its abbreviation with no meaning ({}), shown empty for
+-- every target.
+function Glossary.SetMeaning(key, target, text)
+    local glossary = UserTable()
+    if not glossary or type(key) ~= "string" then
+        return nil
+    end
+    text = Glossary.CleanMeaning(text)
+    local value = glossary[key]
+    local t
+    if type(value) == "table" then
+        t = value
+    elseif type(value) == "string" and value ~= "" then
+        t = { ["*"] = value }
+    else
+        t = {}
+    end
+    if text == "" then
+        if t[target] ~= nil and t[target] ~= "" then
+            t[target] = nil
+        elseif t["*"] ~= nil then
+            t[target] = ""
+        end
+    elseif text == Glossary.BuiltinMeaning(key, target) and t["*"] == nil then
+        t[target] = nil
+    else
+        t[target] = text
+    end
+    -- an empty marker only matters while an every-target meaning exists
+    if t["*"] == nil then
+        for code, meaning in pairs(t) do
+            if meaning == "" then
+                t[code] = nil
+            end
+        end
+    end
+    local n = CountKeys(t)
+    if n == 0 then
+        glossary[key] = (BUILTIN[key] == nil) and {} or nil
+    elseif n == 1 and t["*"] ~= nil then
+        glossary[key] = t["*"]
+    else
+        glossary[key] = t
+    end
+    return UserMeaning(glossary[key], target)
+end
+
+-- Removes a user key, or disables a built-in one (false, in the prompt too).
+function Glossary.Remove(key)
+    local glossary = UserTable()
+    if glossary and type(key) == "string" then
+        if BUILTIN[key] ~= nil then
+            glossary[key] = false
+        else
+            glossary[key] = nil
+        end
+    end
+end
+
+-- Turns a disabled built-in key back on (its user meanings were dropped when it was disabled).
+function Glossary.Enable(key)
+    local glossary = UserTable()
+    if glossary and glossary[key] == false then
+        glossary[key] = nil
+    end
+end
+
+-- Every entry for one target, for the options panel: user keys first, then the built-in ones,
+-- each sorted. { key, meaning ("" when none), builtin, user, edited (a built-in with a user
+-- meaning here), shared (the meaning shown is an every-target one), disabled, pivot (a built-in
+-- meaning shown in English because the built-in data has none in this language) }.
+function Glossary.Entries(target)
+    local glossary = UserTable() or {}
+    local mine, builtin = {}, {}
+    for key in pairs(glossary) do
+        if type(key) == "string" and BUILTIN[key] == nil then
+            mine[#mine + 1] = key
+        end
+    end
+    for key in pairs(BUILTIN) do
+        builtin[#builtin + 1] = key
+    end
+    table.sort(mine)
+    table.sort(builtin)
+    local list = {}
+    local function Add(key)
+        local value = glossary[key]
+        local isBuiltin = BUILTIN[key] ~= nil
+        local own = value ~= false and UserMeaning(value, target) or nil
+        list[#list + 1] = {
+            key = key,
+            meaning = own or (isBuiltin and Glossary.BuiltinMeaning(key, target)) or "",
+            builtin = isBuiltin,
+            user = not isBuiltin,
+            edited = isBuiltin and own ~= nil,
+            shared = own ~= nil and (type(value) == "string" or value[target] == nil),
+            disabled = value == false,
+            pivot = isBuiltin and own == nil and value ~= false and target ~= "en" and target ~= "fr",
+        }
+    end
+    for _, key in ipairs(mine) do
+        Add(key)
+    end
+    for _, key in ipairs(builtin) do
+        Add(key)
+    end
+    return list
 end
 
 ns.OnLoad(function()
