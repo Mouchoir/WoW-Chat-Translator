@@ -384,6 +384,87 @@ fn grouping_session_and_fade() {
     assert!(cards.iter().all(|c| c.alpha >= cards::ALPHA_MIN));
 }
 
+// ------------------------------------------------------------------------------- up to 6 rows (1..6)
+
+/// Pitch of the reserved rows in the row-range tests (14 px tags, 2 px apart).
+const ROW_PITCH: f64 = 16.0;
+
+/// The rows `visible` of one request (slot 21) drawn in a view that starts at `view_y`; row r is
+/// at `first_y + r * ROW_PITCH` (rows not listed are scrolled away or hidden). Returns the band
+/// rows of each card found, with `rows_expected` as the TRANSLATE row count.
+fn row_numbers(visible: &[u8], first_y: f64, view_y: u16, rows_expected: Option<u8>) -> Vec<Vec<u8>> {
+    let mut rng = Rng::new(0x0606 + u64::from(view_y) + visible.len() as u64);
+    let (w, h) = (520, 200);
+    let mut cv = Canvas::new(w, h, [14.0, 14.0, 18.0]);
+    cv.aa = true;
+    for &row in visible {
+        synth::draw_tag(&mut cv, &TagDraw {
+            slot: 21,
+            row,
+            sess_bit: 1,
+            x: 20.3,
+            y: first_y + ROW_PITCH * f64::from(row),
+            block_w: 6.0,
+            block_h: 14.0,
+            gap: 0.0,
+            alpha: 1.0,
+            plate_w: 260.0,
+            colors: None,
+        });
+    }
+    cv.noise(&mut rng, 1);
+    let cap = cv.capture();
+    let img = cap.bgra();
+    let view = View { id: 1, x: 0, y: view_y, w: w as u16, h: h as u16 - view_y, font_px: 14, row_px: 16 };
+    let mut hits = Vec::new();
+    tags::scan(&img, image::Rect { x: 0, y: i32::from(view_y), w, h: h - i32::from(view_y) }, None, &mut hits);
+    assert_eq!(hits.len(), visible.len(), "every visible tag found");
+    let mut cards = cards::build_with_rows(&img, &hits, &[view], &|_| Some(true), &|_| rows_expected, Some(1));
+    cards.sort_by_key(|c| c.bands[0].text_rect.y);
+    cards.iter().map(|c| c.bands.iter().map(|b| b.row).collect()).collect()
+}
+
+#[test]
+fn rows_up_to_six_form_one_card_numbered_0_to_5() {
+    for k in 1..=6u8 {
+        let all: Vec<u8> = (0..k).collect();
+        for known in [Some(k), None] {
+            assert_eq!(row_numbers(&all, 60.2, 0, known), vec![all.clone()], "{k} rows, row count {known:?}");
+        }
+    }
+}
+
+#[test]
+fn rows_hidden_in_the_middle_keep_the_numbering() {
+    // a tooltip over whole rows: the rows after it keep their numbers (tag rows repeat modulo 4)
+    for visible in [&[0u8, 1, 3, 4, 5][..], &[0, 4, 5], &[0, 1, 5], &[1, 5], &[0, 2, 3, 5]] {
+        assert_eq!(row_numbers(visible, 40.4, 0, Some(6)), vec![visible.to_vec()], "{visible:?}");
+    }
+    assert_eq!(row_numbers(&[0, 4], 40.4, 0, Some(5)), vec![vec![0, 4]]);
+    // the row count bounds the numbering: a 4-row request never gets a row 4, so the same slot 4
+    // rows further on is another card (a copy)
+    assert_eq!(row_numbers(&[0, 4], 40.4, 0, Some(4)), vec![vec![0], vec![0]]);
+}
+
+#[test]
+fn rows_scrolled_away_at_the_top_are_the_first_ones() {
+    // 6 rows, the view starts below row 3: rows 4 and 5 are visible at its top
+    let first_y = 30.3;
+    let view_y = (first_y + 4.0 * ROW_PITCH - 1.0) as u16;
+    assert_eq!(row_numbers(&[4, 5], first_y, view_y, Some(6)), vec![vec![4, 5]]);
+    // only row 5 of 6, only row 4 of 5
+    let view_y5 = (first_y + 5.0 * ROW_PITCH - 1.0) as u16;
+    assert_eq!(row_numbers(&[5], first_y, view_y5, Some(6)), vec![vec![5]]);
+    assert_eq!(row_numbers(&[4], first_y, view_y, Some(5)), vec![vec![4]]);
+    // the first rows at the top of the view with every row visible are not renumbered
+    let view_y0 = (first_y - 1.0) as u16;
+    assert_eq!(row_numbers(&[0, 1, 2, 3, 4, 5], first_y, view_y0, Some(6)), vec![vec![0, 1, 2, 3, 4, 5]]);
+    // without the row count (TRANSLATE not received) tag rows 0 and 1 read as rows 0 and 1
+    assert_eq!(row_numbers(&[4, 5], first_y, view_y, None), vec![vec![0, 1]]);
+    // further down the view, rows 0 and 1 of a 6-row request stay rows 0 and 1
+    assert_eq!(row_numbers(&[0, 1], 100.2, 0, Some(6)), vec![vec![0, 1]]);
+}
+
 // ------------------------------------------------------------------------------------ fade and covers
 use tp_bridge::synth::Ground;
 

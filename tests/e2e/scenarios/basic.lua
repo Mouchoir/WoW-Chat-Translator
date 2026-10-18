@@ -1,4 +1,4 @@
--- basic: three clicks on lines of different lengths (2, 2 and 3 reserved rows); the Helper decodes
+-- basic: three clicks on lines of different lengths (2, 2 and 5 reserved rows); the Helper decodes
 -- each TRANSLATE and draws three cards on the plates.
 local E = E2E.Start({ name = "basic" })
 local ids = E.Filler()

@@ -281,6 +281,8 @@ def make_messages():
     tr("bytes kept as given", 14, 15, 1, 2, "en", b"\xff\xfe raw", [(b"\xc3", b"\xa9")])
     tr("1024 B exactly", 15, 16, 4, 3, "it", "q" * 1024, [("a", "b")])
     tr("worst case", 16, 17, 4, 3, "zh-TW", "\U0001F600" * 256, [("t" * 48, "m" * 120) for _ in range(8)])
+    tr("6 rows (the most since 2026-10-18)", 17, 18, 6, 2, "fr", "lange Zeile", [])
+    tr("7 rows refused", 18, 19, 7, 2, "fr", "x", [])
     out.append({"fn": "cancel", "args": [513, 126], "hex": P.msg_cancel(513, 126).hex()})
     out.append({"fn": "cancel", "args": [70000, 300], "hex": P.msg_cancel(70000, 300).hex()})
     out.append({"fn": "clear", "args": [], "hex": P.msg_clear().hex()})

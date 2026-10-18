@@ -2,7 +2,7 @@
 //!
 //! All integers are big-endian; `str8` = u8 length + bytes, `str16` = u16 length + bytes.
 //! ```text
-//! 0x10 TRANSLATE reqId u16 | slot u8 (0..126) | rows u8 (1..4) | flags u8 (bit0 noCache, bit1 plate)
+//! 0x10 TRANSLATE reqId u16 | slot u8 (0..126) | rows u8 (1..6) | flags u8 (bit0 noCache, bit1 plate)
 //!                | target str8 (ASCII, 1..8) | text str16 (UTF-8, <= 1024 B, may hold 0x02/0x03 marks)
 //!                | nPairs u8 (<= 8) | pairs: term str8 (<= 48 B), meaning str8 (<= 120 B);
 //!                  sum(2 + #term + #meaning) <= 512
@@ -83,7 +83,9 @@ const MSG_TEST: u8 = 0x13;
 const MSG_VIEW: u8 = 0x14;
 
 const MAX_SLOT: u8 = 126;
-const MAX_ROWS: u8 = 4;
+/// Reserved rows per request (1..6). A row tag carries the row number modulo 4; `cards::build`
+/// numbers consecutive rows on from the first visible one.
+const MAX_ROWS: u8 = 6;
 const FLAG_NO_CACHE: u8 = 1;
 const FLAG_PLATE: u8 = 2;
 const MAX_TARGET: usize = 8;
@@ -289,5 +291,24 @@ mod tests {
         let mut bad = b.clone();
         bad[11] = 0xFF; // invalid UTF-8 in the text
         assert!(matches!(parse_message(&bad), Err(ParseError::Utf8)));
+    }
+
+    #[test]
+    fn translate_rows_range_is_1_to_6() {
+        // reqId 1, slot 2, rows r, flags 2 (plate), "en", "x", no pairs
+        let msg = |rows: u8| {
+            let mut b = vec![0x10, 0, 1, 2, rows, 2, 2, b'e', b'n', 0, 1, b'x', 0];
+            b.shrink_to_fit();
+            b
+        };
+        for rows in 1..=6u8 {
+            match parse_message(&msg(rows)) {
+                Ok(Message::Translate(t)) => assert_eq!(t.rows, rows),
+                _ => panic!("rows {rows} refused"),
+            }
+        }
+        for rows in [0u8, 7, 8, 255] {
+            assert!(matches!(parse_message(&msg(rows)), Err(ParseError::Range)), "rows {rows} accepted");
+        }
     }
 }

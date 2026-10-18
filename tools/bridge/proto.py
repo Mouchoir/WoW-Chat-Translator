@@ -34,6 +34,7 @@ HOLD_MS, ROT_HOLD_MS, EXPOSE_MS = 50, 70, 400
 
 MAX_TEXT, MAX_TARGET, MAX_PAIRS, MAX_TERM, MAX_MEANING, MAX_PAIR_BYTES = 1024, 8, 8, 48, 120, 512
 MAX_VIEWS = 4
+MAX_ROWS = 6                           # TRANSLATE rows 1..6 (1..4 until 2026-10-18)
 FLAGS_MASK = 3                         # bit0 noCache, bit1 plate
 
 TEST_SLOT = 127
@@ -729,7 +730,7 @@ def parse_message(m):
     if t == MSG_TRANSLATE:
         req = int.from_bytes(take(2), "big")
         slot, rows, flags = take(1)[0], take(1)[0], take(1)[0]
-        if slot > 126 or not 1 <= rows <= 4 or flags & ~FLAGS_MASK:
+        if slot > 126 or not 1 <= rows <= MAX_ROWS or flags & ~FLAGS_MASK:
             raise ValueError("range")
         tgt = take(take(1)[0])
         if not 1 <= len(tgt) <= MAX_TARGET or not all(0x21 <= b <= 0x7E for b in tgt):

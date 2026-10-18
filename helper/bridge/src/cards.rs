@@ -23,8 +23,15 @@
 //! 9. no plate expected: text from x1+3 to view.right-4, no mask, filled with the median of a
 //!    6 x h/2 patch at view.right-10;
 //! 10. plate expected (or unknown slot) but not detected: the row is dropped;
-//! 11. hits group by (view, slot), ordered by y; a second group of the same slot more than
-//!     `1.5 * K * rowPx` away, or a row index that does not increase, starts another card.
+//! 11. hits group by (view, slot), ordered by y. A tag carries its row modulo 4 (2 bits) and a
+//!     request has up to 6 rows, so rows are numbered on from the first visible one: the next tag
+//!     continues the card when its tag row is 1 to 3 rows further on (modulo 4, a covered row
+//!     may be skipped), the resulting row is below the request's row count (6 when unknown), and
+//!     it lies within (step + 0.6) row pitches, or when it lies within 0.6 pitches of step + 4
+//!     rows (the rows between are hidden; step 0 can only be that); anything else starts another
+//!     card. A run of a
+//!     5- or 6-row request that stops before the last row while it starts at the top of the view
+//!     is the request's last rows (the rows before it are scrolled away): it is renumbered + 4.
 //! Rows whose tag alpha is under 0.3 are dropped (the chat line has faded out).
 
 use std::collections::{HashMap, VecDeque};
@@ -54,6 +61,8 @@ impl Mask {
 /// One reserved row of a card.
 #[derive(Clone, Debug)]
 pub struct RowBand {
+    /// The row's number in its request (0..5): the tag's row (modulo 4) numbered on from the first
+    /// visible row (see `build_with_rows`).
     pub row: u8,
     /// Where the translation text of this row goes.
     pub text_rect: image::Rect,
@@ -89,6 +98,12 @@ pub const ALPHA_MIN: f32 = 0.3;
 pub const GAP_FILL_MAX: i32 = 4;
 /// Smallest mask tolerance (plus twice the plate's own spread; capped by the design's value).
 pub const TOL_MIN: i32 = 6;
+/// Most reserved rows of one request (TRANSLATE rows 1..6).
+pub const MAX_ROWS: u8 = 6;
+/// Rows a tag can tell apart: its row field has 2 bits.
+pub const TAG_ROWS: u8 = 4;
+/// Slack, in row pitches, on the distance from one row to the next of the same card.
+pub const ROW_SLACK: f32 = 0.6;
 
 struct Bounds {
     id: u8,
@@ -294,6 +309,7 @@ pub const COVER_TOL: i32 = 6;
 fn covered_start(
     img: &image::Bgra,
     h: &tags::TagHit,
+    row: u8,
     b: &Bounds,
     others: &[(i32, i32)],
     pobs: [u8; 3],
@@ -318,7 +334,7 @@ fn covered_start(
     for (y0, step) in [(h.y_top - 2, -1), (h.y_bot + 2, 1)] {
         let y1 = y0 + step;
         // only a row of the card can be clipped by the view edge, and row 0 has none above it
-        let may_clip = step > 0 || h.row > 0;
+        let may_clip = step > 0 || row > 0;
         if !inside(y0) || !inside(y1) || member(y0) || member(y1) || !(like(y0) && like(y1)) {
             continue;
         }
@@ -356,11 +372,62 @@ fn matches_prediction(pobs: [u8; 3], spread: i32, r: &TagRefs, alpha: f32) -> bo
 /// Groups tag hits into cards and measures their plates.
 /// `plate_expected(slot)`: Some(true/false) from the TRANSLATE flags, None for an unknown slot.
 /// `sess_bit`: the current session's bit; hits with the other bit are ignored when Some.
+/// Same as [`build_with_rows`] with no row count known.
 pub fn build(
     img: &image::Bgra,
     hits: &[tags::TagHit],
     views: &[msg::View],
     plate_expected: &dyn Fn(u8) -> Option<bool>,
+    sess_bit: Option<u8>,
+) -> Vec<Card> {
+    build_with_rows(img, hits, views, plate_expected, &|_| None, sess_bit)
+}
+
+/// The row after `prev` (numbered `prev_row`) when `h` continues the same card: its tag row is
+/// 1 to 3 rows further on (modulo 4) and it lies within (step + ROW_SLACK) row pitches, or, when
+/// the rows between are hidden (a tooltip over whole rows), it is step + 4 rows on and lies within
+/// ROW_SLACK pitches of that distance (step 0 can only be that); the row stays below `max_rows`.
+/// The pitch is at least the tag height plus one.
+fn next_row(prev: &tags::TagHit, prev_row: u8, h: &tags::TagHit, row_px: f32, max_rows: u8) -> Option<u8> {
+    let step = (h.row % TAG_ROWS + TAG_ROWS - prev.row % TAG_ROWS) % TAG_ROWS;
+    let pitch = row_px.max((prev.y_bot - prev.y_top + 2) as f32);
+    let gap = (h.y_top - prev.y_top) as f32;
+    let near = step > 0 && gap <= (f32::from(step) + ROW_SLACK) * pitch;
+    let d = if near { step } else { step + TAG_ROWS };
+    let far_ok = (gap - f32::from(d) * pitch).abs() <= ROW_SLACK * pitch;
+    let row = prev_row + d;
+    ((near || far_ok) && row < max_rows).then_some(row)
+}
+
+/// A run of a request with more than 4 rows (`rows`) that stops before its last row while its
+/// first tag is at the top of the view: the rows before it are scrolled away (a chat clips lines
+/// only at its top), so the run is the request's last rows and tag rows 0 and 1 stand for 4 and 5.
+fn renumber_clipped(nums: &mut [u8], members: &[(&tags::TagHit, Bounds)], rows: Option<u8>) {
+    let (Some(rows), Some(&first), Some(&last), Some((h0, b0))) = (rows, nums.first(), nums.last(), members.first()) else { return };
+    if rows <= TAG_ROWS || last + TAG_ROWS >= rows {
+        return;
+    }
+    let n = i32::from(last - first);
+    let pitch = match members.last() {
+        Some((hl, _)) if n > 0 => (hl.y_top - h0.y_top) as f32 / n as f32,
+        _ => b0.row_px.max((h0.y_bot - h0.y_top + 2) as f32),
+    };
+    if ((h0.y_top - b0.top) as f32) < 1.5 * pitch {
+        for r in nums.iter_mut() {
+            *r += TAG_ROWS;
+        }
+    }
+}
+
+/// [`build`] with each slot's row count when known (`rows_expected(slot)`: the TRANSLATE rows,
+/// 1..6): it limits how far rows are numbered, and a run of a 5- or 6-row request at the top of
+/// the view is renumbered as the request's last rows.
+pub fn build_with_rows(
+    img: &image::Bgra,
+    hits: &[tags::TagHit],
+    views: &[msg::View],
+    plate_expected: &dyn Fn(u8) -> Option<bool>,
+    rows_expected: &dyn Fn(u8) -> Option<u8>,
     sess_bit: Option<u8>,
 ) -> Vec<Card> {
     let img_right = img.origin_x + img.width as i32;
@@ -397,26 +464,32 @@ pub fn build(
     let mut cards = Vec::new();
     for (key, mut members) in groups {
         members.sort_by_key(|m| (m.0.y_top, m.0.x0));
-        let k_rows = members.iter().map(|m| m.0.row).max().unwrap_or(0) as f32 + 1.0;
+        let rows = rows_expected(key.1).map(|r| r.clamp(1, MAX_ROWS));
+        let max_rows = rows.unwrap_or(MAX_ROWS);
         let mut current: Vec<(&tags::TagHit, Bounds)> = Vec::new();
-        let flush = |cur: &mut Vec<(&tags::TagHit, Bounds)>, cards: &mut Vec<Card>| {
+        let mut nums: Vec<u8> = Vec::new();
+        let flush = |cur: &mut Vec<(&tags::TagHit, Bounds)>, nums: &mut Vec<u8>, cards: &mut Vec<Card>| {
             if !cur.is_empty() {
-                if let Some(c) = make_card(img, key, cur, plate_expected) {
+                renumber_clipped(nums, cur, rows);
+                if let Some(c) = make_card(img, key, cur, nums, plate_expected) {
                     cards.push(c);
                 }
                 cur.clear();
+                nums.clear();
             }
         };
         for m in members {
-            if let Some(prev) = current.last() {
-                let far = (m.0.y_top - prev.0.y_top) as f32 > 1.5 * k_rows * m.1.row_px;
-                if far || m.0.row <= prev.0.row {
-                    flush(&mut current, &mut cards);
+            let mut row = m.0.row % TAG_ROWS;
+            if let (Some(prev), Some(&prev_row)) = (current.last(), nums.last()) {
+                match next_row(prev.0, prev_row, m.0, m.1.row_px, max_rows) {
+                    Some(r) => row = r,
+                    None => flush(&mut current, &mut nums, &mut cards),
                 }
             }
             current.push(m);
+            nums.push(row);
         }
-        flush(&mut current, &mut cards);
+        flush(&mut current, &mut nums, &mut cards);
     }
     cards
 }
@@ -493,8 +566,9 @@ struct Probe {
     covered: bool,
 }
 
-/// Samples a row's plate start; None when nothing can be sampled.
-fn probe(img: &image::Bgra, h: &tags::TagHit, b: &Bounds, members: &[(&tags::TagHit, Bounds)]) -> Option<Probe> {
+/// Samples a row's plate start (`row`: the row's number in its card); None when nothing can be
+/// sampled.
+fn probe(img: &image::Bgra, h: &tags::TagHit, row: u8, b: &Bounds, members: &[(&tags::TagHit, Bounds)]) -> Option<Probe> {
     let cy = (h.y_top + h.y_bot) / 2;
     let q = (h.y_bot - h.y_top + 1) / 4;
     let bwi = (h.block_px.round() as i32).max(3);
@@ -522,12 +596,12 @@ fn probe(img: &image::Bgra, h: &tags::TagHit, b: &Bounds, members: &[(&tags::Tag
         }
         _ => ground.map(rgbf),
     };
-    let covered = plate && (edge || covered_start(img, h, b, &others, pobs, spread, local, (sx0, sx1)));
+    let covered = plate && (edge || covered_start(img, h, row, b, &others, pobs, spread, local, (sx0, sx1)));
     Some(Probe { pobs, spread, refs, ground, plate, covered })
 }
 
-/// The mask and the text rectangle of one plate.
-fn plate_band(img: &image::Bgra, h: &tags::TagHit, b: &Bounds, pr: &Probe) -> Option<RowBand> {
+/// The mask and the text rectangle of one plate (`row`: the row's number in its card).
+fn plate_band(img: &image::Bgra, h: &tags::TagHit, row: u8, b: &Bounds, pr: &Probe) -> Option<RowBand> {
     let height = h.y_bot - h.y_top + 1;
     let cy = (h.y_top + h.y_bot) / 2;
     let (pobs, spread) = (pr.pobs, pr.spread);
@@ -665,17 +739,19 @@ fn plate_band(img: &image::Bgra, h: &tags::TagHit, b: &Bounds, pr: &Probe) -> Op
     }
     let x = h.x1 + 3;
     Some(RowBand {
-        row: h.row,
+        row,
         text_rect: image::Rect { x, y: h.y_top, w: (text_right - x).max(0), h: height },
         mask: Some(Mask { rect: image::Rect { x: mx0, y: h.y_top, w: mw, h: height }, bits }),
         tag_rect: tag_rect_of(img, h),
     })
 }
 
+/// One card from consecutive rows of one slot; `nums` are the rows' numbers in the card.
 fn make_card(
     img: &image::Bgra,
     key: (u8, u8),
     members: &[(&tags::TagHit, Bounds)],
+    nums: &[u8],
     plate_expected: &dyn Fn(u8) -> Option<bool>,
 ) -> Option<Card> {
     let (view_id, slot) = key;
@@ -685,7 +761,7 @@ fn make_card(
     let mut pobs_list = Vec::new();
     let mut alphas = Vec::new();
     if !plate_mode {
-        for (h, b) in members {
+        for ((h, b), &row) in members.iter().zip(nums) {
             let height = h.y_bot - h.y_top + 1;
             let cy = (h.y_top + h.y_bot) / 2;
             let q = height / 4;
@@ -694,7 +770,7 @@ fn make_card(
             alphas.push(h.alpha);
             let x = h.x1 + 3;
             bands.push(RowBand {
-                row: h.row,
+                row,
                 text_rect: image::Rect { x, y: h.y_top, w: (b.right - 4 - x).max(0), h: height },
                 mask: None,
                 tag_rect: tag_rect_of(img, h),
@@ -703,7 +779,7 @@ fn make_card(
     } else {
         // 1. each row's plate start: sampled, tested against the prediction and the hue rule,
         //    and checked for a cover (the same colour above or below the row)
-        let probes: Vec<Option<Probe>> = members.iter().map(|(h, b)| probe(img, h, b, members)).collect();
+        let probes: Vec<Option<Probe>> = members.iter().zip(nums).map(|((h, b), &row)| probe(img, h, row, b, members)).collect();
         // 2. a row next to a covered or non-plate row, with the same colour at its plate start, is
         //    covered too (the middle rows of a cover over several rows have no free side to test)
         let mut covered: Vec<bool> = probes.iter().map(|p| p.as_ref().is_none_or(|p| !p.plate || p.covered)).collect();
@@ -736,7 +812,7 @@ fn make_card(
             if covered[i] {
                 continue;
             }
-            let Some(band) = plate_band(img, h, b, p) else { continue };
+            let Some(band) = plate_band(img, h, nums[i], b, p) else { continue };
             pobs_list.push(p.pobs);
             alphas.push(h.alpha);
             bands.push(band);

@@ -38,6 +38,10 @@ import math
 import sys
 
 LATENCY_P99_MS = 300.0
+# A tag carries its row number modulo 4 (requests hold 1..6 rows since 2026-10-18), and the truth
+# reports the tag's row field, while the Helper numbers a card's bands 0..5: rows are compared
+# modulo 4, the y position tells the rows apart.
+TAG_ROWS = 4
 CPU_MAX_PCT = 3.0
 FINISHED = {"done", "same", "nothing"}
 
@@ -192,7 +196,7 @@ def shown_bands(cards, hidden):
 
 
 def find_item(items, view, slot, row, y):
-    cands = [i for i in items if i["slot"] == slot and i["row"] == row and i.get("tag") is not None
+    cands = [i for i in items if i["slot"] == slot and i["row"] % TAG_ROWS == row % TAG_ROWS and i.get("tag") is not None
              and (view == 0 or i["view"] == view)]
     if not cands:
         return None
@@ -276,7 +280,7 @@ def check_frames(truth, diag, rep, captures, px, strict):
                 if count_in(caps, max(ch, since), c) < captures:
                     continue
             band_checks += 1
-            match = [(cd, i) for cd, i in bands if cd["slot"] == it["slot"] and cd["rows"][i] == it["row"]
+            match = [(cd, i) for cd, i in bands if cd["slot"] == it["slot"] and cd["rows"][i] % TAG_ROWS == it["row"] % TAG_ROWS
                      and (cd.get("view", 0) == 0 or cd["view"] == it["view"])
                      and abs(cd["tags"][i][1] - it["tag"][1]) <= 3 * px + 2]
             if not match:
