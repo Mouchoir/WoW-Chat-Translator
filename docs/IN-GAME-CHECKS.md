@@ -8,11 +8,11 @@ to report. Commands are typed from the repo root in PowerShell unless they start
 
 ## 0. One-time setup
 
-1. **Close the game completely** (exit to desktop, not `/reload`): this version adds and removes
-   addon files, which the client only picks up at a full start.
+1. **No restart needed:** `/reload` picks up the added and removed addon Lua files (measured on
+   WoW Forever on 2026-10-18).
 2. **Remove the old model packs** left in the AddOns folder by the Lua translator
-   (`TranslateProbe_deen`, `_enfr`, `_esen`, `_koen`, `_ruen`, `_zhen`, about 194 MB). With the
-   game closed, this moves them to the Recycle Bin (it reads the AddOns folder from the gitignored
+   (`TranslateProbe_deen`, `_enfr`, `_esen`, `_koen`, `_ruen`, `_zhen`, about 194 MB). This moves
+   them to the Recycle Bin (it reads the AddOns folder from the gitignored
    `scripts\dev.local.ps1`):
 
    ```powershell

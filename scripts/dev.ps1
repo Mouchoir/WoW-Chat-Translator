@@ -74,5 +74,5 @@ foreach ($path in $targets) {
     $deployed++
 }
 
-Write-Host "Deployed to $deployed folder(s). Adding or removing addon files needs a full game restart; code changes only need /reload."
+Write-Host "Deployed to $deployed folder(s). Type /reload in game to load the changes."
 exit 0

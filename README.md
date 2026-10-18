@@ -29,8 +29,8 @@ Design: `docs\DESIGN.md`. Components: `docs\ADDON.md`, `docs\BRIDGE.md`, `docs\E
 
 ## Install (development)
 
-1. Close the game (adding or removing addon files needs a full restart; code changes only need
-   `/reload`).
+1. The game may stay open: `/reload` picks up changed and new addon Lua files (measured on
+   WoW Forever). New texture files were not tested.
 2. `dev.cmd` mirrors `addon\TranslateProbe` into the AddOns folder given by `-WowAddOnsPath`,
    `TPROBE_WOW_ADDONS_PATH`, or a gitignored `scripts\dev.local.ps1` that sets `$WowAddOnsPaths`.
 3. Build the Helper (Rust, offline): `scripts\helper.ps1 -Build`.
