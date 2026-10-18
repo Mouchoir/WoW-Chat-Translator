@@ -1,0 +1,15 @@
+-- basic: three clicks on lines of different lengths (2, 2 and 3 reserved rows); the Helper decodes
+-- each TRANSLATE and draws three cards on the plates.
+local E = E2E.Start({ name = "basic" })
+local ids = E.Filler()
+E.Wait(2)
+E.Mark("click party")
+E.Click(ids.party)
+E.Wait(1.5)
+E.Mark("click trade")
+E.Click(ids.trade)
+E.Wait(1.5)
+E.Mark("click long")
+E.Click(ids.long)
+E.Wait(8)
+E.Finish(2)

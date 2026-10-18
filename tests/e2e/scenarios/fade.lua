@@ -1,0 +1,17 @@
+-- fade: chat lines fade out (shortened here to 5 s visible + 3 s fade; WoW uses 120 + 3 s), the
+-- cards fade with them and hide below alpha 0.3; scrolling resets the fade and the cards come back.
+local E = E2E.Start({ name = "fade", fade = { visible = 5, duration = 3 } })
+local ids = E.Filler()
+E.Wait(1.5)
+E.Click(ids.guild)
+E.Wait(1.2)
+E.Click(ids.whisper)
+E.Mark("waiting for the fade")
+E.Wait(10)
+E.Mark("scrolling resets the fade")
+E.Scroll(ChatFrame1, 1)
+E.Wait(1.5)
+E.Scroll(ChatFrame1, 0)
+E.Wait(4)
+E.Mark("fading again")
+E.Finish(6)

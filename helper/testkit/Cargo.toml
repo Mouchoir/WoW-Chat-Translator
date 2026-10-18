@@ -1,0 +1,57 @@
+[package]
+name = "tp_testkit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "TranslateProbe end-to-end rig: fakewow plays a recorded addon scenario in a window the Helper captures, and writes the ground truth"
+
+[lib]
+name = "tp_testkit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fakewow"
+path = "src/bin/fakewow.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dependencies.windows]
+version = "0.62.2"
+features = [
+  # design D.1
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_HiDpi",
+  "Win32_System_LibraryLoader",
+  # square window corners (Windows 11 rounds them, which would hide the strip's corner pixels)
+  "Win32_Graphics_Dwm",
+  # "is WowB.exe running" before an on-screen placement, and fakewow's own CPU time
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Threading",
+  # PrintWindow: --selfcheck read-back of a layered (off-screen) window
+  "Win32_Storage_Xps",
+  # --wgc-check: Windows.Graphics.Capture of fakewow's own window (amendment A1)
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_System_WinRT",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics_Capture",
+  "Foundation",
+  "Graphics",
+  "Graphics_Capture",
+  "Graphics_DirectX",
+  "Graphics_DirectX_Direct3D11",
+  "Security_Authorization_AppCapabilityAccess",
+]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

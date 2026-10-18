@@ -1,0 +1,27 @@
+-- scroll: three cards, then new lines push them up and out of the chat, then the chat scrolls up
+-- and back down. Cards follow their plates and hide once a plate leaves the chat.
+local E = E2E.Start({ name = "scroll" })
+local ids = E.Filler()
+E.Wait(2)
+E.Click(ids.guild)
+E.Wait(1.2)
+E.Click(ids.fr)
+E.Wait(1.2)
+E.Click(ids.whisper)
+E.Wait(3)
+E.Mark("new lines push the cards up")
+for i = 1, 8 do
+    E.Say("filler line number " .. i .. " about nothing in particular", "Hollis", "CHAT_MSG_SAY")
+    E.Wait(0.6)
+end
+E.Wait(2)
+E.Mark("scroll up 4 messages")
+E.Scroll(ChatFrame1, 4)
+E.Wait(3)
+E.Mark("scroll up 12 messages")
+E.Scroll(ChatFrame1, 12)
+E.Wait(3)
+E.Mark("back to the bottom")
+E.Scroll(ChatFrame1, 0)
+E.Wait(3)
+E.Finish(2)
