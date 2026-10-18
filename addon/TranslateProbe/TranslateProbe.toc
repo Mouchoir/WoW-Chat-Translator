@@ -1,23 +1,17 @@
 ## Interface: 16001
 ## Title: TranslateProbe
-## Notes: Dev tool. Measures whether a fully local chat translator can run on WoW Forever: Lua speed, chat lockdown, script budget.
+## Notes: Click [T] after a player chat line to translate it. Translations are drawn by the TranslateProbe Helper app (local AI, no /reload).
 ## Author: Mouchoir
-## Version: 0.1.0
+## Version: 0.2.0
 ## SavedVariables: TranslateProbeDB
 
 Locales.lua
 Core.lua
-Scheduler.lua
-Kernels.lua
-Model.lua
-Bench.lua
+Bridge.lua
 Glossary.lua
-Base64.lua
-Tokenizer.lua
-Engine.lua
-LangData.lua
 Lang.lua
-Clean.lua
+Reserve.lua
 ChatButton.lua
-LockdownLog.lua
+Request.lua
+Restriction.lua
 Commands.lua

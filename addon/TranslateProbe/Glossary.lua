@@ -1,15 +1,17 @@
--- Instant layer of the translator: expands WoW chat abbreviations (LFM, BGs, DM, stock...).
+-- WoW chat abbreviations (LFM, BGs, DM, stock...): shown in a glossary row under a clicked
+-- line, and sent to the helper as prompt pairs so the model reads them right.
 -- Matching is per whole word and ignores case for ASCII letters. Words keep their accented
 -- letters (WoW's %w is ASCII only, so "stéréo" must not split into "st" + "r" + "o").
--- Users add, override or disable entries with /tprobe gloss (TranslateProbeDB.glossary).
--- The built-in meanings below are bilingual data (en + fr), not UI strings.
+-- Users add, override or disable entries with /tpr gloss (TranslateProbeDB.glossary); user
+-- entries have no language and are sent as typed for any target.
+-- The built-in meanings below are bilingual data (en + fr), not UI strings. Meanings follow the
+-- translation target: French for "fr", English for every other target (a pivot the model reads).
+-- This file also builds the marked text the helper translates (PromptText).
 local _, ns = ...
 local L = ns.L
 
 local Glossary = {}
 ns.Glossary = Glossary
-
-local MAX_SHOWN = 8
 
 -- key (lowercase) -> { en = English meaning, fr = French meaning }, or a list of such meanings
 -- when one abbreviation has several (all are shown, the reader picks). plural = true lets
@@ -135,14 +137,49 @@ local PATTERNS = {
     { pattern = "^lf(%d+)$", en = "looking for %s", fr = "cherche %s" },
 }
 
-local WORD = "[%w\128-\255]+"   -- ASCII letters and digits plus any UTF-8 byte
+-- Words that a model tends to translate wrong for one target. Used in prompts only, never
+-- shown: the glossary row stays about abbreviations.
+Glossary.FALSE_FRIENDS = {
+    fr = { cheap = "pas cher" },
+}
 
-local function LocalizedOne(entry, value)
-    local en, fr = entry.en, entry.fr
+local WORD = "[%w\128-\255]+"   -- ASCII letters and digits plus any UTF-8 byte
+local MEANING_SEP = " / "       -- prompt data, not a UI string
+local MAX_PAIRS, MAX_TERM, MAX_MEANING, MAX_PAIR_BYTES = 8, 48, 120, 512
+local MAX_PROMPT = 1024
+local MAX_BRACE = 32
+
+local function DbTarget()
+    return ns.db and ns.db.target or "en"
+end
+
+local function One(one, target, value)
+    local en, fr = one.en, one.fr
     if value then
         en, fr = en:format(value), fr and fr:format(value)
     end
-    if fr and GetLocale() == "frFR" then
+    return en, (target == "fr" and fr) or nil
+end
+
+-- Prompt meaning of a built-in entry: French when the target is fr and the entry has it, else
+-- English; several meanings joined with " / ".
+function Glossary.MeaningFor(entry, target, value)
+    if entry[1] == nil then
+        local en, fr = One(entry, target, value)
+        return fr or en
+    end
+    local meanings = {}
+    for i, one in ipairs(entry) do
+        local en, fr = One(one, target, value)
+        meanings[i] = fr or en
+    end
+    return table.concat(meanings, MEANING_SEP)
+end
+
+-- Display form for the glossary row: "fr (en)" when the target is fr, else en.
+local function DisplayOne(one, target, value)
+    local en, fr = One(one, target, value)
+    if fr then
         if fr:lower() == en:lower() then
             return fr
         end
@@ -151,48 +188,60 @@ local function LocalizedOne(entry, value)
     return en
 end
 
-local function Localized(entry, value)
+local function Display(entry, target, value)
     if entry[1] == nil then
-        return LocalizedOne(entry, value)
+        return DisplayOne(entry, target, value)
     end
     local meanings = {}
     for i, one in ipairs(entry) do
-        meanings[i] = LocalizedOne(one, value)
+        meanings[i] = DisplayOne(one, target, value)
     end
     return table.concat(meanings, L.GLOSS_OR)
 end
 
--- Meaning of one word (ASCII part already lowercased), or nil. Custom entries win; false
--- disables a built-in. Built-in keys are ASCII, so accented words only match custom entries.
-local function Lookup(key, allowPlural)
+-- Meaning of one word (ASCII part already lowercased), or nil, and true when it comes from a
+-- user entry. User entries win; false disables a key (and its plural). Built-in keys are ASCII,
+-- so accented words only match user entries. forPrompt: prompt meaning with the target's false
+-- friends; otherwise the display form.
+local function Find(key, allowPlural, target, forPrompt)
     local custom = ns.db and ns.db.glossary and ns.db.glossary[key]
     if custom == false then
         return nil
     elseif type(custom) == "string" then
-        return custom
+        return custom, true
     end
     if key:find("[\128-\255]") then
         return nil
     end
-    if BUILTIN[key] then
-        return Localized(BUILTIN[key])
+    if forPrompt then
+        local friends = Glossary.FALSE_FRIENDS[target]
+        if friends and friends[key] then
+            return friends[key]
+        end
+    end
+    local entry = BUILTIN[key]
+    if entry then
+        if forPrompt then
+            return Glossary.MeaningFor(entry, target)
+        end
+        return Display(entry, target)
     end
     for _, rule in ipairs(PATTERNS) do
         local value = key:match(rule.pattern)
         if value then
-            return Localized(rule, value)
+            if forPrompt then
+                return Glossary.MeaningFor(rule, target, value)
+            end
+            return Display(rule, target, value)
         end
     end
     -- Plurals only for entries that allow them: "bgs" -> "bg", but not "abs" -> "ab".
     if allowPlural and key:sub(-1) == "s" then
         local base = BUILTIN[key:sub(1, -2)]
         if base and base.plural then
-            return Lookup(key:sub(1, -2), false)
+            return Find(key:sub(1, -2), false, target, forPrompt)
         end
     end
-end
-Glossary.Lookup = function(word)
-    return Lookup(word:lower(), true)
 end
 
 -- The words typed by the player: colors, links (quests, items...), textures, atlases,
@@ -222,7 +271,7 @@ function Glossary.Romanize(text)
 end
 
 -- The text a reader sees: link brackets kept ("[Linen Cloth]"), codes, icons and protected
--- Battle.net names removed. This is what the translator gets.
+-- Battle.net names removed. Used to measure the line.
 function Glossary.VisibleText(text)
     text = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
     text = text:gsub("|H.-|h(.-)|h", "%1"):gsub("|T.-|t", ""):gsub("|A.-|a", "")
@@ -235,19 +284,21 @@ function Glossary.HasWords(text)
     return PlainText(text):find(WORD) ~= nil
 end
 
--- "LFM: cherche des membres (looking for more), DM: Les Mortemines (The Deadmines) / ..." or nil.
-function Glossary.Describe(text)
+-- "LFM: cherche des membres (looking for more), DM: Les Mortemines (The Deadmines) / ..." or
+-- nil. Meanings follow the target (default: the saved target); false friends are never shown.
+function Glossary.Describe(text, target)
+    target = target or DbTarget()
     local parts, seen = {}, {}
     for word in PlainText(text):gmatch(WORD) do
         local key = word:lower()
         if not seen[key] then
             seen[key] = true
-            local meaning = Lookup(key, true)
+            local meaning = Find(key, true, target, false)
             if meaning then
                 -- string.upper only knows ASCII: keep accented words as typed.
                 local label = word:find("[\128-\255]") and word or word:upper()
                 parts[#parts + 1] = L.GLOSS_PAIR:format(label, meaning)
-                if #parts >= MAX_SHOWN then
+                if #parts >= MAX_PAIRS then
                     break
                 end
             end
@@ -258,6 +309,89 @@ function Glossary.Describe(text)
     end
     -- Chat links end at the next "|", so user text must not contain one.
     return (table.concat(parts, L.GLOSS_SEP):gsub("|", "/"))
+end
+
+-- Prompt pairs for the helper: array of { term as typed, meaning }. User entries first, then
+-- the others, each in order of appearance; one pair per lowercase word; pairs whose meaning is
+-- the word itself are skipped. Caps: 8 pairs, term 48 bytes, meaning 120 bytes, and
+-- sum(2 + #term + #meaning) <= 512 (the TRANSLATE message limits).
+function Glossary.Extract(text, target)
+    target = target or DbTarget()
+    local user, other, seen = {}, {}, {}
+    for word in PlainText(text):gmatch(WORD) do
+        local key = word:lower()
+        if not seen[key] then
+            seen[key] = true
+            local meaning, isUser = Find(key, true, target, true)
+            if meaning and meaning:lower() ~= key then
+                local list = isUser and user or other
+                list[#list + 1] = { word, meaning }
+            end
+        end
+    end
+    local cut = ns.Bridge.Utf8Cut
+    local out, used = {}, 0
+    for _, list in ipairs({ user, other }) do
+        for _, p in ipairs(list) do
+            if #out >= MAX_PAIRS then
+                return out
+            end
+            local term, meaning = cut(p[1], MAX_TERM), cut(p[2], MAX_MEANING)
+            local cost = 2 + #term + #meaning
+            if used + cost > MAX_PAIR_BYTES then
+                return out
+            end
+            out[#out + 1] = { term, meaning }
+            used = used + cost
+        end
+    end
+    return out
+end
+
+-- Wraps each "{...}" of 1-32 characters (UTF-8) in 0x02/0x03 marks, outside the marks
+-- already present.
+local function MarkBraces(s)
+    local out, pos = {}, 1
+    while true do
+        local a, b = s:find("\2.-\3", pos)
+        local segment = s:sub(pos, (a or #s + 1) - 1)
+        out[#out + 1] = (segment:gsub("{([^{}]*)}", function(inner)
+            local chars = select(2, inner:gsub("[^\128-\191]", ""))
+            if chars >= 1 and chars <= MAX_BRACE then
+                return "\2{" .. inner .. "}\3"
+            end
+        end))
+        if not a then
+            break
+        end
+        out[#out + 1] = s:sub(a, b)
+        pos = b + 1
+    end
+    return table.concat(out)
+end
+
+-- Text sent to the helper: codes removed, link names ("[Linen Cloth]") and "{...}" groups
+-- wrapped in 0x02/0x03 marks so the model keeps them, brackets a player typed left plain.
+-- At most 1024 bytes, cut on a UTF-8 boundary and never inside a mark.
+function Glossary.PromptText(raw)
+    local s = raw:gsub("[\1\2\3]", "")    -- a typed control byte must never pass for a mark
+    s = s:gsub("||", "\1")                -- escaped pipe, restored at the end
+    s = s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    s = s:gsub("|H.-|h(.-)|h", function(name)
+        if name == "" then
+            return ""
+        end
+        return "\2" .. name .. "\3"
+    end)
+    s = s:gsub("|T.-|t", ""):gsub("|A.-|a", ""):gsub("|K.-|k", "")
+    s = MarkBraces(s)
+    s = s:gsub("\1", "|")
+    s = ns.Bridge.Utf8Cut(s, MAX_PROMPT)
+    local open, close = s:match(".*()\2"), s:match(".*()\3")
+    if open and (not close or open > close) then
+        s = s:sub(1, open - 1)
+    end
+    return s
 end
 
 -- Pattern of one glossary key typed in a command: a whole word, accents allowed.

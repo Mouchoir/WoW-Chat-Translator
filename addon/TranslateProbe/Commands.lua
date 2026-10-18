@@ -1,92 +1,51 @@
 -- Slash commands: /tprobe (alias /tpr).
-local addonName, ns = ...
+local _, ns = ...
 local L = ns.L
+
+local TEST_ID_BASE = 900000000   -- lineIDs of the addon's own test lines
+local testCount = 0
 
 local function Yes(value)
     return value and L.YES or L.NO
 end
 
-local function Number(value)
-    return type(value) == "number" and ("%g"):format(value) or "?"
+local function TargetName(code)
+    return ns.Lang.NAMES[code] or code
+end
+
+local function NextTestId()
+    testCount = testCount + 1
+    return TEST_ID_BASE + testCount
+end
+
+local function SendTest()
+    local nonce = math.random(1, 65535)
+    ns.Bridge.Send(ns.Bridge.TestMessage(nonce))
+    ns.Printf(L.TEST_SENT, nonce)
 end
 
 local function PrintInfo()
+    ns.Printf(L.INFO_VERSION, ns.VERSION, ns.ADDON_BUILD, ns.sessionId)
     local version, build, _, interface = GetBuildInfo()
-    ns.Printf(L.INFO_CLIENT, version, build, interface, tostring(WOW_PROJECT_ID))
-
-    local limits = ns.Scheduler.GetBucketLimits()
-    if limits then
-        ns.Printf(L.INFO_BUCKET,
-            Number(limits.luaScriptBucketThrottleMaxMsPerSecondNormal), Number(limits.luaScriptBucketThrottleMaxMsBurstNormal),
-            Number(limits.luaScriptBucketThrottleMaxMsPerSecondRestricted), Number(limits.luaScriptBucketThrottleMaxMsBurstRestricted))
-    else
-        ns.Print(L.INFO_BUCKET_NA)
-    end
-    local refill, ceiling, pace = ns.Scheduler.Pace()
-    local _, debt = ns.Scheduler.Plan()
-    ns.Printf(L.INFO_SLICE, pace, ns.db.budgetMs, refill, ceiling, debt)
-    if ns.Scheduler.IsThrottled() then
-        ns.Print(L.THROTTLED)
-    end
-
-    local active = ns.LockdownLog.ActiveRestrictions()
-    ns.Printf(L.INFO_LOCK, Yes(C_ChatInfo.InChatMessagingLockdown()), active ~= "" and active or L.NONE,
-        ns.LockdownLog.Context())
-
-    if C_AddOnProfiler and C_AddOnProfiler.IsEnabled and C_AddOnProfiler.IsEnabled() then
-        local metric = Enum.AddOnProfilerMetric
-        ns.Printf(L.INFO_CPU,
-            C_AddOnProfiler.GetAddOnMetric(addonName, metric.RecentAverageTime),
-            C_AddOnProfiler.GetAddOnMetric(addonName, metric.PeakTime),
-            C_AddOnProfiler.GetAddOnMetric(addonName, metric.CountTimeOver5Ms))
-    end
-
-    UpdateAddOnMemoryUsage()
-    local model = ns.Model.IsBuilt() and L.MODEL_LOADED:format(ns.Model.Bytes() / 1048576) or L.MODEL_NOT_LOADED
-    ns.Printf(L.INFO_MEM, GetAddOnMemoryUsage(addonName) / 1024, model)
-end
-
-local function RunModel(pieces)
-    local srcPieces, tgtPieces = pieces, ns.Model.TargetFor(pieces)
-    local queued = ns.Model.QueueBuild(function(job, ok)
-        if ok then
-            local s = job.stats
-            ns.Printf(L.MODEL_BUILT, ns.Model.Bytes() / 1048576, s.busyMs / 1000, s.wallMs / 1000, s.maxSliceMs)
-        else
-            ns.Printf(L.JOB_FAILED, job.err or "?")
-        end
+    ns.Printf(L.INFO_CLIENT, tostring(version), tostring(build), tostring(interface), tostring(WOW_PROJECT_ID))
+    ns.Printf(L.INFO_TARGET, TargetName(ns.db.target), ns.Bridge.ModeName())
+    local okSize, w, h = pcall(GetPhysicalScreenSize)
+    local okScale, scale = pcall(UIParent.GetEffectiveScale, UIParent)
+    ns.Printf(L.INFO_SCREEN, okSize and tostring(w) or "?", okSize and tostring(h) or "?",
+        okScale and ("%.3f"):format(scale) or "?")
+    ns.Printf(L.INFO_REQUESTS, ns.Request.Count(), ns.Reserve.SlotsInUse())
+    ChatFrameUtil.ForEachChatFrame(function(frame)
+        local okName, name = pcall(frame.GetName, frame)
+        ns.Printf(L.INFO_FRAME, okName and tostring(name) or "?", Yes(frame.TransformMessages ~= nil),
+            Yes(frame.FontStringContainer ~= nil))
     end)
-    if queued then
-        ns.Printf(L.MODEL_BUILD, ns.Model.ExpectedBytes() / 1048576)
-    end
-    ns.Scheduler.Enqueue({
-        run = function(job)
-            job.macs = ns.Model.Forward(srcPieces, tgtPieces)
-        end,
-        done = function(job, ok)
-            if not ok then
-                ns.Printf(L.JOB_FAILED, job.err or "?")
-                return
-            end
-            local s = job.stats
-            ns.Printf(L.MODEL_RESULT, srcPieces, tgtPieces, job.macs / 1e6, s.busyMs / 1000, s.wallMs / 1000,
-                s.frames, s.maxBudgetMs, s.maxSliceMs)
-            ns.PushCapped(ns.db.results.models, {
-                when = date("%Y-%m-%d %H:%M"), src = srcPieces, tgt = tgtPieces,
-                shortlist = ns.Model.ShortlistRows(), macs = job.macs,
-                busyMs = s.busyMs, wallMs = s.wallMs, queuedMs = s.queuedMs, pausedMs = s.pausedMs,
-                frames = s.frames, maxSliceMs = s.maxSliceMs, minBudgetMs = s.minBudgetMs,
-                budgetMs = s.maxBudgetMs, every = s.maxEvery, fps = s.avgFps,
-                context = ns.LockdownLog.Context(), restrictions = ns.LockdownLog.ActiveRestrictions(),
-            }, 50)
-        end,
-    })
 end
 
 local function Help()
     ns.Print(L.HELP_HEADER)
-    for _, key in ipairs({ "HELP_INFO", "HELP_BENCH", "HELP_MODEL", "HELP_BUDGET", "HELP_LOG",
-        "HELP_TARGET", "HELP_SPEED", "HELP_SIMULATE", "HELP_NAMES", "HELP_TRANSLIT", "HELP_GLOSS", "HELP_CATCHUP", "HELP_REPORT", "HELP_RESET", "HELP_FREE", "HELP_CLICK" }) do
+    for _, key in ipairs({ "HELP_INFO", "HELP_TARGET", "HELP_NAMES", "HELP_SHOW", "HELP_MODE", "HELP_TRANSLIT",
+        "HELP_GLOSS", "HELP_TEST", "HELP_TEST_ROWS", "HELP_TEST_LOCKDOWN", "HELP_CLEAR", "HELP_APP", "HELP_DEBUG",
+        "HELP_CLICK" }) do
         ns.Print(L[key])
     end
 end
@@ -103,7 +62,7 @@ local function Label(key)
     return key:find("[\128-\255]") and key or key:upper()
 end
 
--- /tprobe gloss add|del|list|test ...
+-- /tpr gloss add|del|list|test ...
 local function Gloss(arg)
     local action, rest = arg:match("^(%S*)%s*(.-)$")
     action = action:lower()
@@ -114,7 +73,7 @@ local function Gloss(arg)
             ns.Print(L.GLOSS_HELP_ADD)
             return
         end
-        custom[key:lower()] = (text:gsub("|", "/"))
+        custom[key:lower()] = ns.Bridge.Utf8Cut((text:gsub("|", "/")), 120)
         ns.Printf(L.GLOSS_ADDED, Label(key), custom[key:lower()])
     elseif action == "del" then
         local key = rest:match("^(" .. ns.Glossary.KEY_PATTERN .. ")$")
@@ -143,52 +102,124 @@ local function Gloss(arg)
             ns.Printf(L.GLOSS_ENTRY, Label(key), custom[key] == false and L.GLOSS_DISABLED or custom[key])
         end
     elseif action == "test" and rest ~= "" then
-        ns.Print(ns.Glossary.Describe(rest) or L.SUFFIX_NO_GLOSS)
+        ns.Print(ns.Glossary.Describe(rest, ns.db.target) or L.SUFFIX_NO_GLOSS)
     else
         GlossHelp()
     end
 end
 
+-- /tpr test: the whole pipeline on a sample line (TEST toast, then a real request).
+local function TestPipeline()
+    SendTest()
+    local id = NextTestId()
+    local sample = ns.db.target == "en" and L.TEST_SAMPLE_FR or L.TEST_SAMPLE_EN
+    DEFAULT_CHAT_FRAME:AddMessage(sample .. ns.ChatButton.ButtonLink(id))
+    ns.ChatButton.Track(id, sample, nil)
+    ns.Request.Start(id, DEFAULT_CHAT_FRAME, true)
+end
+
+local function PrintHeight(label, chatFrame, text, width)
+    local ok, _, height, lines = pcall(ns.Reserve.Measure, chatFrame, text, width)
+    if ok then
+        ns.Printf(L.TEST_ROWS_HEIGHT, label, height, lines)
+    else
+        ns.Printf(L.TEST_ROWS_HEIGHT_NA, label)
+    end
+end
+
+-- /tpr test rows: the row layout check (G2). No TRANSLATE is sent; the helper writes
+-- "Overlay OK" in rows that carry the test slot.
+local function TestRows()
+    local chatFrame = DEFAULT_CHAT_FRAME
+    local m = ns.Reserve.Metrics(chatFrame)
+    if not m then
+        ns.Print(L.TEST_ROWS_NA)
+        return
+    end
+    ns.Printf(L.TEST_ROWS_METRICS, m.ppu, m.fontH, m.W, m.H, m.plateW, m.cw)
+    local oneRow = ns.ChatButton.SuffixLinks(0, ns.Reserve.Rows(m, ns.Bridge.TEST_SLOT, 1))
+    PrintHeight("a", chatFrame, "a", m.cw)
+    PrintHeight("a|n ", chatFrame, "a|n ", m.cw)
+    PrintHeight(L.TEST_ROWS_ONE_ROW, chatFrame, "a" .. oneRow, m.cw)
+    local id = NextTestId()
+    DEFAULT_CHAT_FRAME:AddMessage(L.TEST_ROWS_LINE .. ns.ChatButton.ButtonLink(id))
+    ns.ChatButton.Track(id, L.TEST_ROWS_LINE, nil)
+    local n = ns.ChatButton.SetSuffix(id, function(frame)
+        local fm = ns.Reserve.Metrics(frame)
+        if not (fm and fm.ok) then
+            return nil
+        end
+        return ns.Reserve.Rows(fm, ns.Bridge.TEST_SLOT, 3)
+    end)
+    ns.Reserve.SyncView(true)
+    ns.Printf(L.TEST_ROWS_SHOWN, n)
+end
+
+local function SecretState(fn)
+    local results = { pcall(fn) }
+    if not results[1] or #results < 2 then
+        return L.TEST_NA
+    end
+    for i = 2, #results do
+        if issecretvalue(results[i]) then
+            return L.YES
+        end
+    end
+    return L.NO
+end
+
+-- /tpr test lockdown: what is readable right now (G4), then a TEST message.
+local function TestLockdown()
+    ns.Printf(L.TEST_LOCKDOWN_STATE, Yes(C_ChatInfo.InChatMessagingLockdown()), Yes(ns.Restriction.Active()))
+    local chatFrame = DEFAULT_CHAT_FRAME
+    local container = chatFrame and chatFrame.FontStringContainer
+    ns.Printf(L.TEST_LOCKDOWN_RECT, container and SecretState(function()
+        return container:GetScaledRect()
+    end) or L.TEST_NA)
+    local line = chatFrame and chatFrame.visibleLines and chatFrame.visibleLines[2]
+    ns.Printf(L.TEST_LOCKDOWN_LINE, line and SecretState(function()
+        return line:GetTop()
+    end) or L.TEST_NA)
+    SendTest()
+end
+
+local MODES = { auto = true, dense = true, robust = true, mono = true }
+
+local function OnOff(arg, key, onText, offText)
+    arg = arg:lower()
+    if arg == "on" or arg == "off" then
+        ns.db[key] = arg == "on"
+    end
+    ns.Print(ns.db[key] and onText or offText)
+end
+
 local handlers = {
     info = PrintInfo,
-    bench = function()
-        ns.Bench.Start()
-    end,
-    model = function(arg)
-        local pieces = tonumber(arg) or 8
-        RunModel(math.min(64, math.max(1, math.floor(pieces))))
-    end,
-    budget = function(arg)
-        local ms = tonumber(arg)
-        if not ms or ms < 0.5 or ms > 50 then
-            ns.Print(L.BUDGET_USAGE)
-            return
-        end
-        ns.db.budgetMs = ms
-        ns.Printf(L.BUDGET_SET, ms, ns.Scheduler.EffectiveBudget())
-    end,
-    log = function(arg)
-        arg = arg:lower()
-        if arg == "on" or arg == "off" then
-            ns.LockdownLog.SetEnabled(arg == "on")
-        end
-        ns.Print(ns.db.logging and L.LOG_ON or L.LOG_OFF)
-    end,
+    help = Help,
     target = function(arg)
         arg = arg:lower()
         for _, t in ipairs(ns.Lang.TARGETS) do
-            if t == arg then
+            if t:lower() == arg then
                 ns.db.target = t
             end
         end
-        ns.Printf(L.TARGET_IS, ns.Lang.NAMES[ns.db.target] or ns.db.target, table.concat(ns.Lang.TARGETS, ", "))
+        ns.Printf(L.TARGET_IS, TargetName(ns.db.target), table.concat(ns.Lang.TARGETS, ", "))
     end,
     names = function(arg)
+        OnOff(arg, "names", L.NAMES_ON, L.NAMES_OFF)
+    end,
+    show = function(arg)
+        OnOff(arg, "glossShow", L.SHOW_ON, L.SHOW_OFF)
+    end,
+    mode = function(arg)
         arg = arg:lower()
-        if arg == "on" or arg == "off" then
-            ns.db.names = arg == "on"
+        if MODES[arg] then
+            ns.db.mode = arg
+            ns.Bridge.SetMode(arg)
+        else
+            ns.Print(L.HELP_MODE)
         end
-        ns.Print(ns.db.names and L.NAMES_ON or L.NAMES_OFF)
+        ns.Printf(L.MODE_SET, ns.db.mode, ns.Bridge.ModeName())
     end,
     translit = function(arg)
         if arg == "" then
@@ -197,44 +228,34 @@ local handlers = {
         end
         ns.Print(ns.Glossary.Romanize(arg) or L.TRANSLIT_NA)
     end,
-    speed = function(arg)
-        arg = arg:lower()
-        if ns.Scheduler.SPEEDS[arg] then
-            ns.db.speed = arg
-        end
-        ns.Print(ns.db.speed == "fast" and L.SPEED_FAST or L.SPEED_SAFE)
-    end,
-    simulate = function(arg)
-        arg = arg:lower()
-        if arg == "on" or arg == "off" then
-            ns.db.simulate = arg == "on"
-        end
-        ns.Print(ns.db.simulate and L.SIMULATE_ON or L.SIMULATE_OFF)
-    end,
     gloss = Gloss,
-    catchup = function()
-        ns.LockdownLog.CatchupNow()
-    end,
-    report = function()
-        ns.LockdownLog.Report()
-        if ns.db.results.bench then
-            ns.Bench.PrintResult(ns.db.results.bench)
+    test = function(arg)
+        arg = arg:lower()
+        if arg == "rows" then
+            TestRows()
+        elseif arg == "lockdown" then
+            TestLockdown()
+        else
+            TestPipeline()
         end
     end,
-    reset = function()
-        ns.LockdownLog.Reset()
-        wipe(ns.db.results.models)
-        wipe(ns.db.results.clicks)
-        ns.db.results.bench = nil
-        ns.Print(L.RESET_DONE)
+    clear = function()
+        ns.Request.ClearAll()
+        ns.Print(L.CLEARED)
     end,
-    free = function()
-        if ns.Scheduler.IsBusy() then
-            ns.Print(L.BUSY)
-            return
+    app = function()
+        for _, key in ipairs({ "APP_1", "APP_2", "APP_3", "APP_4" }) do
+            ns.Print(L[key])
         end
-        ns.Model.Free()
-        ns.Print(L.MODEL_FREED)
+    end,
+    debug = function()
+        local r, s, x = ns.Request.Counters(), ns.Reserve.Counters(), ns.Restriction.Counters()
+        ns.Printf(L.DEBUG_REQUESTS, r.active, r.clicks, r.sent, r.resent, r.restarted, r.debounced, r.removed,
+            r.expired, r.dropped, r.tooOld)
+        ns.Printf(L.DEBUG_SLOTS, s.inUse, s.free, s.scans, s.scanFreed, s.viewsSent, s.stripped)
+        ns.Printf(L.DEBUG_BRIDGE, ns.Bridge.ModeName(), Yes(ns.Bridge.IsBusy()), Yes(ns.Reserve.IsWatching()))
+        ns.Printf(L.DEBUG_RESTRICTION, Yes(x.active), x.secret, x.dropped, x.waiting, x.batches, x.reprinted,
+            x.deferred, x.ran)
     end,
 }
 
@@ -249,14 +270,3 @@ SlashCmdList.TRANSLATEPROBE = function(input)
         Help()
     end
 end
-
-ns.OnLoad(function()
-    ns.db.results.models = ns.db.results.models or {}
-    -- Keep the client's script budget with the results, for reading the file later.
-    local limits, copy = ns.Scheduler.GetBucketLimits(), {}
-    for key, value in pairs(limits or {}) do
-        copy[key] = value
-    end
-    local version, build = GetBuildInfo()
-    ns.db.results.client = { build = version .. "." .. build, limits = copy }
-end)
