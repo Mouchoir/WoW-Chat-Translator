@@ -1,0 +1,74 @@
+[package]
+name = "translateprobe-helper"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "TranslateProbe Helper: reads the addon's pixel bridge, translates locally and draws the translations over the WoW chat"
+
+# The modules live in a library so that capprobe and the tests reuse them.
+[lib]
+name = "tp_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "TranslateProbeHelper"
+path = "src/main.rs"
+
+[[bin]]
+name = "capprobe"
+path = "src/bin/capprobe.rs"
+
+[dependencies]
+tp_bridge = { path = "../bridge" }
+tp_engine = { path = "../engine" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+# Synthetic strips and tags for the window-level pipeline test.
+tp_bridge = { path = "../bridge", features = ["synth"] }
+
+[dependencies.windows]
+version = "0.62.2"
+features = [
+  # exe-tech probe list
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_HiDpi",
+  "Win32_System_Threading",
+  "Win32_System_LibraryLoader",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_Security",
+  "Win32_System_Performance",
+  "Win32_System_WinRT",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics_Capture",
+  "Foundation",
+  "Graphics",
+  "Graphics_Capture",
+  "Graphics_DirectX",
+  "Graphics_DirectX_Direct3D11",
+  "Security_Authorization_AppCapabilityAccess",
+  # app additions (design D.1)
+  "Win32_UI_Shell",
+  "Win32_Graphics_Dwm",
+  "Win32_System_Com",
+  # console output for --selftest / --help from a GUI exe, UI language for status strings
+  "Win32_System_Console",
+  "Win32_Storage_FileSystem",
+  "Win32_Globalization",
+]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
