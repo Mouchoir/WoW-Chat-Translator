@@ -74,7 +74,7 @@ record = type u8, len u16, data; unknown types are skipped (0x02 = the v1 LAYOUT
 `str8` = u8 length + bytes, `str16` = u16 length + bytes.
 
 ```
-0x10 TRANSLATE  reqId u16 | slot u8 (0..126) | rows u8 (1..4) | flags u8 (bit0 noCache, bit1 plate, others 0)
+0x10 TRANSLATE  reqId u16 | slot u8 (0..126) | rows u8 (1..6) | flags u8 (bit0 noCache, bit1 plate, others 0)
                 | target str8 (printable ASCII, 1..8) | text str16 (UTF-8 <= 1024 B, may contain 0x02/0x03 marks)
                 | nPairs u8 (<= 8) | pairs: term str8 (<= 48 B), meaning str8 (<= 120 B); sum(2+#t+#m) <= 512
 0x11 CANCEL     reqId u16 | slot u8 (0..127)
@@ -83,6 +83,14 @@ record = type u8, len u16, data; unknown types are skipped (0x02 = the v1 LAYOUT
 0x14 VIEW       n u8 (0..4) | n x { id u8, x u16, y u16, w u16, h u16, fontPx u8, rowPx u8 }  (physical px, client origin)
 ```
 
+- 2026-10-18: TRANSLATE rows went from 1..4 to 1..6 (long German-to-French lines were cut); same
+  version 2, and a tag still carries the row modulo 4 (its row field has 2 bits). Every parser
+  follows: `msg.rs` (Rust), `tools\bridge\proto.py` (the Python reference, with a 6-row
+  vector and a refused 7-row one in `tests\vectors\messages.json`). Because a Helper
+  built for 1..4 rows drops a longer request as a parse error, STATUS.addonBuild went from 1 to
+  2 at the same time: either side then shows its "update" toast instead of failing silently.
+- Since 2026-10-18 the addon sends a VIEW before every TRANSLATE (changed or not), so a Helper
+  started after the last VIEW leaves its discovery scan at the next click.
 - Parsers are strict: a length that does not match exactly, a field out of range or invalid
   UTF-8 drops the message (`msg::ParseError`) and a counter is incremented.
 - Builders (`Bridge.TranslateMessage` etc.) write integers as given, clamped to the field width;
@@ -158,8 +166,19 @@ by `take_session_change()`.
 ## 8. Cards (`cards::build`)
 
 1. Hits with alpha under 0.3, or of the other session bit, are dropped. Hits group by (view,
-   slot) and are ordered by y; a group more than `1.5 * K * rowPx` below the previous one, or a
-   row index that does not increase, starts another card.
+   slot) and are ordered by y. A tag carries its row modulo 4 and a request has up to 6 rows,
+   so rows are numbered on from the first visible one (`cards::build_with_rows`, with each
+   known slot's TRANSLATE row count K; 6 when unknown):
+   - the next tag continues the card as row `prev + step`, where step = 1..3 is how far its tag
+     row is (modulo 4), when it lies within `(step + 0.6)` row pitches (the pitch is
+     `max(rowPx, tag height + 1)`), or as row `prev + step + 4` when it lies within 0.6 pitches
+     of that distance (the rows between are hidden by a tooltip; step 0 can only be that);
+   - the row must stay below K; anything else starts another card (a copy);
+   - a run of a 5- or 6-row request that stops before its last row while its first tag is at
+     the top of the view (within 1.5 pitches) is the request's last rows, the first ones being
+     scrolled away (a chat clips lines only at its top): it is renumbered + 4.
+   Without K (TRANSLATE not received) tag rows 0 and 1 at the top of a view read as rows 0 and
+   1. `cards::build` is `build_with_rows` with no row count known.
 2. **Plate start.** `Pobs` = per-channel median of `[x1+2, x1+2+max(3, bw)] x [cy - h/4, cy + h/4]`,
    with its spread (75th percentile of the distances to Pobs). It is a plate when the spread is at
    most 16 and either
@@ -228,15 +247,15 @@ linear copy.
 
 ## 9. Validation
 
-Commands (from the repo root; numbers measured on 2026-10-17 on the dev PC, re-run on 2026-10-18 at integration with the same results where shown):
+Commands (from the repo root; numbers measured on 2026-10-17 on the dev PC, re-run on 2026-10-18 and 2026-10-19 at integration with the same results where shown):
 
 | Command | Result |
 |---|---|
-| `python -I tools\bridge\make_vectors.py` | 30 traces (10 x 3 modes), 1066 frames, 387 queued messages, 1024 tags, 32 builder vectors, 36 strips; byte-identical on re-run |
-| `node tests\bridge\run.js` | ALL BRIDGE TESTS PASSED: 30 traces, 16892 ticks, 1066 frames, 1268038 blocks, 1024 tags, 20 markup, 32 builder vectors, 29 API checks |
+| `python -I tools\bridge\make_vectors.py` | 30 traces (10 x 3 modes), 1066 frames, 387 queued messages, 1024 tags, 34 builder vectors (32 before the 6-row pair, 2026-10-19), 36 strips; byte-identical on re-run |
+| `node tests\bridge\run.js` | ALL BRIDGE TESTS PASSED: 30 traces, 16892 ticks, 1066 frames, 1268038 blocks, 1024 tags, 20 markup, 34 builder vectors, 29 API checks |
 | `python -I tools\bridge\sim.py all` (150 runs each) | 4/4 PASS, see below |
 | `python -I tools\bridge\crc_mc.py` (2 M) | 0 undetected, see below |
-| `cargo test --offline` in `helper\bridge` | 55 passed, 0 failed (2 ignored: the release suites) |
+| `cargo test --offline` in `helper\bridge` | 59 passed, 0 failed (2 ignored: the release suites; 2026-10-19) |
 | `cargo test --offline --release -- --ignored` | 2 passed: corruption suite, per-call cost |
 | `luacheck addon\TranslateProbe\Bridge.lua` | 0 warnings |
 
@@ -274,6 +293,7 @@ text is random glyph shapes):
 | `cards`: fade over coloured grounds (green, brown, grey, dark, bright, dark blue; textured, +-6 noise, half under a 30% black panel; alpha 0.3-1.0; 1-3 rows) | 3555 / 3555 rows with alpha >= 0.33 shown; where the plate end stands out by 12 or more (3154 rows): text end within 2 px on all but 11, mask IoU 0.9911; alpha >= 0.45 and step >= 16: 0 of 2394 off; text cut short: 1 of 3555; where the end does not stand out (401 rows), the text runs on by a median 37 px |
 | `cards`: covers whose edge lies at the plate start, over random grounds and alphas (2706 covered rows) | 11 taken for a plate: tooltip 1/538, E2E-rig tooltip 5/558, near-black menu 0/522, random colour 0/535, dark-blue colour 5/553 (the design's rule: 184, 178, 7, 11, 238) |
 | `cards`: gap fill, no-plate mode, grouping, session bit, fade-out, dropped rows | pass |
+| `cards`: rows 1..6 (tag rows modulo 4): 1-6 rows with and without K, rows hidden in the middle (0,1,3,4,5 / 0,4,5 / 0,1,5 / 1,5 / 0,2,3,5), a copy 4 rows on for K = 4, the last rows of 5- and 6-row requests at the top of the view | pass |
 | `cards`: tag cover over blended edges (fractional block edges and heights, 75 cases) | largest unpainted colour step 9.5 off the ground-to-plate line |
 | `tone`: 3-row cards with fractional, antialiased edges through display curves (40 cards per curve) | rows shown, raw / curve undone: Gamma 2.2 60/120 / 120/120, Gamma 1.6 120/120 / 120/120, darkening 0.4545 0/120 / 120/120 |
 | `tags`: a narrow scan area inside a wider capture, tags across its right edge (48 cases) | no panic, nothing read outside the area |
@@ -393,7 +413,8 @@ Each is backed by a measured fact; the tests named reproduce it.
 - `Reassembler::take_session_change()` returns the previous session id, once, after the session
   changed from one id to another (None on the first session), so the caller can call
   `engine.clear_session(old)`.
-- `msg::parse_message` is strict: TRANSLATE needs slot 0..126, rows 1..4, flags with only bits
+- `msg::parse_message` is strict: TRANSLATE needs slot 0..126, rows 1..6 (1..4 until
+  2026-10-18), flags with only bits
   0-1, a target of 1-8 printable ASCII bytes, text <= 1024 B, <= 8 pairs with term <= 48 B,
   meaning <= 120 B and sum(2 + #term + #meaning) <= 512, valid UTF-8 everywhere. CANCEL accepts
   slot 0..127. VIEW accepts 0..4 views. Any other length is `Length`.

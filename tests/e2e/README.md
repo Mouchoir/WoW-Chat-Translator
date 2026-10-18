@@ -92,7 +92,7 @@ deferred.
 
 | Name | What happens |
 |---|---|
-| `basic` | 3 clicks (3, 2 and 4 reserved rows) |
+| `basic` | 3 clicks (2, 2 and 5 reserved rows since the 1.35 row factor) |
 | `scroll` | 3 cards, 8 new lines push them up and out, scroll up 4 and 12 messages, back down |
 | `fade` | fade shortened to 5 s + 3 s; cards fade and hide; a scroll resets the fade and they come back |
 | `cover` | a tooltip over the right half of a plate, then one over the middle of two rows |
@@ -165,6 +165,12 @@ first must pass and the second must fail. `--synth-diag OUT [--shift-px N]` writ
    check, and `gone` marks the moment the window disappears.
 6. **Scenarios use a 430 x 330 unit chat frame** (about 23 rows) instead of the mock's default
    400 x 180 (12 rows), so three cards fit on screen. `E2E.Start{chat = {...}}` changes it.
+7. **Rows are compared modulo 4 (2026-10-19).** Requests hold 1 to 6 rows since 2026-10-18 and a
+   tag carries its row number modulo 4. The truth reports the tag's row field (fakewow draws what
+   the addon drew), while the Helper numbers a card's bands 0 to 5, so check.py matches a band to
+   a plate on the slot, the row modulo 4 and the y position. With the 1.35 row factor the `basic`
+   scenario's long line reserves 5 rows, and its fifth row (tag row 0) first failed `bands` and
+   `hidden` in basic, cover, altz and gamma22.
 
 ## What the rig found in the Helper build of 2026-10-16 21:22 (echo, WGC)
 

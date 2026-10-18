@@ -6,7 +6,7 @@ the game, to translate the line with a local AI model (llama.cpp and Qwen3 4B). 
 translation on those rows. Nothing leaves the PC, and the Helper never touches the game process:
 the addon and the Helper talk through pixels only.
 
-This file is the design as it was built (addon 0.2.0, Helper 0.1.0). The detailed specs, the
+This file is the design as it was built (addon 0.3.0, Helper 0.2.0). The detailed specs, the
 measurements behind them and every deviation from the original plan are in:
 
 | File | Part |
@@ -16,7 +16,7 @@ measurements behind them and every deviation from the original plan are in:
 | `docs\ENGINE.md` | the translation engine: discovery, llama-server lifecycle, prompt, evaluations |
 | `docs\HELPER.md` | the Helper app: threads, capture, overlay, CLI, diagnostics, CPU measurements |
 | `tests\e2e\README.md` | the end-to-end rig (fakewow) and its checks |
-| `docs\IN-GAME-CHECKS.md` | what only the real client can show (G1-G8) |
+| `docs\IN-GAME-CHECKS.md` | what only the real client can show (G1-G10) |
 
 ---
 
@@ -61,7 +61,7 @@ Ollama store.
 - Messages: TRANSLATE, CANCEL, CLEAR, TEST, VIEW. Parsers are strict.
 
 **4. Return path: pixel-anchored cards**
-- On a click the addon appends K reserved rows (1 to 4) under the line. Each row is a **tag**
+- On a click the addon appends K reserved rows (1 to 6; 1 to 4 until 2026-10-18) under the line. Each row is a **tag**
   (8 inline colour blocks: a magenta/green sync pair and 6 base-6 digits carrying slot, row,
   session bit and a CRC-5) followed by a **plate** (one dark inline texture, RGB 32,40,64).
 - WoW's own chat renderer lays the rows out, scrolls, clips, fades and hides them. Lua geometry
@@ -70,9 +70,10 @@ Ollama store.
 - Each capture, the Helper finds the tags, measures the plate right of each tag and draws only on
   plate pixels it sees right now (the mask), so a tooltip or menu over part of a row is never
   painted over. A row whose plate is expected but not found is dropped.
-- Once read, each tag is painted over (opaque, in the observed plate colour, including its blended
-  edge pixels), so the coloured blocks are hidden while the Helper runs. Without the Helper the
-  tags stay visible.
+- Once read, each tag and the visible plate pixels are painted over, opaque, with the chat
+  background sampled next to the row in the same capture (the "native look", 2026-10-18), so
+  only the translation shows, in the chat font, as if it were a chat line. Without the Helper the
+  tags and the dark plates stay visible.
 - A display curve between the game and the capture (the game's Gamma setting, contrast) is
   measured on the strip's calibration blocks; when it is not linear, the scan area is linearized
   before the tag scan and the cards.
@@ -152,14 +153,16 @@ Ollama store.
   `Tokenizer`, `Engine`, `LangData`, `Clean`), the model conversion and golden tools, the golden
   test data and the native engine test. `LockdownLog.lua` became `Restriction.lua`. The generated
   `build\` and `models\` folders (about 414 MB) were moved to the Recycle Bin.
-- **Saved variables** (`TranslateProbeDB`, schema 2): on every load, keys outside the whitelist
-  `schema, target, names, glossShow, mode, glossary, helpShown` are deleted (the old telemetry
-  goes away), then each kept value is validated. Message text, sender names, line ids, request
-  ids and slots are never stored.
-- **Slash commands** (`/tpr`, `/tprobe`): `info`, `target <code>`, `names on|off`, `show on|off`,
-  `mode auto|dense|robust|mono`, `translit <text>`, `gloss add|del|list|test`, `test`,
-  `test rows`, `test lockdown`, `clear`, `app`, `debug`, `help`. The old `bench`, `model`,
-  `budget`, `speed`, `simulate`, `free`, `log`, `catchup`, `report` and `reset` are gone.
+- **Saved variables** (`TranslateProbeDB`, schema 3 since 2026-10-18): on every load, keys
+  outside the whitelist `schema, target, names, glossShow, mode, glossary, helpShown` are deleted
+  (the old telemetry goes away), then each kept value is validated. A glossary value is `false`,
+  a string (every target) or a table of meanings per target (C.5). Message text, sender names,
+  line ids, request ids and slots are never stored.
+- **Slash commands** (`/tpr`, `/tprobe`): `/tpr` alone and `options` open the options panel
+  (C.5), `info`, `target <code>`, `names on|off`, `show on|off`, `mode auto|dense|robust|mono`,
+  `translit <text>`, `gloss add|del|list|test`, `test`, `test rows`, `test lockdown`, `clear`,
+  `app`, `debug`, `help`. The old `bench`, `model`, `budget`, `speed`, `simulate`, `free`, `log`,
+  `catchup`, `report` and `reset` are gone.
 - Targets: en, fr, de, es, it, pt, ru, ko, zh, zh-TW (the default follows the client locale).
 
 ---
@@ -179,6 +182,7 @@ ChatButton.lua   filter, [T] decoration, Track, SetSuffix, CutRows, ShownLines, 
 Request.lua      click flow, request ids, active requests (memory only)
 Restriction.lua  restriction watcher, deferred clicks, secret arrivals, reprint
 Commands.lua     slash commands
+Options.lua      options panel (game settings) and its glossary page
 ```
 
 ### C.2 Data flow
@@ -187,7 +191,7 @@ Commands.lua     slash commands
 CHAT_MSG_* (readable) -> filter (notification only) -> next frame: TransformMessages adds " [T]" -> Track (memory)
 click [T] -> Request.Start -> PromptText / Extract / AllocSlot / EstimateRows
           -> SetSuffix (per-frame rows: tag + plate, then glossary and name rows)
-          -> Bridge.Send(VIEW if changed) -> Bridge.Send(TRANSLATE)
+          -> Bridge.Send(VIEW) -> Bridge.Send(TRANSLATE)   (a VIEW before every TRANSLATE)
           -> strip shown (about 0.5 s) -> hidden when the queue drains
 Helper: capture -> strip decode -> reassemble -> TRANSLATE -> engine -> status / result
         -> overlay drawn on the plates found in each capture
@@ -196,19 +200,24 @@ Helper: capture -> strip decode -> reassemble -> TRANSLATE -> engine -> status /
 ### C.3 Rows and slots
 
 - **Metrics** per chat frame (nil when anything is missing or secret): physical px per unit
-  `ppu = effScale * physH / 768`; tag block width `W = max(2, ceil(5 / ppu))` units (at least
-  5 physical px); row height `H = max(6, round(fontH))`; plate width
-  `floor((chatWidth - indent - 8 W - 2) * 0.88)`, usable from 40 units.
-- **Row count** `K = min(4, max(1, ceil(width / plateW * f - 0.15)))`, with `f` from the source and
-  target scripts (Latin to Latin 1.25, Han or kana to Latin 2.2, Hangul to Latin 1.8, Latin to Han
+  `ppu = effScale * physH / 768`; an inline texture unit is measured in chat units (`tex`, 1.47 on
+  the user's scaled chat frame); tag block width `W = max(2, ceil(5 / (ppu * tex)))` texture units
+  (at least 5 physical px); row height `H = max(6, round(fontH / tex))`; plate width
+  `floor((chatWidth - indent - 8 W tex - 2) * 0.88 / tex)`, usable from 40 units. The Helper
+  relies on that 0.88 to tell a whole plate from one cut by a frame over the chat.
+- **Row count** `K = min(6, max(1, ceil(width / plateW * f - 0.15)))`, with `f` from the source and
+  target scripts (Latin to Latin 1.35, Han or kana to Latin 2.2, Hangul to Latin 1.8, Latin to Han
   0.8, default 1.3). The width ratio is not rounded up first, so a short line reserves one row.
+  The tag's row field has 2 bits: rows 4 and 5 carry 0 and 1 again, and the Helper numbers a
+  card's rows on from its first visible tag.
 - **Slots** 0..126 (127 is the `/tpr test rows` slot) come from a free list. A slot is freed when
   its rows are removed, or by the read-only scan once its line has left every chat frame. The scan
   is a `TransformMessages` predicate that records our row links and always returns false, so no
   entry is ever repackaged (no new timestamp, no un-fade). It runs at most every 15 s from the
   watcher while slots are in use, and when the free list is empty; only when all 127 slots are
   held by lines still in the chat does the oldest request expire.
-- **VIEW watcher**: a 0.5 s ticker, only while requests are active, that sends VIEW when the chat
+- **VIEW**: sent before every TRANSLATE (so a Helper started late leaves its discovery scan at
+  the next click), and by a 0.5 s ticker, only while requests are active, when the chat
   rectangles change (geometry reads only). An empty VIEW is never sent: the Helper keeps the last
   one.
 - **Session hygiene**: rows of an older session (before a `/reload`) are cut at the first
@@ -224,7 +233,30 @@ Helper: capture -> strip decode -> reassemble -> TRANSLATE -> engine -> status /
 | Active requests | VIEW watcher at 2 Hz (geometry reads), plus the read-only scan at most every 15 s |
 | Memory | well under 1 MB |
 
-### C.5 User-visible strings
+### C.5 Options panel
+
+- Registered with the 12.x Settings API (`Options.lua`, checked against the live UI source; the
+  calls are listed in `docs\ADDON.md`): Esc > Options > AddOns > TranslateProbe, or `/tpr` and
+  `/tpr options` (`Settings.OpenToCategory`). Without the Settings API nothing is registered and
+  `/tpr` prints the command list.
+- **Main page** (vertical layout, proxy settings on `TranslateProbeDB`): target language (each
+  language named in its own language and script, `Lang.NATIVE`), "Explain abbreviations"
+  (glossary row), "Spell names in Latin letters", bridge mode (advanced). The slash commands go
+  through the same setters and call `Settings.NotifyUpdate`, so the panel and `/tpr` always agree.
+- **Glossary page** (canvas subcategory, built when first shown): every abbreviation, user keys
+  first then built-in ones, 12 rows at a time (buttons and mouse wheel); a mark (yours, edited,
+  all languages, in English, disabled); the meaning for the current target in an edit box (Enter
+  or leaving it saves, Escape restores, empty removes the meaning for this target only); Delete
+  for user keys, Disable/Enable for built-in ones; an add row. A click on a button first saves the
+  text being typed in a row.
+- **Meanings follow the target, abbreviations stay.** A user value is a table of meanings per
+  target; an old single string keeps serving every target (as `"*"` once one target gets its own
+  meaning, and an empty marker hides it for one target). Built-in meanings are data in English and
+  French; other targets get the English one, shown "in English", until the user types their own.
+  The format is one way: schema 3, and `scripts\dev.ps1` backs the saved variables up before each
+  deploy.
+
+### C.6 User-visible strings
 
 All in `Locales.lua` (English and frFR). The Helper's strings are in `helper\app\i18n\en.json` and
 `fr.json` (status lines in the target language when it is en or fr, else English).
@@ -291,14 +323,19 @@ and `docs\ENGINE.md` section 1.
 
 ### D.4 Overlay drawing
 
-- Per card: the tags are painted over opaque with the observed plate colour; no-plate mode fills
-  the text rectangle; gaps of 4 px or less between rows are filled where both neighbouring masks
-  are set; then the text over a 1 px shadow, faded by the card alpha, only on mask pixels.
+- Per card (native look): the tag, the visible plate pixels, the plate's fractional edge pixels
+  and the gaps of 4 px or less between rows are painted opaque with a left-to-right gradient
+  between two chat background samples taken in the same capture (the indent left of the tag, and
+  the end of the view right of the plate when the plate is whole); then the text over a 1 px
+  black shadow, faded by the card alpha, only on mask pixels. No-plate mode fills the text
+  rectangle. Details and limits: `docs\HELPER.md`.
 - Fonts: "Arial Narrow" (else "Arial" narrowed) for Latin and Cyrillic, "Microsoft YaHei UI" (zh),
-  "Microsoft JhengHei UI" (zh-TW), "Malgun Gothic" (ko); size from VIEW, capped by the band height;
-  text rasterized at 3x and filtered down.
-- Fit: wrap into K lines at the card's text width, else at 85% size, else cut with "...". Line i
-  is drawn in band i, so rows clipped at the top of the chat still show the right lines.
+  "Microsoft JhengHei UI" (zh-TW), "Malgun Gothic" (ko); size from VIEW, capped so that the
+  font's cell fits the band height + 1 px; text rasterized at 3x and filtered down. Colours: text
+  #A8D8FF, statuses grey #A0A0A0, failures #E08080.
+- Fit: wrap into K lines at the card's text width, else at the largest size down to 80% that
+  fits, else cut with "...". Line i is drawn in band i, so rows clipped at the top of the chat
+  still show the right lines.
 - Slot 127 draws "Overlay OK (row N, block P px)". `--diag` adds outlines.
 
 ### D.5 Configuration, logs, privacy
@@ -397,10 +434,12 @@ the checks G1 (bridge and capture) to G8 (colourblind filter), with what to repo
 
 Each is recorded with its evidence in the component docs; the main ones:
 
-- **Addon** (`docs\ADDON.md` 1-18): extra functions for the scan and the watcher; empty VIEWs never
+- **Addon** (`docs\ADDON.md` 1-23): extra functions for the scan and the watcher; empty VIEWs never
   sent; the row estimate without rounding first; the periodic read-only scan that lets the watcher
   stop; secret arrivals counted on any secret argument and reprinted only when still shown; mode
-  `auto` following the colourblind setting; `Glossary.Lookup` removed.
+  `auto` following the colourblind setting; `Glossary.Lookup` removed; since 2026-10-18 up to 6
+  rows (factor 1.35, addon build 2), the chat tab mode dropped, per-target glossary meanings
+  (schema 3), `/tpr` opening the options panel, a VIEW before every TRANSLATE.
 - **Bridge** (`docs\BRIDGE.md` 10): sync-pair test from the B0/B1 relation; sub-pixel block fit;
   the plate predicted from the tag's own colours (fades over coloured grounds); cover checks;
   two-way mask and look-ahead text end; the strip capped at the screen width; `tag_rect` widened
@@ -410,12 +449,15 @@ Each is recorded with its evidence in the component docs; the main ones:
   (keep-allowed vs must-use) and expansion before the call, `Same` only with evidence, bracket
   repair, `PROMPT_VERSION` 2; NVML matched by PCI ids; the selftest discovery injectable so tests
   never start llama-server.
-- **Helper** (`docs\HELPER.md` 1-24): library target; text at 3x; discovery over the full client
+- **Helper** (`docs\HELPER.md` 1-34): library target; text at 3x; discovery over the full client
   width; `--no-overlay` and `--assume-foreground` for tests; lower idle capture rates, scan gating,
   tag search and card cache for CPU; the tray menu foreground pattern; session-end clean-up; the
-  display-curve correction; the sticky text width.
+  display-curve correction; the sticky text width; since 2026-10-18 the native look (opaque
+  background fill, right sample rules, no right sample for a card cut on the right or in
+  discovery, edge pixels only where fractional, sample hysteresis, font cell cap), rows 1..6 and
+  an exit on `WM_CLOSE` from any window (`taskkill` without /F).
 - **E2E rig** (`tests\e2e\README.md`): fakewow off-screen as a layered window (WGC cannot capture a
-  normal off-screen window); `run.py`; check.py waits for the VIEW.
+  normal off-screen window); `run.py`; check.py waits for the VIEW and compares rows modulo 4.
 
 ---
 
@@ -488,3 +530,82 @@ Qwen3-4B Q4_K_M from the Ollama store, 4 threads, `-ngl 0`, a 60 s watchdog on e
   11.6 s after their clicks (server ready after 3.1 s); band failures 0 / 7486.
 - Each llama-server lived about 35 s (it ends with the Helper); the watchdog never had to act, and
   `tasklist` showed no llama-server afterwards. No GPU pass was run (the game was using the GPU).
+
+---
+
+## J. Integration results (2026-10-19: options panel, native look, rows 1..6)
+
+Same PC; the WoW client was not running during these runs (GDI E2E could run), and the user's
+running Helper was stopped before the release build and left stopped.
+
+### J.1 Offline suites
+
+| Command | Result |
+|---|---|
+| `npm test` (enUS, frFR, bridge) | enUS 242/242, frFR 242/242, bridge byte identity: 30 traces, 1066 frames, 1024 tags, 34 builder vectors, 29 API checks, all passed |
+| `node tests\run.js enUS --stub-bridge` / `frFR --stub-bridge` | 241/241 each |
+| `luacheck addon` | 0 warnings, 0 errors in 11 files |
+| `python -I tools\bridge\make_vectors.py` | 34 builder vectors (a 6-row TRANSLATE and a refused 7-row one added); only `messages.json` changed; byte-identical on re-run |
+| `python -I tools\bridge\sim.py all` | 4/4 pass, the same figures as I.1 |
+| `python -I tools\bridge\crc_mc.py` | 2,000,000 trials, 0 undetected |
+| `cargo test --offline`, `helper\bridge` | 59 passed, 2 ignored; `--release -- --ignored`: 2 passed |
+| `cargo test --offline`, `helper\engine` | 96 + 5 passed, 3 ignored |
+| `cargo test --offline`, `helper\app` | lib 102, graceful_exit 2, native_look 5, sentinel 1, tagscan_equiv 4 passed; window_pipeline `--ignored` 2 passed; `--release --lib -- --ignored` 2 passed (render 0.569 ms, candidates 0.093 ms) |
+| `cargo test --offline`, `helper\testkit` | 16 passed |
+| `scripts\helper.ps1 -Build` | `TranslateProbeHelper.exe` 1,225,216 bytes, Windows DLL imports only |
+
+### J.2 End to end, echo translator, `--no-overlay`
+
+WGC (fakewow off-screen):
+
+| Scenario | TRANSLATE P99 ms | band failures / checks | hidden | masks | missing | done | CPU whole run % | CPU after 2 s % |
+|---|---|---|---|---|---|---|---|---|
+| basic | 67.2 | 0 / 3457 | pass | pass | pass (0) | 3/3 | 2.86 | 1.38 |
+| scroll | 114.0 | 0 / 3140 | pass | pass | pass (0) | 3/3 | 2.14 | 1.29 |
+| fade | 73.3 | 0 / 1289 | pass | pass | pass (0) | 2/2 | 2.75 | 1.74 |
+| cover | 74.7 | 0 / 3904 | pass | pass | pass (0) | 2/2 | 2.19 | 1.22 |
+| tabs | 53.0 | 0 / 1983 | pass | pass | pass (0) | 2/2 | 2.69 | 1.54 |
+| altz | 81.6 | 0 / 2740 | pass | pass | pass (0) | 2/2 | 2.28 | 1.05 |
+| dropped | 61.9 | 0 / 1351 | pass | pass | pass (1) | 2/2 | 3.17 | 1.59 |
+| late_start | 70.3 | 0 / 1644 | pass | pass | pass (3) | 1/1 | 3.35 | 1.39 |
+| gamma22 | 69.4 | 0 / 3477 | pass | pass | pass (0) | 3/3 | 2.78 | 1.40 |
+
+GDI (fakewow on screen, never activated, no WoW client running):
+
+| Scenario | TRANSLATE P99 ms | band failures / checks | hidden | masks | missing | done | CPU whole run % | CPU after 2 s % |
+|---|---|---|---|---|---|---|---|---|
+| basic | 68.0 | 0 / 3522 | pass | pass | pass (0) | 3/3 | 2.32 | 2.36 |
+| scroll | 71.1 | 0 / 3196 | pass | pass | pass (0) | 3/3 | 2.40 | 2.48 |
+| fade | 83.1 | 0 / 1333 | pass | pass | pass (0) | 2/2 | 1.85 | 1.92 |
+| cover | 71.5 | 0 / 3965 | pass | pass | pass (0) | 2/2 | 3.00 | 3.14 |
+| tabs | 65.9 | 0 / 2013 | pass | pass | pass (0) | 2/2 | 3.75 | 3.94 |
+| altz | 69.7 | 0 / 2796 | pass | pass | pass (0) | 2/2 | 2.14 | 2.23 |
+| dropped | 68.4 | 0 / 1363 | pass | pass | pass (1) | 2/2 | 2.45 | 2.58 |
+| late_start | 25.3 | 0 / 1680 | pass | pass | pass (3) | 1/1 | 3.55 | 3.53 |
+| gamma22 | 66.9 | 0 / 3520 | pass | pass | pass (0) | 3/3 | 2.63 | 2.79 |
+
+- Every functional check passes in all 18 runs. The CPU rule (3% of one core over the whole run)
+  fails in dropped and late_start under WGC (3.17, 3.35%) and in tabs and late_start under GDI
+  (3.75, 3.55%); after the first 2 s the WGC runs use 1.05 to 1.74% of one core. GDI copies the
+  screen, hence its higher steady figure.
+- A first WGC run failed bands and hidden in basic, cover, altz and gamma22: the 5-row card of
+  the scenario's long line now uses row 4, whose tag carries row 0, and check.py compared the
+  truth's tag row with the Helper's band number directly. check.py now compares rows modulo 4;
+  the same diag files then pass (no Helper change).
+- `late_start` now checks 1644 bands instead of 162: the re-click sends a VIEW, so the Helper
+  leaves discovery at once.
+- Log sentinel grep (the scenarios' chat words and sender names, "ZZSENTINELZZ") over 118 output
+  files of `tests\e2e\out`: 0 hits.
+
+### J.3 Real model on the CPU
+
+`run.py --scenario basic --translator llama --helper-arg=--backend=cpu --helper-arg=--runtime=<dev
+runtime>`, Qwen3-4B Q4_K_M, `-ngl 0`, 4 threads, with a separate watchdog that kills any
+llama-server older than 60 s (it never had to act):
+
+- First run (the scenario's normal length): the first two cards reached "Already in English" 11.2
+  and 10.9 s after their TRANSLATE; the third (the 5-row line) was still streaming when the
+  scenario ended, so `done` passed on 2 of 3 judged cards.
+- Second run with `--fakewow-arg=--tail-ms=25000` (model files warm): all three reached their
+  final state ("Already in English") 4.8, 4.4 and 6.5 s after their TRANSLATE; every check passed
+  (CPU 2.13%). llama-server ended with the Helper both times; `tasklist` showed none afterwards.

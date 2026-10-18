@@ -2,13 +2,13 @@
 
 A WoW Forever addon and a small Windows app that translate player chat lines on your own PC.
 
-Click the `[T]` link after a player message: a few dark rows open under the line, and
-**TranslateProbe Helper**, running beside the game, writes the translation in them. The
-translation comes from a local AI model (llama.cpp with Qwen3 4B); nothing is sent over the
-network. Abbreviations get an instant explanation row from the addon's glossary (LFM, LF2M, BGs,
+Click the `[T]` link after a player message: a few rows open under the line, and
+**TranslateProbe Helper**, running beside the game, writes the translation in them, in the chat's
+own font over the chat background, like one more chat line. The translation comes from a local AI
+model (llama.cpp with Qwen3 4B); nothing is sent over the network. Abbreviations get an instant explanation row from the addon's glossary (LFM, LF2M, BGs,
 DM, Stock, HoT...), with or without the Helper.
 
-Status: development build (addon 0.2.0, Helper 0.1.0). See `docs\IN-GAME-CHECKS.md` for the
+Status: development build (addon 0.3.0, Helper 0.2.0). See `docs\IN-GAME-CHECKS.md` for the
 checks that only the real client can make.
 
 ## How it works
@@ -19,8 +19,9 @@ checks that only the real client can make.
   copy as a fallback).
 - Each reserved row starts with a small colour tag that names it. The Helper finds the tags in
   every capture and draws the translation only on the dark plate pixels it can see right now, so
-  it follows scrolling, fading and tab switches, and never paints over a tooltip or a menu. Once
-  read, the tags are painted over.
+  it follows scrolling, fading and tab switches, and never paints over a tooltip or a menu. The
+  tags and the dark plates are painted over with the chat background sampled next to them, so
+  only the translation shows (the "native look"). Without the Helper the rows stay dark.
 - The Helper starts the translator on the first click (on the GPU when enough video memory is
   free, else on the CPU) and unloads it after 10 minutes without use.
 
@@ -42,14 +43,15 @@ Design: `docs\DESIGN.md`. Components: `docs\ADDON.md`, `docs\BRIDGE.md`, `docs\E
      `--model <file.gguf>`.
 5. Start the game (Windowed or Windowed (Fullscreen)), then `scripts\helper.ps1 -Run` (add
    `-Diag` for a diagnostics file). The Helper sits in the notification area; exit it from its
-   icon. It can be started before or after a click, no `/reload` needed.
+   icon (`taskkill /IM TranslateProbeHelper.exe` also closes it cleanly). It can be started
+   before or after a click, no `/reload` needed.
 6. In game: `/tpr test`.
 
 ## The Helper
 
 | Command | What it does |
 |---|---|
-| `scripts\helper.ps1 -Build` | release build of `helper\app` (about 1.1 MB, Windows DLLs only) |
+| `scripts\helper.ps1 -Build` | release build of `helper\app` (about 1.2 MB, Windows DLLs only) |
 | `scripts\helper.ps1 -Test` | `cargo test --offline` in the four helper crates |
 | `scripts\helper.ps1 -Run [-Diag] [args]` | starts the Helper; extra arguments go to the exe (`--capture gdi`, `--backend cpu`...) |
 | `TranslateProbeHelper.exe --selftest` | prints what it found (runtime, model, GPU, RAM, flags) without loading the model |
@@ -57,20 +59,37 @@ Design: `docs\DESIGN.md`. Components: `docs\ADDON.md`, `docs\BRIDGE.md`, `docs\E
 Settings: `%APPDATA%\TranslateProbe\settings.json`. Logs: `%LOCALAPPDATA%\TranslateProbe\logs`.
 The tray menu has "Unload translator now", "Open log folder" and "Exit".
 
+## Options panel
+
+`/tpr` (or Esc > Options > AddOns > TranslateProbe) opens the addon's page in the game settings:
+
+- **Target language**: the language translations are written in, each listed in its own name
+  (English, Français, Deutsch, Español, Italiano, Português, Русский, 한국어, 简体中文, 繁體中文).
+- **Explain abbreviations** and **Spell names in Latin letters**: the extra rows a click adds
+  (`/tpr show`, `/tpr names`).
+- **Bridge mode** (advanced): see `/tpr mode`.
+- **Glossary** page: every abbreviation with its meaning in the current target language. Type a
+  meaning to change it, clear it to remove it, Delete your own entries, Disable or Enable the
+  built-in ones, and add new abbreviations at the bottom. Abbreviations stay when the target
+  changes; meanings follow the target (empty when none was typed for it). Built-in meanings exist
+  in English and French; other targets get the English one, marked "in English", until you
+  type your own.
+
 ## Commands (`/tpr` or `/tprobe`)
 
 | Command | What it does |
 |---|---|
-| `/tpr` | help |
+| `/tpr`, `/tpr options` | open the options panel (without the settings panel: the command list) |
+| `/tpr help` | the command list |
 | `/tpr info` | version, session, target, bridge mode, screen, chat frames |
 | `/tpr target <code>` | language translations are written in: en, fr, de, es, it, pt, ru, ko, zh, zh-TW (default: the client language) |
 | `/tpr show on\|off` | a click also shows the glossary row (on by default) |
 | `/tpr names on\|off` | a click also spells a non-Latin sender name in Latin letters (off by default) |
 | `/tpr mode auto\|dense\|robust\|mono` | how the addon talks to the Helper: `auto` uses `mono` while the colourblind filter is on, else `dense`; try `robust` when the Helper reports a weak signal |
 | `/tpr translit <text>` | spell any text in Latin letters (the client's transliterator) |
-| `/tpr gloss add <abbr> <meaning>` | add or replace a glossary entry (several meanings: separate them with `/`) |
+| `/tpr gloss add <abbr> <meaning>` | add or replace a glossary entry for the current target language (several meanings: separate them with `/`) |
 | `/tpr gloss del <abbr>` | remove your entry, or disable a built-in one |
-| `/tpr gloss list` / `test <text>` | your entries / what a message would give |
+| `/tpr gloss list` / `test <text>` | your entries with their meaning in the current target language / what a message would give |
 | `/tpr test` | checks the whole setup on a sample line |
 | `/tpr test rows` | checks the rows reserved under a line (the Helper writes "Overlay OK") |
 | `/tpr test lockdown` | what the addon can read during a chat restriction |
