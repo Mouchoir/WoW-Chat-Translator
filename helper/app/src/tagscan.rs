@@ -12,8 +12,8 @@
 //!    scan (and the same calibration) keeps their readings instead of reading them again. A new tag
 //!    changes the band's candidate rows, and any change of a tag's pixels (scroll, fade, cover)
 //!    makes the band read again.
-//! 3. **Unchanged cards** ([`CardCache`]). `cards::build` is a function of its inputs: the image,
-//!    the tags, the views, the plate flags and the session bit. When all of them are the same as
+//! 3. **Unchanged cards** ([`CardCache`]). `cards::build_with_rows` is a function of its inputs:
+//!    the image, the tags, the views, the plate flags, the row counts and the session bit. When all of them are the same as
 //!    for the previous result (the image compared pixel for pixel with the grabber's previous
 //!    capture of the same rectangle, which it keeps in its second buffer), the previous cards are
 //!    kept. Any pixel change anywhere in the scan area (a tooltip, a scroll, a fade, the game
@@ -256,7 +256,8 @@ impl TagScanner {
 pub struct CardCache {
     hits: Vec<TagHit>,
     views: Vec<View>,
-    plates: Vec<(u8, Option<bool>)>,
+    /// (slot, plate expected, rows expected) of every slot with a tag.
+    plates: Vec<(u8, Option<bool>, Option<u8>)>,
     sess_bit: Option<u8>,
     /// Origin and size of the image the cards come from.
     image: [i64; 4],
@@ -303,10 +304,7 @@ impl CardCache {
         self.cards.clear();
     }
 
-    /// `cards::build(img, hits, views, plate_expected, sess_bit)` for the capture numbered
-    /// `frame`, or the previous result when its inputs are the same and `prev` (the capture of
-    /// the same rectangle the previous result came from, with its number) holds exactly the same
-    /// pixels as `img`. The bool is true when the previous cards were kept.
+    /// [`CardCache::build_with_rows`] with no row count known (`cards::build`).
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         &mut self,
@@ -318,7 +316,26 @@ impl CardCache {
         plate_expected: &dyn Fn(u8) -> Option<bool>,
         sess_bit: Option<u8>,
     ) -> (Vec<Card>, bool) {
-        let mut plates: Vec<(u8, Option<bool>)> = hits.iter().map(|h| (h.slot, plate_expected(h.slot))).collect();
+        self.build_with_rows(img, frame, prev, hits, views, plate_expected, &|_| None, sess_bit)
+    }
+
+    /// `cards::build_with_rows(img, hits, views, plate_expected, rows_expected, sess_bit)` for the
+    /// capture numbered `frame`, or the previous result when its inputs are the same and `prev`
+    /// (the capture of the same rectangle the previous result came from, with its number) holds
+    /// exactly the same pixels as `img`. The bool is true when the previous cards were kept.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_with_rows(
+        &mut self,
+        img: &Bgra,
+        frame: u64,
+        prev: Option<(&Bgra, u64)>,
+        hits: &[TagHit],
+        views: &[View],
+        plate_expected: &dyn Fn(u8) -> Option<bool>,
+        rows_expected: &dyn Fn(u8) -> Option<u8>,
+        sess_bit: Option<u8>,
+    ) -> (Vec<Card>, bool) {
+        let mut plates: Vec<(u8, Option<bool>, Option<u8>)> = hits.iter().map(|h| (h.slot, plate_expected(h.slot), rows_expected(h.slot))).collect();
         plates.sort_unstable_by_key(|p| p.0);
         plates.dedup();
         let image = image_key(img);
@@ -334,7 +351,7 @@ impl CardCache {
             self.frame = frame;
             return (self.cards.clone(), true);
         }
-        let cards = cards::build(img, hits, views, plate_expected, sess_bit);
+        let cards = cards::build_with_rows(img, hits, views, plate_expected, rows_expected, sess_bit);
         self.hits = hits.to_vec();
         self.views = views.to_vec();
         self.plates = plates;

@@ -2,6 +2,10 @@
 //! statuses. With `--no-overlay` (amendment A1) the same rendering goes into in-memory DIBs and no
 //! window is ever created.
 //!
+//! Native look: each card's reserved rows are painted over with the chat background sampled
+//! around them (`backdrop`), and the text is drawn like chat text: the chat font size, a 1 px
+//! black shadow, greyscale antialiasing; statuses in a muted grey.
+//!
 //! CPU (P4b): each view keeps its canvas between renders (only the dirty part is cleared and
 //! copied), and wrapped lines and their rasterized coverage are cached, so a render after a small
 //! change (alpha, a mask, a status) does not measure or rasterize text again.
@@ -23,14 +27,17 @@ use tp_engine::{JobKey, Status};
 use crate::i18n::{self, Lang};
 use crate::scene::{CardKind, Scene, SceneCard, SceneView};
 use fit::Fitted;
-use fonts::{face_for_target, Face, Fonts};
+use fonts::{face_for_target, Face, Fonts, SS};
 use render::{paint_card, Canvas, Coverage, PaintStats, TextDraw};
 use window::{changed_region, Dib, LayeredWindow, OVERLAY_CLASS};
 
-pub const STATUS_RGB: [u8; 3] = [0x8F, 0xA3, 0xB3];
+/// Status lines ("Translating..." and the like): a muted grey, distinct from the translation.
+pub const STATUS_RGB: [u8; 3] = [0xA0, 0xA0, 0xA0];
 pub const FAILURE_RGB: [u8; 3] = [0xE0, 0x80, 0x80];
-/// The font is capped at 0.95 x the band height.
-pub const FONT_CAP: f32 = 0.95;
+/// The font is capped so that its cell (ascent + descent) is at most the band height plus this
+/// many px: text is drawn vertically centred in the band, and a character height equal to the
+/// band clipped accents and descenders (2.1-2.6% of a French line's ink, measured 2026-10-18).
+pub const FONT_CELL_SLACK: f32 = 1.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -139,8 +146,9 @@ pub struct ViewReport {
     pub window: bool,
 }
 
-/// Cache key of a rasterized line or a fitted text: the text's hash plus the parameters; the
-/// cached entry keeps the text itself to rule out hash collisions.
+/// Cache key of a rasterized line or a fitted text: the text's hash plus the parameters (font
+/// sizes in supersampled pixels); the cached entry keeps the text itself to rule out hash
+/// collisions.
 type CovKey = (Face, i32, i32, i32, u64);
 type FitKey = (Face, i32, i32, usize, u64);
 const CACHE_MAX: usize = 256;
@@ -163,7 +171,10 @@ pub struct OverlayManager {
     fonts: Fonts,
     cov_cache: HashMap<CovKey, (String, Rc<Coverage>)>,
     fit_cache: HashMap<FitKey, (String, Fitted)>,
-    last: HashMap<u8, (bool, [i32; 4], usize)>,
+    /// Per view: (shown, rect, painted px, text px) of the last report. The text count is part of
+    /// it: with the native look the plate is painted before any text, so a status or a
+    /// translation appearing leaves the painted count unchanged.
+    last: HashMap<u8, (bool, [i32; 4], usize, usize)>,
     /// A visible card shows an animated status (the UI runs a 10 Hz timer while true).
     pub animating: bool,
 }
@@ -215,8 +226,9 @@ impl OverlayManager {
         self.surfaces.values().any(|s| matches!(s, Surface::Window(w) if w.shown()))
     }
 
-    fn coverage(&mut self, face: Face, px: i32, text: &str, w: i32, h: i32) -> Rc<Coverage> {
-        let key = (face, px, w, h, text_hash(text));
+    /// Coverage of one line at `size` supersampled pixels.
+    fn coverage(&mut self, face: Face, size: i32, text: &str, w: i32, h: i32) -> Rc<Coverage> {
+        let key = (face, size, w, h, text_hash(text));
         if let Some((t, c)) = self.cov_cache.get(&key) {
             if t == text {
                 return c.clone();
@@ -225,14 +237,15 @@ impl OverlayManager {
         if self.cov_cache.len() >= CACHE_MAX {
             self.cov_cache.clear();
         }
-        let c = Rc::new(self.fonts.coverage(face, px, text, w, h));
+        let c = Rc::new(self.fonts.coverage_ss(face, size, text, w, h));
         self.cov_cache.insert(key, (text.to_string(), c.clone()));
         c
     }
 
-    /// `fit::fit` with the result cached (the wrap measures every candidate line with GDI).
-    fn fitted(&mut self, face: Face, px: i32, text: &str, rows: usize, width: i32) -> Fitted {
-        let key = (face, px, width, rows, text_hash(text));
+    /// `fit::fit` at `size` supersampled pixels, with the result cached (the wrap measures every
+    /// candidate line with GDI).
+    fn fitted(&mut self, face: Face, size: i32, text: &str, rows: usize, width: i32) -> Fitted {
+        let key = (face, size, width, rows, text_hash(text));
         if let Some((t, f)) = self.fit_cache.get(&key) {
             if t == text {
                 return f.clone();
@@ -242,16 +255,18 @@ impl OverlayManager {
             self.fit_cache.clear();
         }
         let fonts = &mut self.fonts;
-        let f = fit::fit(text, rows, width, &mut |s, scale| fonts.measure(face, (px as f32 * scale).round() as i32, s));
+        let f = fit::fit(text, rows, width, size, &mut |s, sz| fonts.measure_ss(face, sz, s));
         self.fit_cache.insert(key, (text.to_string(), f.clone()));
         f
     }
 
-    /// Font size for a card: VIEW.fontPx x fontScale, capped at 0.95 x the band height.
-    fn font_px(&self, view: &SceneView, card: &Card) -> i32 {
+    /// Font size for a card in supersampled pixels: VIEW.fontPx (the chat font) x fontScale,
+    /// capped so that the cell of `face` fits the band height plus `FONT_CELL_SLACK`.
+    fn font_size(&mut self, view: &SceneView, card: &Card, face: Face) -> i32 {
         let band_h = card.bands.iter().map(|b| b.text_rect.h).min().unwrap_or(0) as f32;
         let base = if view.font_px > 0 { f32::from(view.font_px) * self.font_scale } else { band_h * self.font_scale };
-        base.min(band_h * FONT_CAP).round() as i32
+        let cap = ((band_h + FONT_CELL_SLACK) / self.fonts.cell_ratio(face)).min(band_h);
+        (base.min(cap) * SS as f32).round() as i32
     }
 
     fn paint(&mut self, canvas: &mut Canvas, view: &SceneView, sc: &SceneCard, results: &HashMap<JobKey, Status>, fallback: Lang, pulse_mul: f32) -> PaintStats {
@@ -261,20 +276,20 @@ impl OverlayManager {
             _ => None,
         };
         let content = card_content(sc, status, fallback);
-        let px = self.font_px(view, card);
+        let size = self.font_size(view, card, Face::Latin);
         let width = if card.text_width_px > 0 { card.text_width_px } else { card.bands.iter().map(|b| b.text_rect.w).max().unwrap_or(0) };
-        // (band index, line, face, px, colour, alpha multiplier)
+        // (band index, line, face, supersampled size, colour, alpha multiplier)
         let mut lines: Vec<(usize, String, Face, i32, [u8; 3], f32)> = Vec::new();
-        if px >= 6 && width > 0 {
+        if size >= 6 * SS && width > 0 {
             match content {
                 Content::Empty => {}
                 Content::Lines { text, target, rows } => {
                     let face = face_for_target(&target);
-                    let fitted = self.fitted(face, px, &text, rows, width);
-                    let lpx = (px as f32 * fitted.scale).round() as i32;
+                    let size = self.font_size(view, card, face);
+                    let fitted = self.fitted(face, size, &text, rows, width);
                     for (i, line) in fitted.lines.into_iter().enumerate() {
                         if let Some(bi) = card.bands.iter().position(|b| usize::from(b.row) == i) {
-                            lines.push((bi, line, face, lpx, self.text_rgb, 1.0));
+                            lines.push((bi, line, face, fitted.size, self.text_rgb, 1.0));
                         }
                     }
                 }
@@ -287,19 +302,17 @@ impl OverlayManager {
                     if animated {
                         self.animating = true;
                     }
-                    let fitted = self.fitted(Face::Latin, px, &text, 1, width);
-                    let lpx = (px as f32 * fitted.scale).round() as i32;
+                    let fitted = self.fitted(Face::Latin, size, &text, 1, width);
                     let first = card.bands.iter().enumerate().min_by_key(|(_, b)| b.row).map(|(i, _)| i);
                     if let (Some(bi), Some(line)) = (first, fitted.lines.into_iter().next()) {
-                        lines.push((bi, line, Face::Latin, lpx, rgb, if animated { pulse_mul } else { 1.0 }));
+                        lines.push((bi, line, Face::Latin, fitted.size, rgb, if animated { pulse_mul } else { 1.0 }));
                     }
                 }
                 Content::PerBand(list) => {
                     for (bi, text) in list {
-                        let fitted = self.fitted(Face::Latin, px, &text, 1, width);
-                        let lpx = (px as f32 * fitted.scale).round() as i32;
+                        let fitted = self.fitted(Face::Latin, size, &text, 1, width);
                         if let Some(line) = fitted.lines.into_iter().next() {
-                            lines.push((bi, line, Face::Latin, lpx, STATUS_RGB, 1.0));
+                            lines.push((bi, line, Face::Latin, fitted.size, STATUS_RGB, 1.0));
                         }
                     }
                 }
@@ -307,13 +320,13 @@ impl OverlayManager {
         }
         let covs: Vec<(usize, Rc<Coverage>, [u8; 3], f32)> = lines
             .into_iter()
-            .map(|(bi, line, face, lpx, rgb, mul)| {
+            .map(|(bi, line, face, lsize, rgb, mul)| {
                 let tr = card.bands[bi].text_rect;
-                (bi, self.coverage(face, lpx, &line, tr.w, tr.h), rgb, mul)
+                (bi, self.coverage(face, lsize, &line, tr.w, tr.h), rgb, mul)
             })
             .collect();
         let texts: Vec<TextDraw> = covs.iter().map(|(bi, cov, rgb, mul)| TextDraw { band: *bi, cov: cov.as_ref(), rgb: *rgb, alpha_mul: *mul }).collect();
-        paint_card(canvas, card, &texts, self.diag_outlines)
+        paint_card(canvas, card, &sc.bg, &texts, self.diag_outlines)
     }
 
     /// Draws the scene. Returns the views whose state changed (for `--diag-json`).
@@ -359,7 +372,7 @@ impl OverlayManager {
         let prev: Vec<u8> = self.last.keys().copied().collect();
         for id in prev {
             if !live.contains(&id) {
-                if let Some((true, rect, _)) = self.last.get(&id).copied() {
+                if let Some((true, rect, _, _)) = self.last.get(&id).copied() {
                     reports.push(ViewReport { id, shown: false, rect, px: 0, stats: PaintStats::default(), window: !self.no_overlay });
                 }
             }
@@ -367,7 +380,7 @@ impl OverlayManager {
         // Keep only changes.
         let mut changed = Vec::new();
         for r in reports {
-            let state = (r.shown, r.rect, r.px);
+            let state = (r.shown, r.rect, r.px, r.stats.text_px);
             if self.last.get(&r.id) != Some(&state) {
                 self.last.insert(r.id, state);
                 changed.push(r);
@@ -459,6 +472,7 @@ mod tests {
             kind: CardKind::Request { key: JobKey { session: 9, req_id }, rows: 2, target: target.into() },
             covered: false,
             block_px: 5.0,
+            bg: crate::backdrop::CardBg::default(),
         }
     }
 
@@ -604,7 +618,8 @@ mod tests {
     }
 
     /// Render cost of a typical scene (3 finished cards with 3, 2 and 4 rows in a 645 x 433 chat
-    /// view). Run: `cargo test --release --lib render_cost -- --ignored --nocapture`.
+    /// view, native look: tags and plates painted with a background gradient). Run:
+    /// `cargo test --release --lib render_cost -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn render_cost() {
@@ -619,6 +634,12 @@ mod tests {
                 b.mask = Some(tp_bridge::cards::Mask { rect: Rect { x: 57, y: b.text_rect.y, w: 530, h: 14 }, bits: vec![255; 530 * 14] });
             }
             sc.card.text_width_px = 520;
+            // the native look: the plate is painted with a background gradient
+            let bg = crate::backdrop::BandBg {
+                left: Some(crate::backdrop::Sample { rgb: [30, 70, 40], x: 30 }),
+                right: Some(crate::backdrop::Sample { rgb: [100, 55, 30], x: 640 }),
+            };
+            sc.bg = crate::backdrop::CardBg { bands: vec![bg; usize::from(rows)], edges: Vec::new() };
             cards.push(sc);
             results.insert(JobKey { session: 9, req_id: 10 + i as u16 }, Status::Done(ChatText::new("QUELQU'UN POUR FINIR LA QUETE DE LA MINE CE SOIR ? ON A BESOIN D'UN SOIGNEUR ET D'UN TANK, ON PART DANS DIX MINUTES".into())));
         }
@@ -637,6 +658,107 @@ mod tests {
         }
         let per = t0.elapsed().as_secs_f64() * 1000.0 / f64::from(n);
         eprintln!("render: {per:.3} ms per frame");
+    }
+
+    /// A 2-row card over a sampled background: green on the left, brown on the right.
+    fn native_card(text_rows: u8) -> SceneCard {
+        use crate::backdrop::{BandBg, CardBg, Sample};
+        let mut sc = req(3, 1, "fr");
+        sc.card = card(3, 0, 900, text_rows, 1.0);
+        sc.kind = CardKind::Request { key: JobKey { session: 9, req_id: 1 }, rows: text_rows, target: "fr".into() };
+        let b = BandBg { left: Some(Sample { rgb: [30, 70, 40], x: 4 }), right: Some(Sample { rgb: [100, 55, 30], x: 380 }) };
+        sc.bg = CardBg { bands: vec![b; usize::from(text_rows)], edges: Vec::new() };
+        sc
+    }
+
+    #[test]
+    fn native_look_paints_the_background_and_no_outline() {
+        let sc = native_card(2);
+        let want = |x: i32| sc.bg.bands[0].at(x).unwrap();
+        let mut results = HashMap::new();
+        results.insert(JobKey { session: 9, req_id: 1 }, Status::Done(ChatText::new("Bonjour".into())));
+        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
+        m.render(&scene_with(vec![sc.clone()]), &results, 1.0, Lang::En);
+        let bits = m.memory_pixels(0).unwrap();
+        // canvas pixel (x, y) as (RGB, alpha); the view starts at client y 16
+        let px = |x: i32, y: i32| {
+            let i = (((y - 16) * 400 + x) * 4) as usize;
+            ([bits[i + 2], bits[i + 1], bits[i]], bits[i + 3])
+        };
+        // the tag: the background gradient, opaque (no dark square)
+        assert_eq!(px(20, 905), (want(20), 255));
+        // plate pixels right of the text (x 200..259 of row 1 holds no text): the gradient
+        for x in [210, 240, 258] {
+            assert_eq!(px(x, 920), (want(x), 255), "row 1 at x {x}");
+        }
+        let (mut text, mut plate, mut outline) = (0, 0, 0);
+        for y in 880..960 {
+            for x in 0..400 {
+                let (rgb, a) = px(x, y);
+                if a == 0 {
+                    continue;
+                }
+                text += usize::from(rgb[2] > 200);
+                plate += usize::from(rgb == [32, 40, 64]);
+                outline += usize::from(rgb == [255, 255, 0] || rgb == [0, 255, 255]);
+            }
+        }
+        assert!(text > 10, "the translation is drawn");
+        assert_eq!(plate, 0, "no plate colour (no slab)");
+        assert_eq!(outline, 0, "no outline without --diag");
+        // --diag adds the outlines
+        let mut d = OverlayManager::new(true, true, [0xA8, 0xD8, 0xFF], 1.0);
+        d.render(&scene_with(vec![sc]), &results, 1.0, Lang::En);
+        let dbits = d.memory_pixels(0).unwrap();
+        assert!(dbits.chunks_exact(4).any(|p| p[..3] == [0, 255, 255] && p[3] == 255), "yellow outline (BGRA)");
+    }
+
+    #[test]
+    fn shrinks_to_80_percent_before_cutting_with_real_fonts() {
+        let mut m = OverlayManager::new(true, false, [255, 255, 255], 1.0);
+        let (size, width, rows) = (14 * SS, 200, 2);
+        let min = fit::min_size(size);
+        let words = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda omicron sigma upsilon omega";
+        let all: Vec<&str> = words.split(' ').collect();
+        let mut fonts = Fonts::new();
+        let lines_at = |fonts: &mut Fonts, text: &str, sz: i32| fit::wrap(text, width, &mut |s| fonts.measure_ss(Face::Latin, sz, s)).len();
+        let (mut shrunk, mut cut) = (None, None);
+        for n in 1..=all.len() {
+            let text = all[..n].join(" ");
+            let (full, small) = (lines_at(&mut fonts, &text, size), lines_at(&mut fonts, &text, min));
+            if full > rows && small <= rows && shrunk.is_none() {
+                shrunk = Some(text.clone());
+            }
+            if small > rows && cut.is_none() {
+                cut = Some(text);
+            }
+        }
+        let shrunk = shrunk.expect("a text that fits only below the full size");
+        let f = m.fitted(Face::Latin, size, &shrunk, rows, width);
+        assert!(!f.cut && f.size < size && f.size >= min, "{f:?}");
+        assert!(f.lines.len() <= rows);
+        assert!(f.lines.iter().all(|l| fonts.measure_ss(Face::Latin, f.size, l) <= width), "{f:?}");
+        let cut = cut.expect("a text too long even at 80%");
+        let g = m.fitted(Face::Latin, size, &cut, rows, width);
+        assert!(g.cut && g.size == min, "{g:?}");
+        assert_eq!(g.lines.len(), rows);
+        let last = g.lines.last().unwrap();
+        assert!(last.ends_with("...") && !last.contains('\u{2026}'), "{last}");
+        assert!(fonts.measure_ss(Face::Latin, g.size, last) <= width);
+        // pixels: the shrunk text is drawn in both rows, never right of the text width
+        let mut sc = native_card(2);
+        sc.bg = crate::backdrop::CardBg::default();
+        let mut results = HashMap::new();
+        results.insert(JobKey { session: 9, req_id: 1 }, Status::Done(ChatText::new(shrunk)));
+        m.render(&scene_with(vec![sc]), &results, 1.0, Lang::En);
+        let bits = m.memory_pixels(0).unwrap();
+        let glyph = |x: i32, y: i32| {
+            let i = (((y - 16) * 400 + x) * 4) as usize;
+            bits[i] > 128 && bits[i + 3] > 128
+        };
+        let row_has_text = |y0: i32| (y0..y0 + 14).any(|y| (60..260).any(|x| glyph(x, y)));
+        assert!(row_has_text(900) && row_has_text(916));
+        assert!((900..930).all(|y| (261..400).all(|x| !glyph(x, y))), "text past the text width");
     }
 
     #[test]

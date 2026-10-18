@@ -148,8 +148,11 @@ fn run_scenario(picture: Vec<u8>) -> Vec<serde_json::Value> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let diag = dir.join("diag.jsonl");
+    // Its own single-instance mutex: a Helper the user is running keeps the default one.
+    let instance = format!("pipeline-test-{}", std::process::id());
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_TranslateProbeHelper"))
         .args(["--wow-class", "TPMiniWow", "--no-overlay", "--no-tray", "--translator", "echo", "--capture", "wgc", "--exit-after", "6"])
+        .args(["--instance-name", &instance])
         .arg("--diag-json")
         .arg(&diag)
         .arg("--log-dir")
@@ -230,5 +233,6 @@ fn late_start_shows_missing() {
         .expect("a missing card for slot 9");
     assert_eq!(card["view"], 0, "discovery view");
     assert_eq!(card["bands"].as_array().unwrap().len(), 2, "{card}");
-    assert!(ev(&events, "overlay").any(|e| e["shown"] == true && e["textPx"].as_u64().unwrap_or(0) > 0), "status drawn into memory");
+    let overlays: Vec<&serde_json::Value> = ev(&events, "overlay").collect();
+    assert!(overlays.iter().any(|e| e["shown"] == true && e["textPx"].as_u64().unwrap_or(0) > 0), "status drawn into memory: {overlays:?} {card}");
 }

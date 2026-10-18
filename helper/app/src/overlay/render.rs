@@ -1,9 +1,15 @@
-//! Pixel composition of cards into a premultiplied BGRA canvas (design D.3 "Overlay drawing").
+//! Pixel composition of cards into a premultiplied BGRA canvas (design D.3 "Overlay drawing", with
+//! the native look).
 //!
-//! Per card: the tags are painted over with the observed plate colour (amendment A2), the
-//! no-plate fill and the small gaps between rows are filled, then each text line is drawn with a
-//! 1 px black shadow at 0.7. Final alpha = coverage x mask x card alpha: text only lands on plate
-//! pixels that are visible in this capture, so a tooltip or menu over a row is never painted over.
+//! Per card: the tags, the visible plate pixels (the occlusion mask), the tags' blended edge rows
+//! and the small gaps between rows are filled, opaque, with the chat background sampled around
+//! each row in the same capture (`backdrop`: a horizontal gradient between the indent left of the
+//! tag and the chat right of the plate), so the reserved rows disappear and the translation looks
+//! like ordinary chat text; then each text line is drawn over a 1 px black shadow offset (1, 1) at
+//! full opacity, like WoW chat. Final text alpha = coverage x mask x card alpha: text only lands
+//! on plate pixels that are visible in this capture, so a tooltip or menu over a row is never
+//! painted over. Without background samples (no capture, the overlay probe) the tags are covered
+//! with the observed plate colour as before.
 //!
 //! CPU (P4b): a canvas is reused from one render to the next and only its dirty rectangle (the
 //! bounding box of what was painted) is cleared, counted and copied; the text loop skips pixels
@@ -12,9 +18,14 @@
 use tp_bridge::cards::{Card, Mask, RowBand};
 use tp_bridge::image::Rect;
 
-pub const SHADOW_ALPHA: f32 = 0.7;
+use crate::backdrop::{BandBg, CardBg};
+#[cfg(test)]
+use crate::backdrop::EdgeRun;
+
+/// The text shadow: black, 1 px down and right, at full opacity (WoW chat's own shadow).
+pub const SHADOW_ALPHA: f32 = 1.0;
 /// `SHADOW_ALPHA` on the 0..255 scale.
-const SHADOW_ALPHA_8: u32 = 179;
+const SHADOW_ALPHA_8: u32 = 255;
 /// No-plate mode fills the text rectangle at 0.92 x alpha (design D.2 step 9).
 pub const NO_PLATE_FILL: f32 = 0.92;
 
@@ -166,6 +177,55 @@ impl Canvas {
         n
     }
 
+    /// Fills `r` opaque, column `x` with `cols[x - r.x]`; returns the pixels painted.
+    pub fn fill_cols(&mut self, r: Rect, cols: &[[u8; 3]]) -> usize {
+        if cols.len() < r.w.max(0) as usize {
+            return 0;
+        }
+        let (x0, x1) = (r.x.max(self.rect.x), (r.x + r.w).min(self.rect.x + self.rect.w));
+        let (y0, y1) = (r.y.max(self.rect.y), (r.y + r.h).min(self.rect.y + self.rect.h));
+        let mut n = 0;
+        for y in y0..y1 {
+            let row = ((y - self.rect.y) * self.rect.w) as usize * 4;
+            for x in x0..x1 {
+                let i = row + (x - self.rect.x) as usize * 4;
+                set_opaque(&mut self.px[i..i + 4], cols[(x - r.x) as usize]);
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.mark(r);
+        }
+        n
+    }
+
+    /// Paints opaque every set pixel of row `y` of mask `m`; column `x` gets `cols[x - m.rect.x]`.
+    fn fill_mask_row(&mut self, m: &Mask, y: i32, cols: &[[u8; 3]]) -> usize {
+        let ly = y - m.rect.y;
+        if ly < 0 || ly >= m.rect.h || y < self.rect.y || y >= self.rect.y + self.rect.h || cols.len() < m.rect.w.max(0) as usize {
+            return 0;
+        }
+        let bits = &m.bits[(ly * m.rect.w) as usize..((ly + 1) * m.rect.w) as usize];
+        let (x0, x1) = (m.rect.x.max(self.rect.x), (m.rect.x + m.rect.w).min(self.rect.x + self.rect.w));
+        let row = ((y - self.rect.y) * self.rect.w) as usize * 4;
+        let (mut n, mut lo, mut hi) = (0, i32::MAX, i32::MIN);
+        for x in x0..x1 {
+            let lx = (x - m.rect.x) as usize;
+            if bits[lx] == 0 {
+                continue;
+            }
+            let i = row + (x - self.rect.x) as usize * 4;
+            set_opaque(&mut self.px[i..i + 4], cols[lx]);
+            n += 1;
+            lo = lo.min(x);
+            hi = hi.max(x);
+        }
+        if n > 0 {
+            self.mark(Rect { x: lo, y, w: hi - lo + 1, h: 1 });
+        }
+        n
+    }
+
     /// 1 px outline of `r` (the `--diag` frames).
     pub fn outline(&mut self, r: Rect, rgb: [u8; 3]) {
         if r.w <= 0 || r.h <= 0 {
@@ -201,6 +261,15 @@ impl Canvas {
     }
 }
 
+/// An opaque pixel (premultiplied BGRA with alpha 255 is the colour itself).
+#[inline]
+fn set_opaque(p: &mut [u8], rgb: [u8; 3]) {
+    p[0] = rgb[2];
+    p[1] = rgb[1];
+    p[2] = rgb[0];
+    p[3] = 255;
+}
+
 /// Source-over blend of `rgb` at opacity `a` onto one premultiplied BGRA pixel; false when `a`
 /// rounds to 0.
 #[inline]
@@ -234,43 +303,88 @@ fn band_top_row(b: &RowBand) -> i32 {
     }
 }
 
-/// Paints one card. `texts` are the lines to draw, already fitted and rasterized.
-pub fn paint_card(c: &mut Canvas, card: &Card, texts: &[TextDraw], diag: bool) -> PaintStats {
+/// The gap's colour at column `x`: the mean of the backgrounds of the rows above and below.
+fn gap_color(above: &BandBg, below: &BandBg, x: i32) -> Option<[u8; 3]> {
+    match (above.at(x), below.at(x)) {
+        (Some(a), Some(b)) => Some([0, 1, 2].map(|c| ((u16::from(a[c]) + u16::from(b[c]) + 1) / 2) as u8)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Paints one card. `bg` is the chat background around its rows (empty: cover the tags with the
+/// plate colour instead); `texts` are the lines to draw, already fitted and rasterized.
+pub fn paint_card(c: &mut Canvas, card: &Card, bg: &CardBg, texts: &[TextDraw], diag: bool) -> PaintStats {
     let mut st = PaintStats::default();
     let alpha = card.alpha.clamp(0.0, 1.0);
     let fill_alpha = if card.plate { alpha } else { alpha * NO_PLATE_FILL };
+    let native = !bg.is_empty();
 
-    // A2: hide the tags (every hit passed the per-block uniformity check of the scan). Opaque:
-    // the observed plate colour already is what the faded plate looks like on screen, so a
-    // translucent cover would let a faded tag show through.
-    for b in &card.bands {
+    for (i, b) in card.bands.iter().enumerate() {
+        let g = bg.band(i);
+        // A2: hide the tags (every hit passed the per-block uniformity check of the scan). Opaque:
+        // the background samples (or the observed plate colour) come from the same capture and
+        // already show the chat line's fade, so a translucent cover would let a faded tag show
+        // through.
         if b.tag_rect.w > 0 && b.tag_rect.h > 0 {
-            st.tag_px += c.fill(b.tag_rect, card.plate_rgb, 1.0);
+            st.tag_px += if native { c.fill_cols(b.tag_rect, &g.row(b.tag_rect.x, b.tag_rect.w)) } else { c.fill(b.tag_rect, card.plate_rgb, 1.0) };
+        }
+        // Native look: the visible plate pixels become the chat background (opaque, same reason).
+        if native && card.plate {
+            if let Some(m) = &b.mask {
+                let cols = g.row(m.rect.x, m.rect.w);
+                for y in m.rect.y..m.rect.y + m.rect.h {
+                    st.fill_px += c.fill_mask_row(m, y, &cols);
+                }
+            }
+        }
+    }
+    // The plate's blended pixels just outside the mask (the rows above and below it, the column
+    // after its end), checked in the capture to be plate-to-chat blends.
+    if native && card.plate {
+        for e in &bg.edges {
+            let g = bg.band(e.band);
+            st.fill_px += c.fill_cols(Rect { x: e.x0, y: e.y, w: e.x1 - e.x0, h: 1 }, &g.row(e.x0, e.x1 - e.x0));
         }
     }
 
-    // No-plate mode: the text rectangle gets a fill sampled at the view's right edge.
+    // No-plate mode: the text rectangle gets a fill: the background gradient, else the colour
+    // sampled at the view's right edge.
     if !card.plate {
-        for b in &card.bands {
-            st.fill_px += c.fill(b.text_rect, card.plate_rgb, fill_alpha);
+        for (i, b) in card.bands.iter().enumerate() {
+            if native {
+                let cols = bg.band(i).row(b.text_rect.x, b.text_rect.w);
+                for y in b.text_rect.y..b.text_rect.y + b.text_rect.h {
+                    for x in b.text_rect.x..b.text_rect.x + b.text_rect.w {
+                        st.fill_px += usize::from(c.blend(x, y, cols[(x - b.text_rect.x) as usize], fill_alpha));
+                    }
+                }
+            } else {
+                st.fill_px += c.fill(b.text_rect, card.plate_rgb, fill_alpha);
+            }
         }
     }
 
     // Gap fill between consecutive rows, only where both neighbouring rows' masks are set.
     for g in &card.gaps {
-        let above = card.bands.iter().filter(|b| band_bottom_row(b) < g.y + g.h).max_by_key(|b| band_bottom_row(b));
-        let below = card.bands.iter().filter(|b| band_top_row(b) >= g.y).min_by_key(|b| band_top_row(b));
-        let (Some(above), Some(below)) = (above, below) else { continue };
+        let above = card.bands.iter().enumerate().filter(|(_, b)| band_bottom_row(b) < g.y + g.h).max_by_key(|(_, b)| band_bottom_row(b));
+        let below = card.bands.iter().enumerate().filter(|(_, b)| band_top_row(b) >= g.y).min_by_key(|(_, b)| band_top_row(b));
+        let (Some((ia, above)), Some((ib, below))) = (above, below) else { continue };
+        let (bga, bgb) = (bg.band(ia), bg.band(ib));
         for x in g.x..g.x + g.w {
             let ok = match (&above.mask, &below.mask) {
                 (Some(ma), Some(mb)) => mask_bit(ma, x, band_bottom_row(above)) && mask_bit(mb, x, band_top_row(below)),
                 (None, None) => !card.plate,
                 _ => false,
             };
-            if ok {
-                for y in g.y..g.y + g.h {
-                    st.fill_px += usize::from(c.blend(x, y, card.plate_rgb, fill_alpha));
-                }
+            if !ok {
+                continue;
+            }
+            let (rgb, a) = match (native, gap_color(&bga, &bgb, x)) {
+                (true, Some(rgb)) => (rgb, if card.plate { 1.0 } else { fill_alpha }),
+                _ => (card.plate_rgb, fill_alpha),
+            };
+            for y in g.y..g.y + g.h {
+                st.fill_px += usize::from(c.blend(x, y, rgb, a));
             }
         }
     }
@@ -328,8 +442,12 @@ pub fn paint_card(c: &mut Canvas, card: &Card, texts: &[TextDraw], diag: bool) -
                         continue;
                     }
                 }
-                // Integer form of: layer = tc + 0.7 sc (1 - tc); source alpha = layer x a; the
-                // premultiplied source colour is rgb x tc x a (the shadow is black).
+                // counted before the alpha is applied, so a pulsing status keeps the same count
+                if tc8 > 0 {
+                    st.text_px += 1;
+                }
+                // Integer form of: layer = tc + shadow sc (1 - tc); source alpha = layer x a;
+                // the premultiplied source colour is rgb x tc x a (the shadow is black).
                 let (tc, sc) = (u32::from(tc8), (u32::from(sc8) * SHADOW_ALPHA_8 + 127) / 255);
                 let layer = tc + (sc * (255 - tc) + 127) / 255;
                 let sa = (layer * a8 + 127) / 255;
@@ -345,9 +463,6 @@ pub fn paint_card(c: &mut Canvas, card: &Card, texts: &[TextDraw], diag: bool) -
                 }
                 p[3] = (sa + (u32::from(p[3]) * inv + 127) / 255).min(255) as u8;
                 any = true;
-                if tc8 > 0 {
-                    st.text_px += 1;
-                }
             }
         }
         if any {
@@ -431,7 +546,7 @@ mod tests {
     fn tags_are_painted_over_with_the_plate_colour() {
         let mut c = Canvas::new(rect(0, 0, 200, 40));
         let k = card(vec![band(0, 5, Some(full_mask(5)))], 1.0, true);
-        let st = paint_card(&mut c, &k, &[], false);
+        let st = paint_card(&mut c, &k, &CardBg::default(), &[], false);
         assert_eq!(st.tag_px, 47 * 10);
         assert_eq!(c.pixel(10, 5), Some(([32, 40, 64], 255)));
         assert_eq!(c.pixel(56, 14), Some(([32, 40, 64], 255)));
@@ -439,13 +554,13 @@ mod tests {
         // At alpha 0.5 the cover stays opaque: plate_rgb is the observed (already faded) plate
         // colour, and a half-transparent cover would let the faded tag show through.
         let mut c2 = Canvas::new(rect(0, 0, 200, 40));
-        paint_card(&mut c2, &card(vec![band(0, 5, None)], 0.5, true), &[], false);
+        paint_card(&mut c2, &card(vec![band(0, 5, None)], 0.5, true), &CardBg::default(), &[], false);
         assert_eq!(c2.pixel(20, 8), Some(([32, 40, 64], 255)));
         // An empty tag rectangle paints nothing.
         let mut b = band(0, 5, None);
         b.tag_rect = rect(10, 5, 0, 10);
         let mut c3 = Canvas::new(rect(0, 0, 200, 40));
-        assert_eq!(paint_card(&mut c3, &card(vec![b], 1.0, true), &[], false).tag_px, 0);
+        assert_eq!(paint_card(&mut c3, &card(vec![b], 1.0, true), &CardBg::default(), &[], false).tag_px, 0);
     }
 
     #[test]
@@ -460,7 +575,7 @@ mod tests {
         let k = card(vec![band(0, 5, Some(Mask { rect: rect(57, 5, 50, 10), bits }))], 1.0, true);
         let cov = solid(40, 10);
         let mut c = Canvas::new(rect(0, 0, 200, 40));
-        let st = paint_card(&mut c, &k, &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0 }], false);
+        let st = paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0 }], false);
         assert_eq!(st.text_px, 20 * 10, "text only on x 60..79");
         assert_eq!(c.pixel(70, 9).unwrap().1, 255);
         assert_eq!(c.pixel(85, 9).unwrap().1, 0, "covered part untouched");
@@ -472,7 +587,7 @@ mod tests {
         let k = card(vec![band(0, 5, Some(full_mask(5)))], 0.5, true);
         let cov = Coverage { w: 40, h: 10, a: { let mut a = vec![0; 400]; a[5 * 40 + 5] = 255; a } };
         let mut c = Canvas::new(rect(0, 0, 200, 40));
-        paint_card(&mut c, &k, &[TextDraw { band: 0, cov: &cov, rgb: [200, 100, 50], alpha_mul: 1.0 }], false);
+        paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [200, 100, 50], alpha_mul: 1.0 }], false);
         // Glyph at text-rect (5,5) = client (65,10); band text_rect.h == cov.h so no vertical offset.
         let (rgb, a) = c.pixel(65, 10).unwrap();
         assert_eq!(a, 128);
@@ -480,16 +595,19 @@ mod tests {
     }
 
     #[test]
-    fn shadow_is_one_pixel_down_right_at_0_7() {
+    fn shadow_is_one_pixel_down_right_at_full_opacity() {
         let k = card(vec![band(0, 5, Some(full_mask(5)))], 1.0, true);
         let cov = Coverage { w: 40, h: 10, a: { let mut a = vec![0; 400]; a[2 * 40 + 3] = 255; a } };
         let mut c = Canvas::new(rect(0, 0, 200, 40));
-        paint_card(&mut c, &k, &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0 }], false);
+        paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0 }], false);
         assert_eq!(c.pixel(63, 7), Some(([255, 255, 255], 255)), "glyph");
-        let (rgb, a) = c.pixel(64, 8).unwrap();
-        assert_eq!(rgb, [0, 0, 0], "black shadow");
-        assert!((178..=179).contains(&a), "shadow at 0.7: {a}");
+        assert_eq!(c.pixel(64, 8), Some(([0, 0, 0], 255)), "opaque black shadow, like WoW chat");
         assert_eq!(c.pixel(62, 6).unwrap().1, 0);
+        // half-covered glyph pixel over a full shadow: still opaque, half the colour
+        let cov2 = Coverage { w: 40, h: 10, a: { let mut a = vec![0; 400]; a[2 * 40 + 3] = 255; a[3 * 40 + 4] = 128; a } };
+        let mut c2 = Canvas::new(rect(0, 0, 200, 40));
+        paint_card(&mut c2, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov2, rgb: [255, 255, 255], alpha_mul: 1.0 }], false);
+        assert_eq!(c2.pixel(64, 8), Some(([128, 128, 128], 255)));
     }
 
     #[test]
@@ -512,7 +630,7 @@ mod tests {
         );
         k.gaps = vec![rect(57, 15, 50, 2)];
         let mut c = Canvas::new(rect(0, 0, 200, 40));
-        let st = paint_card(&mut c, &k, &[], false);
+        let st = paint_card(&mut c, &k, &CardBg::default(), &[], false);
         assert_eq!(st.fill_px, 10 * 2, "x 67..76 only");
         assert_eq!(c.pixel(70, 15), Some(([32, 40, 64], 255)));
         assert_eq!(c.pixel(70, 16), Some(([32, 40, 64], 255)));
@@ -526,7 +644,7 @@ mod tests {
         k.plate_rgb = [10, 20, 30];
         k.gaps = vec![rect(60, 15, 40, 2)];
         let mut c = Canvas::new(rect(0, 0, 200, 40));
-        let st = paint_card(&mut c, &k, &[], false);
+        let st = paint_card(&mut c, &k, &CardBg::default(), &[], false);
         assert_eq!(st.fill_px, 40 * 10 * 2 + 40 * 2);
         let (_, a) = c.pixel(80, 10).unwrap();
         assert_eq!(a, 235, "0.92 x 255");
@@ -537,7 +655,7 @@ mod tests {
     fn diag_outlines() {
         let k = card(vec![band(0, 5, Some(full_mask(5)))], 1.0, true);
         let mut c = Canvas::new(rect(0, 0, 200, 40));
-        paint_card(&mut c, &k, &[], true);
+        paint_card(&mut c, &k, &CardBg::default(), &[], true);
         assert_eq!(c.pixel(60, 5), Some(([0, 255, 255], 255)));
         assert_eq!(c.pixel(70, 9).unwrap().1, 0, "inside the text rect stays clear");
     }
@@ -547,9 +665,91 @@ mod tests {
         let k = card(vec![band(0, 5, Some(full_mask(5)))], 1.0, true);
         let cov = solid(4, 4); // 4 px tall in a 10 px band: rows 8..11
         let mut c = Canvas::new(rect(0, 0, 200, 40));
-        paint_card(&mut c, &k, &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0 }], false);
+        paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0 }], false);
         assert_eq!(c.pixel(61, 7).unwrap().1, 0);
         assert_eq!(c.pixel(61, 8).unwrap().1, 255);
         assert_eq!(c.pixel(61, 11).unwrap().1, 255);
+    }
+
+    fn gradient_bg(n: usize) -> CardBg {
+        use crate::backdrop::Sample;
+        let b = BandBg { left: Some(Sample { rgb: [0, 50, 100], x: 0 }), right: Some(Sample { rgb: [200, 50, 0], x: 200 }) };
+        CardBg { bands: vec![b; n], edges: Vec::new() }
+    }
+
+    #[test]
+    fn native_look_fills_tag_plate_edges_and_gaps_with_the_background() {
+        // Row 0 at y 5..14 (tag rect with a blended edge row above: y 4), row 1 at y 17..26; the
+        // right half of row 1's plate is covered (mask 0 from x 82).
+        let mut b0 = band(0, 5, Some(full_mask(5)));
+        b0.tag_rect = rect(10, 4, 47, 11);
+        let mut bits = vec![255u8; 500];
+        for y in 0..10 {
+            for x in 25..50 {
+                bits[y * 50 + x] = 0;
+            }
+        }
+        let b1 = band(1, 17, Some(Mask { rect: rect(57, 17, 50, 10), bits }));
+        let mut k = card(vec![b0, b1], 0.6, true);
+        k.gaps = vec![rect(57, 15, 50, 2)];
+        let mut bg = gradient_bg(2);
+        // the plate's blended row above row 0 (x 57..107) and its end column on row 1
+        bg.edges = vec![EdgeRun { band: 0, y: 4, x0: 57, x1: 107 }, EdgeRun { band: 1, y: 20, x0: 107, x1: 108 }];
+        let mut c = Canvas::new(rect(0, 0, 200, 40));
+        let st = paint_card(&mut c, &k, &bg, &[], false);
+        let want = |x: i32| bg.bands[0].at(x).unwrap();
+        // tag rect: gradient, opaque (whatever the card alpha)
+        assert_eq!(c.pixel(10, 9), Some((want(10), 255)));
+        assert_eq!(c.pixel(56, 4), Some((want(56), 255)), "blended edge row of the tag");
+        // plate pixels: gradient, opaque, never the plate colour
+        assert_eq!(c.pixel(100, 10), Some((want(100), 255)));
+        assert_eq!(c.pixel(70, 4), Some((want(70), 255)), "the plate's blended edge row");
+        assert_eq!(c.pixel(107, 20), Some((want(107), 255)), "the plate's blended end column");
+        assert_eq!(c.pixel(108, 20).unwrap().1, 0);
+        assert_eq!(c.pixel(70, 20), Some((want(70), 255)));
+        assert_eq!(c.pixel(90, 20).unwrap().1, 0, "covered plate pixel untouched");
+        // gap: filled only where both masks are set
+        assert_eq!(c.pixel(70, 15), Some((want(70), 255)));
+        assert_eq!(c.pixel(90, 16).unwrap().1, 0);
+        assert!(st.fill_px > 0 && st.tag_px == 47 * 11 + 47 * 10, "{st:?}");
+        for y in 0..40 {
+            for x in 0..200 {
+                if let Some((rgb, a)) = c.pixel(x, y) {
+                    assert!(a == 0 || rgb != [32, 40, 64], "plate colour painted at ({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normal_mode_draws_no_outline_and_diag_does() {
+        let k = card(vec![band(0, 5, Some(full_mask(5)))], 1.0, true);
+        let bg = gradient_bg(1);
+        let mut normal = Canvas::new(rect(0, 0, 200, 40));
+        paint_card(&mut normal, &k, &bg, &[], false);
+        let mut diag = Canvas::new(rect(0, 0, 200, 40));
+        paint_card(&mut diag, &k, &bg, &[], true);
+        let (mut yellow, mut cyan) = (0, 0);
+        for y in 0..40 {
+            for x in 0..200 {
+                let n = normal.pixel(x, y).unwrap();
+                assert!(n.0 != [255, 255, 0] && n.0 != [0, 255, 255], "outline colour at ({x},{y}) in normal mode");
+                let d = diag.pixel(x, y).unwrap();
+                yellow += usize::from(d.0 == [255, 255, 0]);
+                cyan += usize::from(d.0 == [0, 255, 255]);
+            }
+        }
+        assert!(yellow > 0 && cyan > 0, "--diag draws both outlines");
+        // the text rectangle inside the mask is filled with the background, not left clear
+        assert_eq!(normal.pixel(70, 9), Some((bg.bands[0].at(70).unwrap(), 255)));
+    }
+
+    #[test]
+    fn empty_background_keeps_the_plate_colour_cover() {
+        let k = card(vec![band(0, 5, Some(full_mask(5)))], 1.0, true);
+        let mut c = Canvas::new(rect(0, 0, 200, 40));
+        let st = paint_card(&mut c, &k, &CardBg { bands: vec![BandBg::default()], edges: Vec::new() }, &[], false);
+        assert_eq!(c.pixel(20, 8), Some(([32, 40, 64], 255)));
+        assert_eq!(st.fill_px, 0, "no plate fill without a background");
     }
 }

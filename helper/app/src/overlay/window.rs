@@ -24,6 +24,14 @@ unsafe extern "system" fn layered_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     match msg {
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        // `taskkill` without /F posts WM_CLOSE to one window of the process only: the first
+        // top-level window in z-order, which is a topmost overlay or toast window whenever one
+        // exists (measured, see docs\HELPER.md). Exit like the tray's Exit (the UI thread owns
+        // these windows) instead of letting DefWindowProc destroy just this window.
+        WM_CLOSE => {
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
         _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
 }
@@ -281,6 +289,23 @@ mod tests {
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
         Rect { x, y, w, h }
+    }
+
+    /// A WM_CLOSE sent to an overlay or toast window quits the owning thread's message loop
+    /// (the Helper then exits like the tray's Exit) and leaves the window alone. The window is
+    /// created hidden and never shown (amendment A1).
+    #[test]
+    fn wm_close_on_a_layered_window_quits_the_ui_loop() {
+        let w = LayeredWindow::create(OVERLAY_CLASS).expect("hidden layered window");
+        let h = HWND(w.hwnd() as *mut core::ffi::c_void);
+        unsafe {
+            assert!(!IsWindowVisible(h).as_bool());
+            SendMessageW(h, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+            assert!(IsWindow(Some(h)).as_bool(), "the window is not destroyed");
+            let mut msg = MSG::default();
+            let got = PeekMessageW(&mut msg, None, WM_QUIT, WM_QUIT, PM_REMOVE).as_bool();
+            assert!(got && msg.message == WM_QUIT && msg.wParam.0 == 0, "WM_QUIT with code 0 posted");
+        }
     }
 
     #[test]

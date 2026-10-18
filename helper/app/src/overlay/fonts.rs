@@ -43,6 +43,7 @@ pub struct Fonts {
     dc: HDC,
     fonts: HashMap<(Face, i32), HFONT>,
     narrow_installed: Option<bool>,
+    cell_ratios: HashMap<Face, f32>,
 }
 
 impl Default for Fonts {
@@ -54,7 +55,7 @@ impl Default for Fonts {
 impl Fonts {
     pub fn new() -> Fonts {
         let dc = unsafe { CreateCompatibleDC(None) };
-        Fonts { dc, fonts: HashMap::new(), narrow_installed: None }
+        Fonts { dc, fonts: HashMap::new(), narrow_installed: None, cell_ratios: HashMap::new() }
     }
 
     fn create(face: PCWSTR, px: i32, width: i32, weight: i32) -> HFONT {
@@ -133,6 +134,28 @@ impl Fonts {
         f
     }
 
+    /// Cell height (ascent + descent, `tmHeight`) over the character height of `face`: about
+    /// 1.15 for Arial Narrow. Text is drawn vertically centred in a box one band tall, so a font
+    /// whose character height equals the band loses the tops of accented capitals and the bottoms
+    /// of descenders; the overlay caps the cell instead (`overlay::FONT_CELL_SLACK`).
+    pub fn cell_ratio(&mut self, face: Face) -> f32 {
+        if let Some(r) = self.cell_ratios.get(&face) {
+            return *r;
+        }
+        const PROBE: i32 = 240;
+        let f = self.font(face, PROBE);
+        let mut tm = TEXTMETRICW::default();
+        let ok = unsafe {
+            let old = SelectObject(self.dc, f.into());
+            let ok = GetTextMetricsW(self.dc, &mut tm).as_bool();
+            SelectObject(self.dc, old);
+            ok
+        };
+        let r = if ok && tm.tmHeight > 0 { (tm.tmHeight as f32 / PROBE as f32).clamp(1.0, 1.6) } else { 1.15 };
+        self.cell_ratios.insert(face, r);
+        r
+    }
+
     fn clear(&mut self) {
         for (_, f) in self.fonts.drain() {
             unsafe {
@@ -143,10 +166,16 @@ impl Fonts {
 
     /// Width in px of `text` in `face` at `px`.
     pub fn measure(&mut self, face: Face, px: i32, text: &str) -> i32 {
+        self.measure_ss(face, px * SS, text)
+    }
+
+    /// Width in px of `text` in `face` at `size` supersampled pixels (`SS` per pixel, so sizes
+    /// move in thirds of a pixel).
+    pub fn measure_ss(&mut self, face: Face, size: i32, text: &str) -> i32 {
         if text.is_empty() {
             return 0;
         }
-        (self.measure_raw(face, px * SS, text) + SS - 1) / SS
+        (self.measure_raw(face, size, text) + SS - 1) / SS
     }
 
     fn measure_raw(&mut self, face: Face, px: i32, text: &str) -> i32 {
@@ -163,13 +192,18 @@ impl Fonts {
 
     /// Greyscale coverage of `text` drawn left-aligned and vertically centred in `w` x `h`.
     pub fn coverage(&mut self, face: Face, px: i32, text: &str, w: i32, h: i32) -> Coverage {
+        self.coverage_ss(face, px * SS, text, w, h)
+    }
+
+    /// [`Fonts::coverage`] at `size` supersampled pixels (`SS` per pixel).
+    pub fn coverage_ss(&mut self, face: Face, size: i32, text: &str, w: i32, h: i32) -> Coverage {
         let (w, h) = (w.max(1), h.max(1));
         let mut cov = Coverage { w, h, a: vec![0; (w * h) as usize] };
         if text.is_empty() {
             return cov;
         }
         let (bw, bh) = (w * SS, h * SS);
-        let f = self.font(face, px * SS);
+        let f = self.font(face, size);
         unsafe {
             let bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -241,6 +275,26 @@ mod tests {
         assert_eq!(face_for_target("ko"), Face::Ko);
         assert_eq!(face_for_target("ru"), Face::Latin);
         assert_eq!(face_for_target("fr"), Face::Latin);
+    }
+
+    #[test]
+    fn capped_cell_keeps_accents_and_descenders() {
+        // At the overlay's cap (cell = band + FONT_CELL_SLACK), a French line with accented
+        // capitals and descenders loses at most 1.5% of its ink to the band, against 2.1-2.6%
+        // with the character height at the band height (review of 2026-10-18).
+        let mut f = Fonts::new();
+        let ratio = f.cell_ratio(Face::Latin);
+        assert!((1.0..1.6).contains(&ratio), "{ratio}");
+        let text = "\u{c9}gypte: quelqu'un pour la qu\u{ea}te jpqy \u{c0}\u{c9}\u{c8}";
+        for band_h in [12, 13, 14, 16, 18, 22] {
+            let size = (((band_h as f32 + crate::overlay::FONT_CELL_SLACK) / ratio).min(band_h as f32) * SS as f32).round() as i32;
+            let clipped = f.coverage_ss(Face::Latin, size, text, 600, band_h);
+            let full = f.coverage_ss(Face::Latin, size, text, 600, band_h * 3);
+            let ink = |c: &Coverage| c.a.iter().map(|v| u64::from(*v)).sum::<u64>() as f64;
+            let lost = 1.0 - ink(&clipped) / ink(&full);
+            println!("band {band_h}: size {:.2} px, {:.2}% of the ink lost", size as f32 / SS as f32, lost * 100.0);
+            assert!(lost <= 0.015, "band {band_h}: {:.1}% of the ink lost", lost * 100.0);
+        }
     }
 
     #[test]

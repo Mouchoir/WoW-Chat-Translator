@@ -5,6 +5,7 @@
 //!   [--translator llama|echo] [--wow-class CLASS] [--diag] [--diag-json FILE] [--log-dir DIR] [--no-tray]
 //!   [--exit-after SECS] [--selftest]
 //! test flags: [--no-overlay] [--assume-foreground] [--overlay-probe]
+//! hidden test flag: [--instance-name NAME] (not in --help)
 //! ```
 //! Values are given as `--flag VALUE` or `--flag=VALUE`.
 
@@ -116,6 +117,9 @@ pub struct Cli {
     /// Test flag: show one synthetic card (small, bottom-right of the primary monitor) instead of
     /// capturing, and check click-through and focus. Use with --exit-after 5 (at most 5 s).
     pub overlay_probe: bool,
+    /// Hidden test flag: the single-instance mutex becomes `Local\TranslateProbeHelper.NAME`, so a
+    /// test Helper can run next to the user's own (1-32 ASCII letters, digits, '-' or '_').
+    pub instance_name: Option<String>,
     pub help: bool,
     pub version: bool,
 }
@@ -138,6 +142,7 @@ impl Default for Cli {
             no_overlay: false,
             assume_foreground: false,
             overlay_probe: false,
+            instance_name: None,
             help: false,
             version: false,
         }
@@ -176,8 +181,23 @@ Test flags: [--no-overlay] (never show a window, render into memory only; implie
   [--assume-foreground] [--overlay-probe] (synthetic card, use with --exit-after 5)
 ";
 
-const VALUE_FLAGS: &[&str] =
-    &["--runtime", "--model", "--backend", "--capture", "--translator", "--wow-class", "--diag-json", "--log-dir", "--exit-after"];
+const VALUE_FLAGS: &[&str] = &[
+    "--runtime",
+    "--model",
+    "--backend",
+    "--capture",
+    "--translator",
+    "--wow-class",
+    "--diag-json",
+    "--log-dir",
+    "--exit-after",
+    "--instance-name",
+];
+
+/// A valid `--instance-name`: 1-32 ASCII letters, digits, '-' or '_'.
+pub fn valid_instance_name(s: &str) -> bool {
+    (1..=32).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
 
 /// Parses the arguments after the program name.
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, CliError> {
@@ -230,6 +250,12 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, CliError> {
             "--wow-class" => cli.wow_class = Some(value),
             "--diag-json" => cli.diag_json = Some(PathBuf::from(value)),
             "--log-dir" => cli.log_dir = Some(PathBuf::from(value)),
+            "--instance-name" => {
+                if !valid_instance_name(&value) {
+                    return Err(CliError::BadValue(flag));
+                }
+                cli.instance_name = Some(value);
+            }
             "--exit-after" => {
                 let secs: f64 = value.parse().map_err(|_| CliError::BadValue(flag))?;
                 if !(secs.is_finite() && secs > 0.0 && secs <= 86_400.0) {
@@ -303,6 +329,19 @@ mod tests {
             assert_eq!(CaptureChoice::parse(c.name()), Some(c));
         }
         assert_eq!(Backend::Vulkan.to_engine(), tp_engine::BackendPref::Vulkan);
+    }
+
+    #[test]
+    fn instance_name_is_hidden_and_validated() {
+        let c = p(&["--instance-name", "exit-test_1"]).unwrap();
+        assert_eq!(c.instance_name.as_deref(), Some("exit-test_1"));
+        assert_eq!(p(&["--instance-name=a"]).unwrap().instance_name.as_deref(), Some("a"));
+        let long = "n".repeat(33);
+        for bad in ["a b", "x\\y", "Local\\x", "\u{e9}", long.as_str()] {
+            assert_eq!(p(&["--instance-name", bad]), Err(CliError::BadValue("--instance-name")), "{bad}");
+        }
+        assert!(!USAGE.contains("--instance-name"), "hidden from --help");
+        assert_eq!(Cli::default().instance_name, None);
     }
 
     #[test]

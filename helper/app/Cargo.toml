@@ -1,6 +1,6 @@
 [package]
 name = "translateprobe-helper"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
 description = "TranslateProbe Helper: reads the addon's pixel bridge, translates locally and draws the translations over the WoW chat"

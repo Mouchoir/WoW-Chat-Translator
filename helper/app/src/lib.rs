@@ -6,6 +6,7 @@
 //! accepts typed events with numbers, enums and fixed names only.
 
 pub mod app;
+pub mod backdrop;
 pub mod capture;
 pub mod cli;
 pub mod i18n;

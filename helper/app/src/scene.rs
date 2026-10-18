@@ -7,15 +7,20 @@
 //!   seen for 1.5 s.
 //! - With the game in front and no new frame for 500 ms, every card is hidden; nothing is shown
 //!   while the game is minimized or gone; covered cards are kept but flagged.
+//! - Each known slot's row count (TRANSLATE rows, 1..6) goes to `cards::build_with_rows`
+//!   ([`SceneMachine::rows_expected`]): a tag carries its row modulo 4, and the cards are
+//!   numbered with it.
 
 use std::collections::{HashMap, VecDeque};
 
-use tp_bridge::cards::Card;
+use tp_bridge::cards::{Card, TAG_ROWS};
 use tp_bridge::image::Rect;
 use tp_bridge::msg::{Message, View};
 use tp_bridge::strip::Mode;
 use tp_bridge::tags::{TagHit, TEST_SLOT};
 use tp_engine::{Job, JobKey};
+
+use crate::backdrop::CardBg;
 
 pub const MISSING_AFTER_MS: u64 = 1500;
 pub const STALE_AFTER_MS: u64 = 500;
@@ -23,8 +28,8 @@ pub const STALE_AFTER_MS: u64 = 500;
 pub const MIN_ALPHA: f32 = 0.3;
 /// The overlay never covers client rows 0..15 (the strip lives there).
 pub const OVERLAY_TOP: i32 = 16;
-/// `STATUS.addonBuild` this helper speaks.
-pub const ADDON_BUILD: u16 = 1;
+/// `STATUS.addonBuild` this helper speaks (2: TRANSLATE rows 1..6, 2026-10-18).
+pub const ADDON_BUILD: u16 = 2;
 /// Weak bridge signal: average calibration gap under this for 10 s.
 pub const WEAK_GAP: f32 = 16.0;
 pub const WEAK_FOR_MS: u64 = 10_000;
@@ -113,6 +118,9 @@ pub struct SceneCard {
     pub covered: bool,
     /// Tag block size of the card's first row (for the slot-127 test text).
     pub block_px: f32,
+    /// The chat background around each band, sampled in the same capture (native look); empty
+    /// when unknown (the overlay then covers the tags with the plate colour).
+    pub bg: CardBg,
 }
 
 #[derive(Clone, Debug)]
@@ -209,6 +217,9 @@ impl Scene {
                     }),
                 }
                 h.i((sc.block_px * 4.0) as i64);
+                for w in sc.bg.hash_words() {
+                    h.i(w);
+                }
                 let c = &sc.card;
                 h.i(c.slot.into());
                 h.i(c.view_id.into());
@@ -350,6 +361,11 @@ impl SceneMachine {
         self.slots.get(&slot).map(|s| s.plate)
     }
 
+    /// From the TRANSLATE: Some(rows) (1..6) for a known slot, None otherwise.
+    pub fn rows_expected(&self, slot: u8) -> Option<u8> {
+        self.slots.get(&slot).map(|s| s.rows)
+    }
+
     pub fn slot(&self, slot: u8) -> Option<&SlotReq> {
         self.slots.get(&slot)
     }
@@ -479,8 +495,15 @@ impl SceneMachine {
             .collect()
     }
 
-    /// Builds the scene for one tick from the cards found in this capture.
+    /// Builds the scene for one tick from the cards found in this capture (without background
+    /// samples).
     pub fn update(&mut self, input: &TickInput, cards: Vec<Card>, hits: &[TagHit], covered: &mut dyn FnMut(&Card) -> bool) -> Scene {
+        self.update_with_bg(input, cards.into_iter().map(|c| (c, CardBg::default())).collect(), hits, covered)
+    }
+
+    /// Builds the scene for one tick from the cards found in this capture, each with the chat
+    /// background sampled around its rows.
+    pub fn update_with_bg(&mut self, input: &TickInput, cards: Vec<(Card, CardBg)>, hits: &[TagHit], covered: &mut dyn FnMut(&Card) -> bool) -> Scene {
         if input.fresh {
             self.last_fresh_ms = Some(input.now_ms);
         }
@@ -506,7 +529,7 @@ impl SceneMachine {
             .map(|(id, rect, font_px)| SceneView { id, rect, font_px, cards: Vec::new() })
             .collect();
         let mut seen_unknown: Vec<(u8, u8)> = Vec::new();
-        for card in cards {
+        for (card, bg) in cards {
             if card.alpha < MIN_ALPHA || card.bands.is_empty() {
                 continue;
             }
@@ -528,11 +551,11 @@ impl SceneMachine {
             let first = &card.bands[0];
             let block_px = hits
                 .iter()
-                .find(|h| h.slot == card.slot && h.row == first.row && h.y_top <= first.tag_rect.y + first.tag_rect.h && h.y_bot >= first.tag_rect.y)
+                .find(|h| h.slot == card.slot && h.row % TAG_ROWS == first.row % TAG_ROWS && h.y_top <= first.tag_rect.y + first.tag_rect.h && h.y_bot >= first.tag_rect.y)
                 .map(|h| h.block_px)
                 .unwrap_or(0.0);
             let is_covered = covered(&card);
-            view.cards.push(SceneCard { card, kind, covered: is_covered, block_px });
+            view.cards.push(SceneCard { card, kind, covered: is_covered, block_px, bg });
         }
         self.unknown_seen.retain(|k, _| seen_unknown.contains(k));
         Scene { wow: Some(w.geom), views, hidden: None, lang_target, gdi: false }
@@ -663,7 +686,7 @@ pub(crate) mod tests {
         let acts = m.on_message(42, Message::Clear);
         assert!(matches!(acts.as_slice(), [Action::ClearSession(42)]));
         assert_eq!(m.slot_count(), 0);
-        m.on_frame(&FrameInfo { session: 42, mode: Mode::Robust, addon_build: 1, min_gap: 41.6, white: [250.0; 3], black: [3.0; 3] }, 0);
+        m.on_frame(&FrameInfo { session: 42, mode: Mode::Robust, addon_build: ADDON_BUILD, min_gap: 41.6, white: [250.0; 3], black: [3.0; 3] }, 0);
         let acts = m.on_message(42, Message::Test { nonce: 3 });
         assert!(matches!(acts.as_slice(), [Action::Toast(ToastKind::BridgeOk { mode: Mode::Robust, margin: 42 })]));
         assert!(m.discovery());
@@ -747,16 +770,17 @@ pub(crate) mod tests {
     fn addon_build_mismatch_toasts_once_per_session() {
         let mut m = SceneMachine::new();
         let f = |session, build| FrameInfo { session, mode: Mode::Dense, addon_build: build, min_gap: 40.0, white: [255.0; 3], black: [0.0; 3] };
-        assert!(m.on_frame(&f(5, 1), 0).is_empty());
-        assert!(matches!(m.on_frame(&f(5, 2), 0).as_slice(), [Action::Toast(ToastKind::HelperOld)]));
-        assert!(m.on_frame(&f(5, 2), 0).is_empty());
-        assert!(matches!(m.on_frame(&f(6, 0), 0).as_slice(), [Action::Toast(ToastKind::AddonOld)]));
+        assert!(m.on_frame(&f(5, ADDON_BUILD), 0).is_empty());
+        assert!(matches!(m.on_frame(&f(5, ADDON_BUILD + 1), 0).as_slice(), [Action::Toast(ToastKind::HelperOld)]));
+        assert!(m.on_frame(&f(5, ADDON_BUILD + 1), 0).is_empty());
+        // the build before rows 1..6 (b8a3e23) is told to update
+        assert!(matches!(m.on_frame(&f(6, 1), 0).as_slice(), [Action::Toast(ToastKind::AddonOld)]));
     }
 
     #[test]
     fn weak_signal_after_10_s() {
         let mut m = SceneMachine::new();
-        let f = |gap| FrameInfo { session: 5, mode: Mode::Dense, addon_build: 1, min_gap: gap, white: [255.0; 3], black: [0.0; 3] };
+        let f = |gap| FrameInfo { session: 5, mode: Mode::Dense, addon_build: ADDON_BUILD, min_gap: gap, white: [255.0; 3], black: [0.0; 3] };
         for t in 0..10 {
             assert!(m.on_frame(&f(10.0), t * 999).is_empty());
         }
@@ -774,6 +798,28 @@ pub(crate) mod tests {
         let hit = TagHit { slot: 127, row: 0, sess_bit: 0, x0: 10, x1: 57, y_top: 500, y_bot: 513, block_px: 5.5, pitch_px: 6.0, alpha: 1.0 };
         let s = m.update(&tick(10, true, true), vec![card(127, 0, 500, 3, 1.0)], &[hit], &mut no_cover);
         assert_eq!(s.views[0].cards[0].block_px, 5.5);
+    }
+
+    #[test]
+    fn rows_expected_follow_translate() {
+        let mut m = SceneMachine::new();
+        let t = Translate { req_id: 7, slot: 5, rows: 6, no_cache: false, plate: true, target: "fr".into(), text: ChatText::new("x".into()), pairs: Vec::new() };
+        m.on_message(42, Message::Translate(t));
+        assert_eq!(m.rows_expected(5), Some(6));
+        assert_eq!(m.rows_expected(6), None);
+    }
+
+    #[test]
+    fn fingerprint_follows_the_background() {
+        use crate::backdrop::{BandBg, Sample};
+        let mut m = SceneMachine::new();
+        let bg = |r: u8| CardBg { bands: vec![BandBg { left: Some(Sample { rgb: [r, 20, 30], x: 5 }), right: None }], edges: Vec::new() };
+        let a = m.update_with_bg(&tick(10, true, true), vec![(card(3, 0, 500, 1, 1.0), bg(100))], &[], &mut no_cover);
+        let b = m.update_with_bg(&tick(20, true, true), vec![(card(3, 0, 500, 1, 1.0), bg(101))], &[], &mut no_cover);
+        let c = m.update_with_bg(&tick(30, true, true), vec![(card(3, 0, 500, 1, 1.0), bg(120))], &[], &mut no_cover);
+        assert_eq!(a.fingerprint(), b.fingerprint(), "a 1-level change does not republish");
+        assert_ne!(b.fingerprint(), c.fingerprint());
+        assert_eq!(c.views[0].cards[0].bg, bg(120));
     }
 
     #[test]

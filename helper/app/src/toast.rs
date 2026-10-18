@@ -27,6 +27,20 @@ impl Toaster {
         Toaster { no_overlay, exclude: false, win: None, fonts: Fonts::new(), until: None }
     }
 
+    /// Creates the toast window now, hidden (never under `--no-overlay`), so the process has its
+    /// topmost window from the start: `taskkill` without /F then always reaches a window that
+    /// exits like the tray's Exit (see `overlay::window`), whatever was shown before.
+    pub fn prepare(&mut self) {
+        if self.no_overlay || self.win.is_some() {
+            return;
+        }
+        self.win = LayeredWindow::create(TOAST_CLASS);
+        let ex = self.exclude;
+        if let Some(w) = self.win.as_mut() {
+            w.set_exclude(ex);
+        }
+    }
+
     pub fn set_exclude(&mut self, on: bool) {
         self.exclude = on;
         if let Some(w) = self.win.as_mut() {

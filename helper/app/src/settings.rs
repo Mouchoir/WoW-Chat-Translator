@@ -21,7 +21,8 @@ pub struct Settings {
     /// Capture rate while a card is visible and WoW is in front (20-60).
     pub capture_hz_active: u32,
     pub hide_from_recordings: bool,
-    /// Translation text colour, 6 hex digits (RRGGBB).
+    /// Translation text colour, 6 hex digits (RRGGBB). Default `DEFAULT_TEXT_COLOR`, a soft light
+    /// blue that reads as a translation next to the chat's own colours.
     pub text_color: String,
     pub font_scale: f32,
     pub runtime_dir: String,
@@ -29,6 +30,12 @@ pub struct Settings {
     /// error | warn | info | debug
     pub log_level: String,
 }
+
+/// Default translation text colour (native look, 2026-10-18).
+pub const DEFAULT_TEXT_COLOR: &str = "A8D8FF";
+/// The default before the native look: a file still holding it gets the new default (it was
+/// written with the defaults on first run, not chosen).
+pub const OLD_DEFAULT_TEXT_COLOR: &str = "9FD4FF";
 
 impl Default for Settings {
     fn default() -> Self {
@@ -42,7 +49,7 @@ impl Default for Settings {
             capture: "auto".into(),
             capture_hz_active: 30,
             hide_from_recordings: false,
-            text_color: "9FD4FF".into(),
+            text_color: DEFAULT_TEXT_COLOR.into(),
             font_scale: 1.0,
             runtime_dir: String::new(),
             model: String::new(),
@@ -97,6 +104,9 @@ impl Settings {
         if parse_hex_rgb(&self.text_color).is_none() {
             self.text_color = d.text_color.clone();
             fixed.push("textColor");
+        } else if self.text_color.eq_ignore_ascii_case(OLD_DEFAULT_TEXT_COLOR) {
+            // not an invalid value: the old default follows the new one (not reported)
+            self.text_color = d.text_color.clone();
         }
         if !(self.font_scale.is_finite() && (0.5..=2.0).contains(&self.font_scale)) {
             self.font_scale = d.font_scale;
@@ -110,7 +120,7 @@ impl Settings {
     }
 
     pub fn text_rgb(&self) -> [u8; 3] {
-        parse_hex_rgb(&self.text_color).unwrap_or([0x9F, 0xD4, 0xFF])
+        parse_hex_rgb(&self.text_color).or_else(|| parse_hex_rgb(DEFAULT_TEXT_COLOR)).unwrap_or([0xA8, 0xD8, 0xFF])
     }
 
     /// Reads and validates the file; writes defaults when it does not exist.
@@ -186,7 +196,7 @@ mod tests {
         let v = serde_json::to_value(Settings::default()).unwrap();
         let expected = serde_json::json!({"version":1,"backend":"auto","gpuMarginMb":1500,"cpuThreads":0,
             "idleUnloadMinutes":10,"keepLoaded":false,"capture":"auto","captureHzActive":30,"hideFromRecordings":false,
-            "textColor":"9FD4FF","fontScale":1.0,"runtimeDir":"","model":"","logLevel":"info"});
+            "textColor":"A8D8FF","fontScale":1.0,"runtimeDir":"","model":"","logLevel":"info"});
         assert_eq!(v, expected);
     }
 
@@ -255,12 +265,22 @@ mod tests {
     }
 
     #[test]
+    fn the_old_default_text_colour_follows_the_new_default() {
+        let mut old: Settings = serde_json::from_str(r#"{"textColor":"9fd4ff"}"#).unwrap();
+        assert!(old.validate().is_empty(), "not reported as a fix");
+        assert_eq!(old.text_color, DEFAULT_TEXT_COLOR);
+        let mut chosen: Settings = serde_json::from_str(r#"{"textColor":"FFFFFF"}"#).unwrap();
+        chosen.validate();
+        assert_eq!(chosen.text_color, "FFFFFF", "a chosen colour is kept");
+    }
+
+    #[test]
     fn hex_colours() {
         assert_eq!(parse_hex_rgb("9FD4FF"), Some([0x9F, 0xD4, 0xFF]));
         assert_eq!(parse_hex_rgb("#e08080"), Some([0xE0, 0x80, 0x80]));
         assert_eq!(parse_hex_rgb("12345"), None);
         assert_eq!(parse_hex_rgb("GG0000"), None);
-        assert_eq!(Settings::default().text_rgb(), [0x9F, 0xD4, 0xFF]);
+        assert_eq!(Settings::default().text_rgb(), [0xA8, 0xD8, 0xFF]);
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tp_bridge::cards::{Card, Mask, RowBand, StickyWidth};
+use tp_bridge::cards::{Card, Mask, RowBand, StickyWidth, TAG_ROWS};
 use tp_bridge::image::{Bgra, Rect};
 use tp_bridge::msg::{Message, View};
 use tp_bridge::reasm::Reassembler;
@@ -29,6 +29,7 @@ use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CON
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::backdrop::{self, CardBg};
 use crate::capture::gdi::GdiGrabber;
 use crate::capture::wgc::{self, WgcGrabber};
 use crate::capture::{self, GrabStatus, Grabber, Method};
@@ -363,6 +364,8 @@ struct Pipeline {
     /// Method of the grabber while `step` has taken it out to read its regions.
     taken_method: Option<Method>,
     cards: Vec<Card>,
+    /// The chat background around each card of `cards` (same order), for the native look.
+    card_bgs: Vec<CardBg>,
     hits: Vec<TagHit>,
     tick: u64,
     last_fresh: Instant,
@@ -473,6 +476,7 @@ impl Pipeline {
             scene: SceneMachine::new(),
             taken_method: None,
             cards: Vec::new(),
+            card_bgs: Vec::new(),
             hits: Vec::new(),
             tick: 0,
             last_fresh: Instant::now(),
@@ -641,6 +645,7 @@ impl Pipeline {
         }
         self.drop_grabber(true);
         self.cards.clear();
+        self.card_bgs.clear();
         self.hits.clear();
         self.tagscan.reset();
         self.card_cache.reset();
@@ -874,14 +879,47 @@ impl Pipeline {
         self.minute.hits += hits.len() as u64;
         let t_cards = Instant::now();
         self.perf.stages.add(Stage::Scan, t_cards - t_scan);
-        let cards = if hits.is_empty() {
-            Vec::new()
+        let (cards, bgs) = if hits.is_empty() {
+            (Vec::new(), Vec::new())
         } else {
             let scene = &self.scene;
             let plate_expected = |slot: u8| scene.plate_expected(slot);
+            let rows_expected = |slot: u8| scene.rows_expected(slot);
             let prev = prev.as_ref().map(|(p, n)| (p, *n));
-            let (mut cards, kept) = self.card_cache.build(img, frame, prev, &hits, &views, &plate_expected, scene.sess_bit());
+            let (mut cards, kept) = self.card_cache.build_with_rows(img, frame, prev, &hits, &views, &plate_expected, &rows_expected, scene.sess_bit());
             self.perf.cards_kept += u64::from(kept);
+            // The chat background around each card (native look), from the same capture: the
+            // same pixels give the same samples, so kept cards keep theirs. Samples that moved by
+            // a few levels only keep the previous capture's value (a world moving behind a
+            // translucent chat would republish the scene at every capture).
+            let discovery = scene.discovery();
+            let bgs: Vec<CardBg> = if kept && self.card_bgs.len() == cards.len() {
+                self.card_bgs.clone()
+            } else {
+                cards
+                    .iter()
+                    .map(|c| {
+                        let view = views
+                            .iter()
+                            .find(|v| v.id == c.view_id)
+                            .map(|v| Rect { x: v.x.into(), y: v.y.into(), w: v.w.into(), h: v.h.into() })
+                            .unwrap_or(Rect { x: img.origin_x, y: img.origin_y, w: img.width as i32, h: img.height as i32 });
+                        let mut bg = backdrop::sample_card(img, c, view, discovery);
+                        if !self.tone.is_identity() {
+                            bg.map_colors(|rgb| self.tone.display(rgb));
+                        }
+                        let prev = self
+                            .cards
+                            .iter()
+                            .zip(&self.card_bgs)
+                            .find(|(p, _)| p.slot == c.slot && p.view_id == c.view_id && p.bands.len() == c.bands.len());
+                        if let Some((_, prev_bg)) = prev {
+                            backdrop::settle(&mut bg, prev_bg);
+                        }
+                        bg
+                    })
+                    .collect()
+            };
             let now = self.now_ms();
             self.sticky.apply(&mut cards, now);
             // the overlay paints over the game's curved output: back to display colours
@@ -890,7 +928,7 @@ impl Pipeline {
                     c.plate_rgb = self.tone.display(c.plate_rgb);
                 }
             }
-            cards
+            (cards, bgs)
         };
         let t_diag = self.perf.stages.lap(Stage::Cards, t_cards);
         if self.ctx.diag.enabled() && (!hits.is_empty() || self.last_hit_count != 0) {
@@ -901,7 +939,12 @@ impl Pipeline {
                     let (vx, vy) = (i32::from(v.x), i32::from(v.y));
                     h.x0 >= vx && h.x0 < vx + i32::from(v.w) && h.y_top >= vy && h.y_top < vy + i32::from(v.h)
                 }) {
-                    let plate = cards.iter().any(|c| c.slot == h.slot && c.plate && c.bands.iter().any(|b| b.row == h.row && b.tag_rect.y <= h.y_bot && b.tag_rect.y + b.tag_rect.h >= h.y_top));
+                    // a band's row is numbered 0..5 in its card, a tag carries it modulo 4
+                    let plate = cards.iter().any(|c| {
+                        c.slot == h.slot
+                            && c.plate
+                            && c.bands.iter().any(|b| b.row % TAG_ROWS == h.row % TAG_ROWS && b.tag_rect.y <= h.y_bot && b.tag_rect.y + b.tag_rect.h >= h.y_top)
+                    });
                     if !list.is_empty() {
                         list.push(',');
                     }
@@ -925,6 +968,7 @@ impl Pipeline {
         self.last_hit_count = hits.len();
         self.minute.cards += cards.len() as u64;
         self.cards = cards;
+        self.card_bgs = bgs;
         self.hits = hits;
     }
 
@@ -1141,9 +1185,9 @@ impl Pipeline {
             v
         };
         let input = TickInput { now_ms: now, wow: Some(WowTick { geom, minimized: false, foreground: fg }), fresh };
-        let cards = self.cards.clone();
+        let cards: Vec<(Card, CardBg)> = self.cards.iter().cloned().zip(self.card_bgs.iter().cloned().chain(std::iter::repeat(CardBg::default()))).collect();
         let hits = std::mem::take(&mut self.hits);
-        let s = self.scene.update(&input, cards, &hits, &mut covered);
+        let s = self.scene.update_with_bg(&input, cards, &hits, &mut covered);
         self.hits = hits;
         if self.cover_cache.len() > 256 {
             self.cover_cache.clear();
@@ -1556,12 +1600,22 @@ struct EndSession {
 
 static END_SESSION: Mutex<Option<EndSession>> = Mutex::new(None);
 
-/// Stops and joins the capture thread, then shuts the engine down (kills llama-server, joins its
-/// threads and deletes the key file).
+/// How long the exit waits for the capture thread (it checks its stop flag at least every 50 ms
+/// between captures; a capture waits at most a few hundred ms for the GPU).
+const CAPTURE_JOIN_MS: u64 = 3000;
+
+/// Stops and joins the capture thread (never waiting more than `CAPTURE_JOIN_MS`), then shuts the
+/// engine down (kills llama-server, joins its threads within 2 s and deletes the key file).
 fn stop_workers(es: EndSession) {
     es.stop.store(true, Ordering::Relaxed);
     if let Some(j) = es.capture {
-        let _ = j.join();
+        let t0 = Instant::now();
+        while !j.is_finished() && t0.elapsed() < Duration::from_millis(CAPTURE_JOIN_MS) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if j.is_finished() {
+            let _ = j.join();
+        }
     }
     if let Some(e) = es.engine {
         e.shutdown();
@@ -1589,6 +1643,9 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
         return LRESULT(0);
     }
     match msg {
+        // Like the tray's Exit: the message loop ends, then the workers stop (llama-server is
+        // killed) and the log is flushed. `taskkill` without /F sends WM_CLOSE to one window
+        // only; the overlay and toast windows forward it the same way (`overlay::window`).
         WM_CLOSE => {
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
@@ -1621,10 +1678,20 @@ fn create_main_window() -> Option<HWND> {
     }
 }
 
-/// `Local\TranslateProbeHelper`; None when another instance holds it.
-fn single_instance() -> Option<HANDLE> {
+/// The single-instance mutex: `Local\TranslateProbeHelper`, or `Local\TranslateProbeHelper.NAME`
+/// with the hidden test flag `--instance-name NAME` (a test Helper next to the user's own).
+pub fn mutex_name(instance: Option<&str>) -> String {
+    match instance {
+        Some(n) => format!("Local\\TranslateProbeHelper.{n}"),
+        None => "Local\\TranslateProbeHelper".to_string(),
+    }
+}
+
+/// Takes the single-instance mutex; None when another instance holds it.
+fn single_instance(instance: Option<&str>) -> Option<HANDLE> {
+    let name: Vec<u16> = mutex_name(instance).encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
-        let h = CreateMutexW(None, true, w!("Local\\TranslateProbeHelper")).ok()?;
+        let h = CreateMutexW(None, true, PCWSTR(name.as_ptr())).ok()?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
             let _ = CloseHandle(h);
             return None;
@@ -1682,7 +1749,7 @@ fn probe_scene() -> (Scene, (i32, i32), [i32; 4]) {
         plate_rgb: [32, 40, 64],
         text_width_px: 308,
     };
-    let view = SceneView { id: 0, rect: Rect { x: 0, y: OVERLAY_TOP, w: cw, h: ch - OVERLAY_TOP }, font_px: 14, cards: vec![SceneCard { card, kind: CardKind::Test, covered: false, block_px: 6.0 }] };
+    let view = SceneView { id: 0, rect: Rect { x: 0, y: OVERLAY_TOP, w: cw, h: ch - OVERLAY_TOP }, font_px: 14, cards: vec![SceneCard { card, kind: CardKind::Test, covered: false, block_px: 6.0, bg: CardBg::default() }] };
     let scene = Scene { wow: Some(WowGeom { hwnd: 0, origin_x: ox, origin_y: oy, client_w: cw, client_h: ch }), views: vec![view], hidden: None, lang_target: None, gdi: false };
     let center = (ox + (8 + 368) / 2, oy + (20 + 58) / 2);
     (scene, center, [ox, oy + OVERLAY_TOP, cw, ch - OVERLAY_TOP])
@@ -1720,7 +1787,7 @@ pub fn run(cli: Cli) -> i32 {
     let mutex = if probe_mode {
         None
     } else {
-        match single_instance() {
+        match single_instance(cli.instance_name.as_deref()) {
             Some(m) => Some(m),
             None => return 2,
         }
@@ -1823,6 +1890,12 @@ pub fn run(cli: Cli) -> i32 {
         redraw: false,
     };
 
+    // The toast window exists (hidden) from the start, so `taskkill` without /F always finds a
+    // topmost window of ours first and the Helper exits like the tray's Exit.
+    if !probe_mode {
+        ui.toaster.prepare();
+    }
+
     let stop = Arc::new(AtomicBool::new(false));
     let mut capture: Option<JoinHandle<()>> = None;
     if probe_mode {
@@ -1909,7 +1982,7 @@ mod tests {
 
     #[test]
     fn card_record_has_no_text_and_the_design_fields() {
-        let sc = SceneCard { card: card(3, 1, 500, 2, 0.75), kind: CardKind::Request { key: JobKey { session: 4, req_id: 5 }, rows: 2, target: "fr".into() }, covered: false, block_px: 5.0 };
+        let sc = SceneCard { card: card(3, 1, 500, 2, 0.75), kind: CardKind::Request { key: JobKey { session: 4, req_id: 5 }, rows: 2, target: "fr".into() }, covered: false, block_px: 5.0, bg: CardBg::default() };
         let v = card_json(&sc, "done");
         for k in ["slot", "req", "view", "bands", "maskPx", "alpha", "state", "covered"] {
             assert!(v.get(k).is_some(), "{k}");
@@ -1940,6 +2013,12 @@ mod tests {
         assert_eq!(j["pairs"], 1);
         assert!(!j.to_string().contains("ZZSENTINELZZ"));
         assert!(!format!("{ev:?}").contains("ZZSENTINELZZ"));
+    }
+
+    #[test]
+    fn mutex_names() {
+        assert_eq!(mutex_name(None), "Local\\TranslateProbeHelper");
+        assert_eq!(mutex_name(Some("exit-test")), "Local\\TranslateProbeHelper.exit-test");
     }
 
     #[test]
