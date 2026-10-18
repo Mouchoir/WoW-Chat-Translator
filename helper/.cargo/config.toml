@@ -1,0 +1,8 @@
+# Shared by every crate under helper\ (cargo reads it from the parent folder).
+# +crt-static: the exe links the C runtime statically, so it imports Windows DLLs only.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# Leave CPU for the game while compiling.
+[build]
+jobs = 3

@@ -1,0 +1,29 @@
+[package]
+name = "tp_bridge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "TranslateProbe pixel bridge v2: strip decoder, messages, reassembly, row tags and cards"
+
+[features]
+# Synthetic test images (src/synth.rs), also compiled for this crate's own unit tests.
+synth = []
+
+[dependencies]
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# The integration tests (tests/*.rs) use the synthetic image generator.
+tp_bridge = { path = ".", features = ["synth"] }
+
+# The test suites render and scan millions of synthetic images: optimise test builds.
+[profile.dev]
+opt-level = 2
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
