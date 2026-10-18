@@ -675,6 +675,22 @@ check(Reserve.EstimateRows(ChatFrame1, string.rep("你", 50), "en") == 3, "Chine
 check(Reserve.EstimateRows(ChatFrame1, string.rep("word ", 200), "en") == 4, "never more than 4 rows")
 check(Reserve.EstimateRows(ChatFrame1, string.rep("1", 70), "en") == 3, "no letters: the default factor (x1.3)")
 check(Reserve.EstimateRows(ChatFrame1, "", "en") == 1, "an empty text reserves one row")
+do
+    -- WoW Forever drew inline textures 1.47 chat units per texture unit: the row must still fit.
+    local realMeasure = Reserve.Measure
+    Reserve.Measure = function(cf, text, width)
+        local w, h, n, fs = realMeasure(cf, text, width)
+        if text:find("^|T") then
+            w = w * 1.47
+        end
+        return w, h, n, fs
+    end
+    local m = Reserve.Metrics(ChatFrame1)
+    Reserve.Measure = realMeasure
+    check(m and math.abs(m.tex - 1.47) < 1e-9 and m.W * m.tex * m.ppu >= 5
+        and m.indent + (8 * m.W + m.plateW) * m.tex <= m.cw and m.H == math.floor(m.fontH / 1.47 + 0.5),
+        "inline textures larger than chat units: blocks, plate and height are measured in texture units")
+end
 
 ---------------------------------------------------------------------------------------------
 section("chat lockdown")

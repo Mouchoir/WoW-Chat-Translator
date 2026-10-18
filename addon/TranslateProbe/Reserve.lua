@@ -24,6 +24,7 @@ local WATCH_SECONDS = 0.5
 local SCAN_SECONDS = 15        -- read-only slot scan from the watcher, at most this often
 local INDENT = "    "           -- the 4 spaces before each row (ChatButton's SUFFIX_START)
 local FALLBACK_ROWS = 2
+local TEX_PROBE = "|TInterface\\Buttons\\WHITE8X8:10:100|t"   -- 100 texture units wide
 
 -- Source script > target script -> how much longer the translation usually is.
 local FACTOR = {
@@ -102,10 +103,15 @@ local function ComputeMetrics(chatFrame)
     end
     local m = { physH = physH, eff = eff, fontH = fontH, cw = cw }
     m.ppu = eff * physH / 768                         -- physical px per chat unit
-    m.W = max(2, ceil(5 / m.ppu))                     -- tag block width: at least 5 physical px
-    m.H = max(6, floor(fontH + 0.5))                  -- tag and plate height
+    -- Inline texture sizes are not always in chat units: on WoW Forever a texture unit came out
+    -- 1.47 chat units wide with a scaled chat frame (measured 2026-10-18). Measure the ratio.
+    local okTex, texW = pcall(Reserve.Measure, chatFrame, TEX_PROBE)
+    m.tex = (okTex and IsPositive(texW)) and min(4, max(0.25, texW / 100)) or 1
+    local texPx = m.ppu * m.tex                       -- physical px per texture unit
+    m.W = max(2, ceil(5 / texPx))                     -- tag block width: at least 5 physical px
+    m.H = max(6, floor(fontH / m.tex + 0.5))          -- tag and plate height: one text line
     m.indent = Reserve.Measure(chatFrame, INDENT) + 8
-    m.plateW = floor((cw - m.indent - 8 * m.W - 2) * 0.88)
+    m.plateW = floor((cw - m.indent - 8 * m.W * m.tex - 2) * 0.88 / m.tex)
     m.ok = m.plateW >= 40
     return m
 end
@@ -131,7 +137,7 @@ function Reserve.EstimateRows(chatFrame, visibleText, target)
     end
     -- both sides in scale-1 units: width (chat units) * eff against plateW * eff. The ratio is
     -- not rounded up before the factor, so a short line ("gg") reserves one row, not two.
-    local rowsSrc = width * m.eff / (m.plateW * m.eff)
+    local rowsSrc = width * m.eff / (m.plateW * m.tex * m.eff)
     local script = ns.Lang.Script(visibleText)
     local f = script and FACTOR[script .. ">" .. ns.Lang.TargetScript(target)] or DEFAULT_FACTOR
     return min(4, max(1, ceil(rowsSrc * f - 0.15)))
