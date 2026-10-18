@@ -407,8 +407,19 @@ check(#instant == 2 and instant[1] == L.SUFFIX_GLOSS .. G.Describe(clickText, db
 local e1c, e3c = EntryFor(ChatFrame1, clicked).message, EntryFor(ChatFrame3, clicked).message
 check(e1c == base1 .. RowsFor(ChatFrame1, clicked, 0, K, instant), "ChatFrame1: K tagged rows, then glossary, then name")
 check(e3c == base3 .. RowsFor(ChatFrame3, clicked, 0, K, instant), "ChatFrame3: rows sized with its own metrics")
-check(e1c:find(SUFFIX_START .. ns.session .. ":" .. clicked .. "|h" .. Bridge.TagMarkup(0, 0, ns.sessionId % 2, 4, 14)
-    .. Bridge.PlateMarkup(290, 14) .. "|h|r", 1, true), "first row: exact tag markup then the plate")
+local xLink = "|Haddon:TranslateProbe:x:" .. ns.session .. ":" .. clicked .. "|h"
+local firstRow = SUFFIX_START .. ns.session .. ":" .. clicked .. "|h"
+    .. Bridge.TagMarkup(0, 0, ns.sessionId % 2, 4, 14):gsub("|t|T", "|t|h" .. xLink:gsub("%%", "%%%%") .. "|T")
+    .. "|h" .. xLink .. Bridge.PlateMarkup(290, 14) .. "|h|r"
+check(e1c:find(firstRow, 1, true), "first row: the 8 tag blocks then the plate, each texture in its own link")
+local oneTexturePerLink = true
+for body in e1c:gmatch("|Haddon:TranslateProbe:x:[^|]*|h(.-)|h") do
+    local _, n = body:gsub("|T", "")
+    if n > 1 then
+        oneTexturePerLink = false
+    end
+end
+check(oneTexturePerLink, "no link holds more than one texture (the client draws only the first)")
 check(Lines(e1c) == K + 2 and Count(e1c, "|TInterface\\Buttons\\WHITE8X8:") == 9 * K, "K rows of 8 tag blocks and a plate")
 check(Printed(L.FIRST_USE) and db.helpShown == true, "first click ever explains the helper")
 check(Request.Count() == 1 and Reserve.SlotsInUse() == 1 and Reserve.SlotOwner(0) == clicked, "one active request on slot 0")
@@ -864,9 +875,11 @@ local trCount = #Since(0, "translate")
 slash("test rows")
 check(#Since(0, "translate") == trCount, "test rows: no TRANSLATE")
 local rowsLine = EntryWith(ChatFrame1, ButtonOf(900000002))
-local tag127 = SUFFIX_START .. ns.session .. ":900000002|h" .. Bridge.TagMarkup(127, 0, ns.sessionId % 2, 4, 14)
-check(rowsLine and rowsLine.message:find(tag127, 1, true) and Lines(rowsLine.message) == 3
-    and rowsLine.message:find(Bridge.TagMarkup(127, 2, ns.sessionId % 2, 4, 14), 1, true),
+local function Row127(r)
+    return ChatButton.SuffixLinks(900000002, { Bridge.TagMarkup(127, r, ns.sessionId % 2, 4, 14) }):sub(1, -3)
+end
+check(rowsLine and rowsLine.message:find(Row127(0), 1, true) and Lines(rowsLine.message) == 3
+    and rowsLine.message:find(Row127(2), 1, true),
     "test rows: 3 rows on slot 127")
 check(Printed(L.TEST_ROWS_SHOWN:format(1)) and Printed(L.TEST_ROWS_METRICS:format(1.40625, 14, 4, 14, 290, 400)),
     "test rows: metrics printed")

@@ -56,11 +56,42 @@ function ChatButton.Safe(text)
     return (tostring(text):gsub("|", "/"))
 end
 
--- One link per row under the message; clicking any of them hides them all.
+-- Splits a row into link bodies: each inline texture alone, plain text runs kept whole.
+-- WoW Forever (12.x) draws only the first texture of a link's text and drops the others
+-- (measured in game on 2026-10-18), so a texture never shares a link.
+local function LinkBodies(text)
+    local bodies, at = {}, 1
+    while at <= #text do
+        local s = text:find("|T", at, true)
+        local e = s and text:find("|t", s + 2, true)
+        if not e then
+            bodies[#bodies + 1] = text:sub(at)
+            break
+        end
+        if s > at then
+            bodies[#bodies + 1] = text:sub(at, s - 1)
+        end
+        bodies[#bodies + 1] = text:sub(s, e + 1)
+        at = e + 2
+    end
+    return bodies
+end
+
+-- The rows under the message. Each row starts with SUFFIX_START; every piece of it is a link,
+-- so clicking anywhere on the rows hides them all.
 function ChatButton.SuffixLinks(lineID, rows)
+    local id = ns.session .. ":" .. lineID .. "|h"
+    local first, more = SUFFIX_START .. id, "|H" .. LINK_PREFIX .. "x:" .. id
     local out = {}
-    for i, text in ipairs(rows) do
-        out[i] = SUFFIX_START .. ns.session .. ":" .. lineID .. "|h" .. text .. "|h|r"
+    for _, text in ipairs(rows) do
+        local bodies = LinkBodies(text)
+        if #bodies == 0 then
+            bodies[1] = ""
+        end
+        for k, body in ipairs(bodies) do
+            out[#out + 1] = (k == 1 and first or more) .. body .. "|h"
+        end
+        out[#out + 1] = "|r"
     end
     return table.concat(out)
 end
