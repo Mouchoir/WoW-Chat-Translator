@@ -1,9 +1,9 @@
 {
   "name": "translate-probe",
   "private": true,
-  "description": "Test harness for the TranslateProbe WoW addon",
+  "description": "Test harness for the TranslateProbe WoW addon and its pixel bridge",
   "scripts": {
-    "test": "node tests/run.js enUS && node tests/run.js frFR"
+    "test": "node tests/run.js enUS && node tests/run.js frFR && node tests/bridge/run.js"
   },
   "devDependencies": {
     "fengari": "^0.1.4"

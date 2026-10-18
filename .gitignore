@@ -5,3 +5,8 @@ scripts/dev.local.ps1
 models/
 build/
 __pycache__/
+# Rust build folders of the helper crates
+helper/*/target/
+# Generated test outputs (E2E runs, bridge simulation results)
+tests/e2e/out/
+tools/bridge/out/
