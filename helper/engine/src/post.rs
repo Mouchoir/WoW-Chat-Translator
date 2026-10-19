@@ -8,6 +8,8 @@ pub fn clean(raw: &str, input: &str) -> Option<String> {
         return None;
     }
     let mut s = strip_think(raw).replace("<|endoftext|>", "");
+    // Mark characters (0x02-0x04) are ours: the model can never forge a coloured span.
+    s.retain(|c| !tp_bridge::marks::is_mark(c));
     // 2. Join lines, trim.
     s = s.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
     // 3. Labels and wrapping quotes the input did not have (twice: `Translation: "..."`).
@@ -16,7 +18,7 @@ pub fn clean(raw: &str, input: &str) -> Option<String> {
         s = strip_quotes(&s, input);
     }
     // 4. Length cap, then empty check.
-    let cap = 3 * input.chars().count() + 40;
+    let cap = length_cap(input);
     if s.chars().count() > cap {
         s = s.chars().take(cap).collect::<String>().trim_end().to_string();
     }
@@ -25,6 +27,20 @@ pub fn clean(raw: &str, input: &str) -> Option<String> {
     } else {
         Some(s)
     }
+}
+
+/// What a wide character (Han, kana, Hangul, full-width) counts for in the length cap.
+pub const WIDE_WEIGHT: usize = 3;
+
+/// The longest output kept, in characters: 3 x the input's characters + 40, a wide character
+/// counting `WIDE_WEIGHT` (2026-10-19, L4). A runaway answer is cut there; n_predict bounds it
+/// too. Fact behind the weight: with every character counting 1, the French translations of two
+/// synthetic Chinese yells (71 and 44 characters) were cut at exactly 253 and 172 characters,
+/// before the IDs that ended them, as the in-game yell lost its two IDs; a Han character comes
+/// out as up to about 6 Latin characters.
+pub fn length_cap(input: &str) -> usize {
+    let weighted: usize = input.chars().map(|c| if crate::verbatim::is_wide(c) { WIDE_WEIGHT } else { 1 }).sum();
+    3 * weighted + 40
 }
 
 /// Removes `<think>...</think>` blocks and stray think tags.
@@ -323,6 +339,7 @@ mod tests {
             ("", "hello", None),
             ("<think></think>", "hello", None),
             ("\"\"", "hello", None),
+            ("Bon\u{2}\u{4}FF0000jour\u{3}", "hello", Some("BonFF0000jour")),
         ];
         for (raw, input, want) in cases {
             assert_eq!(clean(raw, input).as_deref(), *want, "raw={raw:?}");
@@ -330,12 +347,21 @@ mod tests {
     }
 
     #[test]
-    fn length_cap() {
+    fn length_cap_rules() {
         let input = "hi"; // cap = 3*2 + 40 = 46
         let raw = "x".repeat(100);
         assert_eq!(clean(&raw, input).unwrap().chars().count(), 46);
         let raw = "é".repeat(100);
         assert_eq!(clean(&raw, input).unwrap().chars().count(), 46);
+        // a wide character counts 3: a Chinese source of 71 characters (57 of them Han) keeps a
+        // French answer of 400 characters (the old cap, 253, cut the IDs at its end)
+        let zh = format!("{}加V {{1}}或{{2}}", "金".repeat(55));
+        assert_eq!(zh.chars().count(), 65);
+        assert_eq!(length_cap(&zh), 3 * (57 * 3 + 8) + 40);
+        let fr = format!("{} ajoutez V {{1}} ou {{2}}", "x".repeat(380));
+        assert_eq!(clean(&fr, &zh).as_deref(), Some(fr.as_str()));
+        assert_eq!(length_cap("안녕"), 3 * 6 + 40);
+        assert_eq!(length_cap("hello"), 55);
     }
 
     #[test]

@@ -597,7 +597,7 @@ impl Worker {
         }
         let raw_pairs: Vec<(&str, &str)> = job.pairs.iter().map(|(t, m)| (t.as_str(), m.as_str())).collect();
         let pairs = pipeline::clean_pairs(&raw_pairs);
-        let ck = cache::key(&self.model_identity(), &job.target, &protected.text, &pairs);
+        let ck = cache::key(&self.model_identity(), &job.target, &protected.text, &protected.span_key(), &pairs);
         if !job.no_cache {
             if let Some(c) = self.cache.get(ck) {
                 let (st, n) = match c {

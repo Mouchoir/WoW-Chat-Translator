@@ -28,6 +28,7 @@ use tp_engine::pipeline::{self, Attempt, Finish, Prep, Prepared, Step, Tuning};
 use tp_engine::policy::Choice;
 use tp_engine::prompt::{Variant, PROMPT_VERSION};
 use tp_engine::server::{self, RealSpawner, ServerProc, Spawner};
+use tp_bridge::marks;
 use tp_engine::{discover, flags, post, protect};
 
 struct Args {
@@ -111,10 +112,16 @@ struct Sample {
     names: Vec<Vec<String>>,
     /// Content words that show the line was translated: one alternative of each group.
     words: Vec<Vec<String>>,
+    /// Tokens the shown text must hold exactly as written (IDs, URLs, e-mail addresses).
+    copies: Vec<String>,
+    /// Tokens the engine must leave to the model (levels, prices, times written in another
+    /// language's shorthand): never a placeholder.
+    frees: Vec<String>,
 }
 
+/// `\2`, `\3` and `\4` in the corpus stand for the 0x02/0x03 marks and the 0x04 colour prefix.
 fn decode_marks(s: &str) -> String {
-    s.replace("\\2", "\u{2}").replace("\\3", "\u{3}")
+    s.replace("\\2", "\u{2}").replace("\\3", "\u{3}").replace("\\4", "\u{4}")
 }
 
 fn alternatives(s: &str) -> Vec<String> {
@@ -123,10 +130,12 @@ fn alternatives(s: &str) -> Vec<String> {
 
 /// Expectation grammar (column 5, ";"-separated): `same` or `tr`; `use:<term>=a|b` (must-use
 /// pair), `keep:<term>` (keep-allowed pair), `name=a|b` (official name), `word=a|b` (content
-/// word). Every pair must be classified exactly once.
+/// word), `copy=<token>` (an ID, URL or e-mail address the shown text must hold exactly as
+/// written), `free=<token>` (a level, price or time the engine must not protect: the model
+/// translates it). Every pair must be classified exactly once.
 fn parse_expect(e: &str, smp: &mut Sample) -> Result<(), String> {
     let mut kind = 0;
-    let Sample { same, uses, keeps, names, words, pairs, .. } = smp;
+    let Sample { same, uses, keeps, names, words, copies, frees, pairs, .. } = smp;
     for part in e.split(';') {
         if part == "same" {
             *same = true;
@@ -146,6 +155,16 @@ fn parse_expect(e: &str, smp: &mut Sample) -> Result<(), String> {
             names.push(alternatives(alts));
         } else if let Some(alts) = part.strip_prefix("word=") {
             words.push(alternatives(alts));
+        } else if let Some(token) = part.strip_prefix("copy=") {
+            if token.is_empty() || token.contains(char::is_whitespace) {
+                return Err("copy= needs one token".into());
+            }
+            copies.push(token.to_string());
+        } else if let Some(token) = part.strip_prefix("free=") {
+            if token.is_empty() || token.contains(char::is_whitespace) {
+                return Err("free= needs one token".into());
+            }
+            frees.push(token.to_string());
         } else {
             return Err(format!("unknown expectation {part:?}"));
         }
@@ -179,7 +198,7 @@ fn load_samples(path: &Path) -> Result<Vec<Sample>, String> {
             return Err(format!("line {}: {} columns", n + 1, f.len()));
         }
         let pairs: Vec<(String, String)> = serde_json::from_str::<Vec<(String, String)>>(f[3]).map_err(|_| format!("line {}: pairs", n + 1))?;
-        let mut smp = Sample { id: f[0].into(), target: f[1].into(), marked: decode_marks(f[2]), pairs, same: false, uses: vec![], keeps: vec![], names: vec![], words: vec![] };
+        let mut smp = Sample { id: f[0].into(), target: f[1].into(), marked: decode_marks(f[2]), pairs, same: false, uses: vec![], keeps: vec![], names: vec![], words: vec![], copies: vec![], frees: vec![] };
         parse_expect(f[4], &mut smp).map_err(|e| format!("line {}: {e}", n + 1))?;
         v.push(smp);
     }
@@ -304,6 +323,11 @@ struct LineResult {
     brackets_retry: bool,
     insisted: bool,
     restored: Option<bool>,
+    /// Lines with `copy=` tokens: every one is in the shown text exactly as written.
+    copy_ok: Option<bool>,
+    /// Lines with `free=` tokens: none of them is a protected span (the engine's own decision,
+    /// checked without the model).
+    free_ok: Option<bool>,
     /// Lines that need a translation: the shown text (output, or the source for `Same`) is in
     /// the target's script.
     script_ok: Option<bool>,
@@ -331,6 +355,10 @@ fn run_line(s: &Session, smp: &Sample, variant: Variant, tuning: Tuning, show: b
     let t = Instant::now();
     let refs: Vec<(&str, &str)> = smp.pairs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
     let mut r = LineResult::default();
+    if !smp.frees.is_empty() {
+        let prot = protect::protect(&smp.marked, variant);
+        r.free_ok = Some(smp.frees.iter().all(|t| !prot.spans.iter().any(|s| s == t)));
+    }
     let source = protect::unmarked(&smp.marked);
     let mut p = match pipeline::prepare_with(&smp.target, &smp.marked, &refs, variant, tuning) {
         Prep::Nothing => {
@@ -347,7 +375,18 @@ fn run_line(s: &Session, smp: &Sample, variant: Variant, tuning: Tuning, show: b
         Prep::Ready(p) => p,
     };
     r.spans = p.protected.spans.len();
+    // every protected span (item names, and IDs or URLs when the engine protects them)
     let spans = p.protected.spans.clone();
+    // the item names: the corpus's marked spans (at most 9 placeholders)
+    let names: Vec<String> = marks::split(&smp.marked)
+        .into_iter()
+        .filter_map(|x| match x {
+            marks::Piece::Span { text, .. } => Some(text.trim().to_string()),
+            marks::Piece::Plain(_) => None,
+        })
+        .filter(|t| !t.is_empty())
+        .take(protect::MAX_SPANS)
+        .collect();
     // The engine's flow: first request, then at most one follow-up (pipeline::next).
     let fin = loop {
         r.calls += 1;
@@ -380,8 +419,10 @@ fn run_line(s: &Session, smp: &Sample, variant: Variant, tuning: Tuning, show: b
     let shown = match &fin {
         Finish::Done(out) => {
             r.outcome = "done";
-            if r.spans > 0 {
-                r.restored = Some(spans.iter().all(|sp| out.contains(sp.as_str())));
+            // the text the card shows (link colours removed)
+            let out = &marks::plain(out);
+            if !names.is_empty() {
+                r.restored = Some(names.iter().all(|sp| out.contains(sp.as_str())));
             }
             if smp.same {
                 r.same_ok = Some(false);
@@ -401,12 +442,16 @@ fn run_line(s: &Session, smp: &Sample, variant: Variant, tuning: Tuning, show: b
         }
         Finish::Retry | Finish::Insist(_) | Finish::Bad => {
             r.outcome = "bad";
-            if r.spans > 0 {
+            if !names.is_empty() {
                 r.restored = Some(false);
             }
             None
         }
     };
+    if !smp.copies.is_empty() {
+        let text = shown.as_deref().unwrap_or("");
+        r.copy_ok = Some(shown.is_some() && smp.copies.iter().all(|c| text.contains(c.as_str())));
+    }
     if !smp.same {
         let text = shown.as_deref().unwrap_or("");
         let have = shown.is_some();
@@ -573,6 +618,8 @@ fn main() {
     let (script_good, script_n) = count(&results, |r| r.script_ok);
     let (fp_good, fp_n) = count(&results, |r| r.first_valid);
     let (rest_good, rest_n) = count(&results, |r| r.restored);
+    let (copy_good, copy_n) = count(&results, |r| r.copy_ok);
+    let (free_good, free_n) = count(&results, |r| r.free_ok);
     let (must_good, must_n) = count(&results, |r| r.must_ok);
     let (names_good, names_n) = count(&results, |r| r.names_ok);
     let (words_good, words_n) = count(&results, |r| r.words_ok);
@@ -593,6 +640,12 @@ fn main() {
     }
     if rest_good != rest_n {
         reasons.push(format!("item names restored {rest_good}/{rest_n} (rule 100%)"));
+    }
+    if copy_good != copy_n {
+        reasons.push(format!("IDs, URLs and addresses kept {copy_good}/{copy_n} lines (rule 100%)"));
+    }
+    if free_good != free_n {
+        reasons.push(format!("levels, prices and times left to the model {free_good}/{free_n} lines (rule 100%)"));
     }
     if must_n > 0 && (must_good as f64) < 0.8 * must_n as f64 {
         reasons.push(format!("must-use glossary meaning present {must_good}/{must_n} lines (rule >= 80%)"));
@@ -631,6 +684,8 @@ fn main() {
             "scriptCorrect": {"ok": script_good, "of": script_n, "ratio": ratio(script_good, script_n)},
             "firstPassPlaceholders": {"ok": fp_good, "of": fp_n, "ratio": ratio(fp_good, fp_n)},
             "itemNamesRestored": {"ok": rest_good, "of": rest_n, "ratio": ratio(rest_good, rest_n)},
+            "verbatimKept": {"ok": copy_good, "of": copy_n, "ratio": ratio(copy_good, copy_n)},
+            "freeTokens": {"ok": free_good, "of": free_n, "ratio": ratio(free_good, free_n)},
             "mustUseGlossary": {"ok": must_good, "of": must_n, "ratio": ratio(must_good, must_n)},
             "officialNames": {"ok": names_good, "of": names_n, "ratio": ratio(names_good, names_n)},
             "contentWords": {"ok": words_good, "of": words_n, "ratio": ratio(words_good, words_n)},
@@ -647,6 +702,8 @@ fn main() {
             "script": ids(&|r| r.script_ok == Some(false)),
             "firstPassPlaceholders": ids(&|r| r.first_valid == Some(false)),
             "restored": ids(&|r| r.restored == Some(false)),
+            "verbatim": ids(&|r| r.copy_ok == Some(false)),
+            "free": ids(&|r| r.free_ok == Some(false)),
             "mustUse": ids(&|r| r.must_ok == Some(false)),
             "names": ids(&|r| r.names_ok == Some(false)),
             "words": ids(&|r| r.words_ok == Some(false)),
@@ -658,11 +715,11 @@ fn main() {
         "perLine": results.iter().map(|(i, r)| json!({
             "id": samples[*i].id, "target": samples[*i].target, "outcome": r.outcome, "spans": r.spans,
             "firstPassValid": r.first_valid, "bracketsRetry": r.brackets_retry, "insisted": r.insisted,
-            "restored": r.restored, "scriptOk": r.script_ok, "mustUseOk": r.must_ok, "namesOk": r.names_ok,
+            "restored": r.restored, "verbatimOk": r.copy_ok, "freeOk": r.free_ok, "scriptOk": r.script_ok, "mustUseOk": r.must_ok, "namesOk": r.names_ok,
             "wordsOk": r.words_ok, "sameOk": r.same_ok, "wrongSame": r.wrong_same, "unchanged": r.unchanged,
             "calls": r.calls, "ms": r.ms,
         })).collect::<Vec<_>>(),
-        "rule": "E1b: script 100%, first-pass placeholders >= 90%, item names restored 100%, must-use glossary >= 80%, wrong Same 0, same detected on every same line, no line without a result",
+        "rule": "E1b + L4: script 100%, first-pass placeholders >= 90%, item names restored 100%, IDs/URLs/addresses kept 100%, levels/prices/times left to the model 100%, must-use glossary >= 80%, wrong Same 0, same detected on every same line, no line without a result",
         "pass": pass,
         "reasons": reasons,
     });
@@ -691,21 +748,28 @@ mod tests {
 
     fn blank(pairs: &[(&str, &str)]) -> Sample {
         let pairs = pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
-        Sample { id: "x".into(), target: "fr".into(), marked: String::new(), pairs, same: false, uses: vec![], keeps: vec![], names: vec![], words: vec![] }
+        Sample { id: "x".into(), target: "fr".into(), marked: String::new(), pairs, same: false, uses: vec![], keeps: vec![], names: vec![], words: vec![], copies: vec![], frees: vec![] }
     }
 
     #[test]
     fn samples_file_parses() {
         let s = corpus();
-        assert_eq!(s.len(), 40);
+        assert_eq!(s.len(), 59);
         assert_eq!(s.iter().filter(|x| x.same).count(), 5);
         assert!(s.iter().any(|x| x.marked.contains('\u{2}')));
         assert!(s.iter().filter(|x| !x.uses.is_empty()).count() >= 8, "enough must-use lines");
-        assert!(s.iter().filter(|x| x.same).all(|x| x.uses.is_empty() && x.names.is_empty() && x.words.is_empty()));
+        assert!(s.iter().filter(|x| x.same).all(|x| x.uses.is_empty() && x.names.is_empty() && x.words.is_empty() && x.copies.is_empty()));
+        // L4: 15 lines with IDs, URLs and addresses (2 long Chinese yells, a full-width ID); one
+        // coloured link; 4 lines with levels, prices and times the engine must not protect
+        assert_eq!(s.iter().filter(|x| !x.copies.is_empty()).count(), 15);
+        assert_eq!(s.iter().map(|x| x.copies.len()).sum::<usize>(), 23);
+        assert_eq!(s.iter().filter(|x| !x.frees.is_empty()).count(), 4);
+        let de07 = s.iter().find(|x| x.id == "de07").unwrap();
+        assert!(de07.marked.contains("\u{2}\u{4}FFFFFF[Linen Cloth]\u{3}"));
         let mut ids: Vec<&str> = s.iter().map(|x| x.id.as_str()).collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 40);
+        assert_eq!(ids.len(), 59);
     }
 
     #[test]
@@ -735,11 +799,19 @@ mod tests {
     fn expectation_grammar() {
         let pairs = [("wts", "vend"), ("cheap", "pas cher")];
         let mut smp = blank(&pairs);
-        parse_expect("tr;keep:wts;use:cheap=pas cher|Bon Marché;name=Mortemines;word=a|b", &mut smp).unwrap();
+        parse_expect("tr;keep:wts;use:cheap=pas cher|Bon Marché;name=Mortemines;word=a|b;copy=Abc_12;copy=x.example.com/Q", &mut smp).unwrap();
         assert_eq!(smp.uses, vec![("cheap".to_string(), vec!["pas cher".to_string(), "bon marche".to_string()])]);
         assert_eq!(smp.keeps, vec!["wts".to_string()]);
         assert_eq!(smp.names, vec![vec!["mortemines".to_string()]]);
         assert_eq!(smp.words.len(), 1);
+        // copy= is exact (case kept, not folded)
+        assert_eq!(smp.copies, vec!["Abc_12".to_string(), "x.example.com/Q".to_string()]);
+        assert!(parse_expect("tr;keep:wts;use:cheap=x;copy=", &mut blank(&pairs)).is_err());
+        let mut f = blank(&pairs);
+        parse_expect("tr;keep:wts;use:cheap=x;free=60лвл;free=2g50", &mut f).unwrap();
+        assert_eq!(f.frees, vec!["60лвл".to_string(), "2g50".to_string()]);
+        assert!(parse_expect("tr;keep:wts;use:cheap=x;free=", &mut blank(&pairs)).is_err());
+        assert_eq!(decode_marks("a\\2\\4FF0000b\\3"), "a\u{2}\u{4}FF0000b\u{3}");
         let bad = [
             "tr;keep:wts",
             "tr;keep:wts;keep:cheap;use:cheap=x",

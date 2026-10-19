@@ -1,4 +1,5 @@
-//! In-memory LRU of 256 results; key = FNV-1a 64 of (PROMPT_VERSION, model digest, target, protected text, pairs).
+//! In-memory LRU of 256 results; key = FNV-1a 64 of (PROMPT_VERSION, model digest, target, protected text,
+//! span contents and colours, pairs).
 //! Nothing is ever written to disk.
 
 use std::collections::HashMap;
@@ -38,13 +39,15 @@ pub fn fnv1a64(b: &[u8]) -> u64 {
     h.0
 }
 
-/// Cache key of one request.
-pub fn key(model_digest: &str, target: &str, protected: &str, pairs: &[(String, String)]) -> u64 {
+/// Cache key of one request. `spans` is `Protected::span_key`: the placeholders' contents and
+/// colours, so "wts {1}" for two different items (or IDs, or colours) gives two keys.
+pub fn key(model_digest: &str, target: &str, protected: &str, spans: &str, pairs: &[(String, String)]) -> u64 {
     let mut h = Fnv(FNV_OFFSET);
     h.bytes(&PROMPT_VERSION.to_le_bytes());
     h.field(model_digest.as_bytes());
     h.field(target.as_bytes());
     h.field(protected.as_bytes());
+    h.field(spans.as_bytes());
     h.bytes(&(pairs.len() as u32).to_le_bytes());
     for (t, m) in pairs {
         h.field(t.as_bytes());
@@ -109,18 +112,22 @@ mod tests {
     #[test]
     fn key_is_stable_and_field_sensitive() {
         let pairs = vec![("wts".to_string(), "vend".to_string())];
-        let k = key("sha256:7485", "fr", "wts {1}", &pairs);
+        let k = key("sha256:7485", "fr", "wts {1}", "13:[Linen Cloth]:;", &pairs);
         // Stability: the same inputs always give the same key (a golden value guards against
         // accidental changes to the key layout; bump it only together with PROMPT_VERSION).
-        assert_eq!(k, key("sha256:7485", "fr", "wts {1}", &pairs));
-        assert_eq!(k, 0x3097_654c_7b69_b41a, "key layout changed: got {k:#x}");
-        assert_ne!(k, key("sha256:7486", "fr", "wts {1}", &pairs));
-        assert_ne!(k, key("sha256:7485", "de", "wts {1}", &pairs));
-        assert_ne!(k, key("sha256:7485", "fr", "wts {2}", &pairs));
-        assert_ne!(k, key("sha256:7485", "fr", "wts {1}", &[]));
+        assert_eq!(k, key("sha256:7485", "fr", "wts {1}", "13:[Linen Cloth]:;", &pairs));
+        assert_eq!(k, 0xb217_1b1f_73e1_e16a, "key layout changed: got {k:#x}");
+        assert_ne!(k, key("sha256:7486", "fr", "wts {1}", "13:[Linen Cloth]:;", &pairs));
+        assert_ne!(k, key("sha256:7485", "de", "wts {1}", "13:[Linen Cloth]:;", &pairs));
+        assert_ne!(k, key("sha256:7485", "fr", "wts {2}", "13:[Linen Cloth]:;", &pairs));
+        assert_ne!(k, key("sha256:7485", "fr", "wts {1}", "13:[Linen Cloth]:;", &[]));
+        // another item name, or the same one in another colour (L3, L4 review fix)
+        assert_ne!(k, key("sha256:7485", "fr", "wts {1}", "11:[Silk Cloth]:;", &pairs));
+        assert_ne!(k, key("sha256:7485", "fr", "wts {1}", "13:[Linen Cloth]:FFFFFF;", &pairs));
+        assert_ne!(key("d", "fr", "x {1}", "", &[]), key("d", "fr", "x", "{1}", &[]));
         assert_ne!(
-            key("d", "fr", "x", &[("ab".into(), "c".into())]),
-            key("d", "fr", "x", &[("a".into(), "bc".into())])
+            key("d", "fr", "x", "", &[("ab".into(), "c".into())]),
+            key("d", "fr", "x", "", &[("a".into(), "bc".into())])
         );
     }
 

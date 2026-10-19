@@ -43,6 +43,8 @@ pub mod protect;
 pub mod selftest;
 #[doc(hidden)]
 pub mod server;
+#[doc(hidden)]
+pub mod verbatim;
 
 #[cfg(test)]
 mod testutil;

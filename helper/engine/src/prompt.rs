@@ -5,8 +5,9 @@
 //! prompt styles below; the default is the style of the tuning that passed the E1b rule.
 
 /// Part of the cache key; bump when the prompt text changes. 2: E1b tuning (casual style,
-/// insist retry, expanded must-use terms).
-pub const PROMPT_VERSION: u32 = 2;
+/// insist retry, expanded must-use terms). 3 (2026-10-19, L4): IDs, URLs and e-mail addresses
+/// become placeholders, and the cache key holds the span contents and colours.
+pub const PROMPT_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Variant {

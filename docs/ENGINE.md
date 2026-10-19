@@ -24,6 +24,10 @@ let json = tp_engine::selftest::run(&cfg);   // --selftest, never loads the mode
   `Loading{first_gpu_use}` (the server is starting for this job), `Translating`, zero or more
   `Partial` (CPU only, at most 5 per second, placeholders already restored), then one final
   status: `Done`, `Same`, `Nothing`, `Failed(kind)`, `LowMemory` or `NotInstalled`.
+- The text of `Done` and `Partial` (2026-10-19, L3): a link name the addon sent with a colour
+  comes back as a coloured mark, `0x02 0x04 RRGGBB name 0x03` (`tp_bridge::marks::span`,
+  upper-case hex); every other span is plain text. `tp_bridge::marks::plain` gives the visible
+  text (the clipboard uses it), `marks::split` the coloured runs (the overlay).
 - `Nothing`, `Same` (Hangul text to `ko`), cached results and `NotInstalled` are answered at
   submit, without a model call.
 - Re-submitting a key that is still waiting or in flight is ignored (it keeps its place). After
@@ -148,19 +152,47 @@ free, the session switches to CPU (unload after the request in flight).
   and its result is still cached. A flight whose keys were all cancelled before any work started
   is dropped.
 - Cache: in-memory LRU of 256 results (`Done` text or `Same`), never written to disk. Key =
-  FNV-1a 64 of `PROMPT_VERSION` (2), model identity (digest, else size and mtime), target, protected
-  text (default variant) and pairs, each field length-prefixed.
+  FNV-1a 64 of `PROMPT_VERSION` (3), model identity (digest, else size and mtime), target, protected
+  text (default variant), the spans' contents and colours (`Protected::span_key`) and pairs, each
+  field length-prefixed. The spans are in the key since 2026-10-19 (review fix, deviation 24):
+  "wts {1}" for two different items, IDs or colours are two results.
 
 ## 6. Prompt, protection, post-processing
 
 **Pre-processing** (`protect.rs`, `pipeline.rs`):
 1. ChatML neutralization in text and pairs: `<|` becomes `< |`, `|>` becomes `| >`.
-2. Line breaks and other control characters become spaces.
-3. Each complete `\x02...\x03` span becomes `{1}..{9}` in order. Spans after the 9th, unterminated
-   marks, stray `\x03` and empty spans stay or become plain text; a `\x02` inside an open span
-   restarts it. A `{N}` typed by a player is rewritten `{ N }` so it cannot pass for a placeholder.
-4. No letters outside placeholders: `Nothing`. Mostly Hangul text with target `ko`: `Same`.
-5. **Glossary expansion (E1b, V4):** each must-use pair whose meaning has one sense (no " / ")
+2. Line breaks and other control characters (except the marks 0x02-0x04) become spaces.
+3. Marks (`tp_bridge::marks`, one grammar for the engine and the app): each complete
+   `\x02...\x03` span is a marked span; since addon build 5 it may start with `\x04` and six hex
+   digits, the link's colour, kept with the span (L3; the addon sends the colours in a COLOURS
+   message and the app's scene writes them into the text before the job, `docs\BRIDGE.md` section
+   3b, so the engine reads the same coloured form). Unterminated marks, stray `\x03` and empty
+   spans stay or become plain text; a `\x02` inside an open span restarts it; a `\x04` anywhere
+   else, or not followed by six hex digits, is dropped alone (`docs\BRIDGE.md` section 3a, the
+   decode vectors of `tests\vectors\marks.json` are checked by `helper\bridge\tests\vectors.rs`).
+4. **Verbatim tokens** (`verbatim.rs`, 2026-10-19, L4): in the plain text, URLs (`http://`,
+   `https://`, `www.`, a domain with a path such as `discord.gg/...`, a known bare host such as
+   `t.me` or `bit.ly`, a bare domain with a common top-level domain and a first label of 4
+   characters or more; a top-level domain that is also a chat word, `me`, `to`, `it`, `de`..., needs
+   3 labels, so `add.me` and `merci.de` stay words), e-mail addresses and IDs (a run of letters,
+   digits and `_` with at least one letter and 2 digits, or a `_`, or a `#` and 3 to 6 digits; Han,
+   kana and Hangul end a run, so an ID glued to Chinese text is found) are spans too. Full-width
+   letters, digits and ASCII-range punctuation (Chinese input methods) count as their ASCII forms
+   and the token is protected as written (`Ｋｉｗｉ４８２１３`; the Latin grammar would block it).
+   Plain numbers, times (`20h30`, `20Uhr`, `20hs`, `20heures`, `20ч30`), levels (`lvl60`, `L60`,
+   `niv60`, `nivel60`, `stufe60`, `лвл60`, `60лвл`, `ур60`), amounts and units (`x20`, `100g`,
+   `5g50`, `5po50pa`, `50кк`, `10kkk`, `30min`, `2nd`, `20шт`), raid sizes (`10m`, `lf10m`,
+   `icc25`, `10hm`, `icc10hm`), brackets (`3v3`), keys (`m15`), ratings (`pvp1800`, `rating2000`)
+   and keep-allowed glossary terms (`aq40`) are not (`verbatim::game_number` lists the shapes in
+   English, French, German, Spanish, Portuguese, Italian and Russian shorthand). Fact: in game the
+   model's answer to a long Chinese yell ending with two IDs stopped before them; E1c below has the
+   cause.
+5. Spans become `{1}..{9}`, numbered in order of appearance: the marked spans first (at most 9),
+   then the verbatim tokens while room is left; the others stay plain text. A `{N}` typed by a
+   player is rewritten `{ N }` so it cannot pass for a placeholder.
+6. No letters outside placeholders: `Nothing` (a line made only of IDs and URLs too). Mostly
+   Hangul text with target `ko`: `Same`.
+7. **Glossary expansion (E1b, V4):** each must-use pair whose meaning has one sense (no " / ")
    and no braces is replaced by its meaning in the message (whole words, ASCII case ignored, like
    the addon's matching); expanded pairs are left out of the prompt glossary. In the Brackets
    form only the text between `[...]` segments is expanded, so item names are never touched.
@@ -177,7 +209,8 @@ full names (stockade, armory) and user entries for other terms; the translation 
 their meaning. Names with an official localized form (dungeons, zones) must use that form; item
 links are protected by placeholders and restored as the client shows them.
 
-**Prompt** (`prompt::build`, `PROMPT_VERSION` 2). Raw ChatML; thinking disabled with an empty
+**Prompt** (`prompt::build`, `PROMPT_VERSION` 3; the prompt wording is the one of version 2,
+version 3 only changed what becomes a placeholder and the cache key). Raw ChatML; thinking disabled with an empty
 `<think>` block. The user turn is `Glossary:` (omitted without pairs), then `Message:` and the
 text. Two system styles (`prompt::Style`):
 - **Casual (default, V1):** the lead's measured GPU prompt, generalized to the target and to
@@ -202,9 +235,11 @@ sends the default style's system prefix.
 zh and zh-TW block kana, Hangul and Cyrillic; ko blocks kana, Cyrillic and CJK ideographs.
 
 **Post-processing** (`post.rs`, `pipeline::finish`):
-1. Drop `<think>` blocks and tags (an output containing `<|im_` is `BadOutput`); join lines; strip
-   labels (`Translation:`, `Traduction :` and their equivalents) and wrapping quotes the input did
-   not have; cap at 3 x input characters + 40; empty is `BadOutput`.
+1. Drop `<think>` blocks and tags (an output containing `<|im_` is `BadOutput`); drop the mark
+   characters 0x02-0x04 (the model cannot forge a coloured span); join lines; strip labels
+   (`Translation:`, `Traduction :` and their equivalents) and wrapping quotes the input did not
+   have; cap at 3 x input characters + 40, a Han, kana, Hangul or full-width character counting 3
+   (`post::length_cap`, 2026-10-19, L4: E1c below); empty is `BadOutput`.
 2. Placeholders: each `{1..n}` exactly once and no other `{k}`, else one retry with
    `Variant::Brackets`.
 3. **Bracket repair (Brackets answers):** when the output has as many `[...]` segments as the
@@ -219,7 +254,9 @@ zh and zh-TW block kana, Hangul and Cyrillic; ko blocks kana, Cyrillic and CJK i
    every other Latin language and make up at least a quarter of the counted words. Without that
    evidence the output is shown as the translation (`Done`), so a foreign line is never labelled
    "Already in {language}".
-5. Restore the spans.
+5. Restore the spans: a span with a link colour as a coloured mark (`0x02 0x04 RRGGBB name
+   0x03`), every other span as its text; in a Brackets answer, the wrapped spans are unwrapped
+   and the coloured ones marked (the first occurrence outside a mark already written).
 
 **Tuning and follow-ups.** `pipeline::Tuning` holds the E1b switches: style (V0 plain, V1
 casual), `insist` (V2), `same_needs_evidence` (V3), `expand` (V4). `Tuning::DEFAULT` is
@@ -231,7 +268,9 @@ The worker and `evalprompt` share these functions.
 
 `Translator::Echo` (`--translator echo`) never starts a process: `Loading` for 300 ms on the first
 job (again after an idle unload), then `Translating`, then `Done(uppercase of the unmarked text)`
-after 200 ms. It goes through the same queue, cache and shortcuts as the real translator.
+after 200 ms; a span with a link colour keeps it (written back as a coloured mark, like a real
+translation), so E2E can check the coloured runs. It goes through the same queue, cache and
+shortcuts as the real translator.
 
 `selftest::run` returns JSON with `engine` (prompt version, default variant, tuning label),
 `runtime`, `model`,
@@ -258,13 +297,19 @@ From `helper\engine`:
 
 | Command | What |
 |---|---|
-| `cargo test --offline` | 99 unit tests in the library (2 ignored: the child process of the job-object test, and `selftest_on_this_machine`, which may run `llama-server --help`), 5 in `evalprompt`, 1 ignored integration test |
-| `cargo test --offline --test real_server -- --ignored --nocapture` (env `TPROBE_LLAMA_RUNTIME`) | the public Engine API against the real llama-server on CPU, 60 s watchdog |
-| `cargo run --offline --release --bin evalprompt -- --runtime %TPROBE_LLAMA_RUNTIME% --cpu --threads 4 --out ..\..\tests\eval\out\report.json` | E1 with the shipped tuning (`--tuning v0`, `v1+v3+v4`... for the others; `--samples ..\..\tests\eval\echo_samples.tsv` for the echo set) |
+| `cargo test --offline` | 111 unit tests in the library (2 ignored: the child process of the job-object test, and `selftest_on_this_machine`, which may run `llama-server --help`), 5 in `evalprompt`, 1 ignored integration test |
+| `cargo test --offline --test real_server -- --ignored --nocapture` (env `TPROBE_LLAMA_RUNTIME`) | the public Engine API against the real llama-server on CPU, 60 s watchdog; since 2026-10-19 the synthetic line holds a coloured link and a synthetic ID, which must come back as a coloured mark and exactly as written (2026-10-19: first result after 13.9 s including the load, WoW running) |
+| `cargo run --offline --release --bin evalprompt -- --runtime %TPROBE_LLAMA_RUNTIME% --cpu --threads 4 --out ..\..\tests\eval\out\report.json` | E1 with the shipped tuning, E1b and E1c lines included (`--tuning v0`, `v1+v3+v4`... for the others; `--samples ..\..\tests\eval\echo_samples.tsv` for the echo set) |
 
 Unit tests cover: prompt goldens per target, variant and style, with and without glossary, and
 the insist block; the glossary policy table; protect and restore (nesting, more than 9 spans,
-unterminated marks, UTF-8, missing, duplicated, unknown and zero placeholders, typed `{1}`);
+unterminated marks, UTF-8, missing, duplicated, unknown and zero placeholders, typed `{1}`;
+since 2026-10-19 coloured spans in both variants, a moved or repeated name in a Brackets answer,
+verbatim tokens as placeholders, marks before tokens at the limit of 9, the span key); verbatim
+token detection (the in-game shape glued to Chinese, URLs, addresses, BattleTags, `_` handles, and
+60 number, time, level, unit and abbreviation shapes that stay plain); the length cap with wide
+characters; marks from the model dropped; the echo translator's colours; the pipeline with a
+coloured link and an ID (Done, Partial, a dropped ID through the Brackets retry);
 ChatML neutralization; grammar strings; the sanitize table; same-language detection, scripts
 and the target-language evidence on the E1 echo and same lines; `Nothing` and the ko shortcut;
 the E1b pipeline paths (V2 insist once and its fallback, V3 evidence, V4 expansion in both
@@ -287,7 +332,7 @@ of the waiting ones, in order, never dropped first by an overload, moving a shar
 both corpora, check the expectation grammar, and check that every pair the corpora mark
 must-use or keep-allowed is classified the same way by `prompt::keep_allowed`.
 
-## 10. E1 and E1b evaluations
+## 10. E1, E1b and E1c evaluations
 
 ### E1 (2026-10-16, P3)
 
@@ -392,6 +437,81 @@ lines, not stored):
    which is the mechanism that made must-use reach 10/10. Addon files are outside P3b.
 2. GPU pass: not run, WoW was running (amendment A1).
 
+### E1c (2026-10-19, user request L4): tokens the model must copy
+
+**In-game report.** A Chinese yell ending with "加V <ID>或<ID>" (192 bytes, two IDs of letters
+and digits) came back in French ending with "Ajoutez V": the IDs were gone, although the Helper
+received the whole line.
+
+**Corpus** (`tests\eval\chat_samples.tsv`, now 54 synthetic lines, synthetic IDs and addresses
+only): 14 lines with IDs, URLs and e-mail addresses (fr17 to fr21, en11 to en15, de05 to de07,
+es04), among them two long Chinese yells shaped like the in-game one (fr20, 71 characters; fr21)
+and one line with a coloured link (de07, `\4FFFFFF`). New expectation `copy=<token>`: the shown
+text must hold the token exactly as written (metric `verbatimKept`, rule 100%). The 40 older
+lines are unchanged, and the new lines carry no must-use pair, no `name=` and no `word=`, so the
+older metrics keep their denominators. Pairs come from the real `Glossary.Extract` (en11 gets
+`gg` from `discord.gg`, de05 `org` from `example.org`, both keep-allowed).
+
+**Run conditions** as for E1b (CPU, 4 threads, batches of 6, one server per batch under a 60 s
+watchdog that never fired, one server at a time, each killed and seen exited, no llama-server
+left after any run). WoW was running and the PC busier than for E1b: mean latency about 2.5 s per
+line against 2.0 s for the same lines in E1b (identical outputs), so latency differences are
+noise here.
+
+| Run (main corpus, shipped tuning v1+v3+v4) | Script | Items | First pass | Must-use | Verbatim | Wrong Same | Echo shown | Brackets retries | Calls | Mean/max ms | Rule |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| HEAD 1332f01, 40 lines (reproduction) | 35/35 | 22/22 | 23/24 | 10/10 | n/a | 0 | 1 | 1 | 40 | 2530/4605 | pass |
+| HEAD 1332f01, 54 lines (`out\e1c_before.json`) | 49/49 | 23/23 | 24/25 | 10/10 | 13/14 | 0 | 1 | 1 | 54 | 2612/9085 | fail |
+| This change, 54 lines (`out\report.json`) | 49/49 | 23/23 | 37/38 | 10/10 | **14/14** | 0 | 1 | 1 | 54 | 2581/8060 | **pass** |
+
+- HEAD reproduced the E1b report line for line (outcomes, spans, every check; only times differ).
+- With this change the 40 older lines and the 14-line echo set give exactly the same per-line
+  results as before (no token found in them, same prompts, same outputs); the 14 new lines all
+  pass their placeholders on the first try.
+- Failing ids, unchanged: names fr01 fr03 fr15 en01 en04, words fr09 en09, echo shown en09, first
+  pass en07. HEAD's verbatim failure: fr20.
+
+**Cause of the in-game drop: the output length cap, not the model.** A probe of six synthetic
+Chinese yells ending with two IDs (console only, not stored):
+- HEAD: 5/6 kept. The 71-character yell (fr20's text) came back cut at exactly 253 characters
+  (3 x 71 + 40) before its end, the IDs with it; the 44-character one was cut at exactly 172 (its
+  IDs came earlier and survived). A Han character comes out as several Latin characters, so the
+  old cap (3 x input characters + 40) cut French translations of long Chinese lines.
+- Protection with the old cap: still 5/6. The 71-character yell ended "... peuvent ajouter V",
+  the in-game symptom: the cut removed the placeholders, the Brackets retry was cut the same way,
+  and the IDs were lost.
+- This change (protection and a wide character counting 3 in the cap): 6/6, the long yell
+  complete with both IDs.
+
+So both parts ship: the cap (deviation 26) removes the cause, and the protection (section 6, step
+4) keeps the tokens exact in every other case (the model may otherwise respell or translate an
+ID, a URL or an address). Protected tokens also leave the letters they hold out of the `Nothing`
+and `ko` shortcuts and of the same-language evidence.
+
+**Integration review (2026-10-19).** The review found levels, prices, raid sizes, times and ratings
+in other languages' shorthand protected as IDs (`niv60`, `60лвл`, `5g50`, `50кк`, `10hm`, `20Uhr`,
+`pvp1800`...), chat words joined by a dot protected as domains (`add.me`, `merci.de`, `lol.gg`) and
+full-width IDs never protected (deviation 27). Five synthetic lines were added (corpus 59 lines):
+fr22 (a Russian level `60лвл`), fr23 (a price `2g50`), en16 (a French level `niv60`), de08 (a time
+`20heures` and a raid size `icc10hm`), each with a `word=` check and the new `free=` expectation
+(the token must not be a placeholder, checked on the engine's own protection), and en17 (a
+full-width ID, `copy=`). Same run conditions (CPU, 4 threads, batches of 6, 60 s watchdog never
+fired, 10 servers killed and seen exited per run, at most one llama-server at any second of a
+per-second process count, none left; WoW running).
+
+| Run (59 lines, shipped tuning v1+v3+v4) | Script | Items | First pass | Must-use | Verbatim | Free | Wrong Same | Same | Words | Calls | Mean/max ms | Rule |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Before the review fixes (`out\e1c_review_before.json`) | 54/54 | 23/23 | 41/42 | 10/10 | 14/15 (en17) | 0/4 | 0 | 5/5 | 21/23 | 59 | 2525/7255 | fail |
+| After (`out\report.json`) | 54/54 | 23/23 | 38/39 | 10/10 | **15/15** | **4/4** | 0 | 5/5 | 21/23 | 59 | 2668/7876 | **pass** |
+
+- Only the five new lines changed; the 54 older lines give identical per-line results (outcome,
+  spans, first pass, every check). The first-pass denominator fell by 3: fr22, fr23 and en16 have
+  no placeholder any more, en17 gained one (and de08 lost its two).
+- Failing ids, unchanged from E1c: names fr01 fr03 fr15 en01 en04, words fr09 en09, echo shown
+  en09, first pass en07.
+- Unit tests hold the shapes the probe found (`verbatim::tests::other_languages_shorthand_stays_plain`,
+  `chat_words_joined_by_a_dot_are_not_domains`, `full_width_ids_and_urls`).
+
 ## 11. Deviations from the design and decisions
 
 1. **E1 decision** (section 10): Placeholders kept although the literal ship rule said Brackets.
@@ -458,6 +578,42 @@ lines, not stored):
     `worker.rs` passes it to the queue entry (`Entry::urgent`); that one line in `worker.rs` is
     outside the files the work package listed (`lib.rs`, `queue.rs`), because the worker builds
     the entries.
+23. **Link colours (2026-10-19, L3).** The mark grammar moved to `tp_bridge::marks` (shared with
+    the app), with the colour prefix `0x04 RRGGBB` the addon writes right after a `0x02` since
+    build 5. `Protected` gained `colors` and `verbatim` (per span) and `span_key`; `restore` writes
+    a coloured span back as a coloured mark, so `Done` and `Partial` texts can hold marks
+    (section 1). The alternative, a separate list of runs in `Status`, would have changed the D.2
+    interface and the queue's merge semantics for one more field; the marks keep one `ChatText`.
+24. **Cache key holds the spans (review fix, 2026-10-19).** Fact: the key was the protected text
+    and pairs only, so "wts [Linen Cloth]" and "wts [Silk Cloth]" (both "wts {1}") shared one
+    cache entry and one queue merge, and the second line was shown with the first one's item
+    name. With IDs as placeholders (L4) and colours (L3) this would happen for every "add {1}".
+    The key now includes `Protected::span_key` (contents and colours, length-prefixed);
+    `PROMPT_VERSION` went to 3 and the golden key with it (`cache.rs` test).
+25. **Verbatim tokens (2026-10-19, L4)** are found by the engine, not marked by the addon: the
+    addon's marks are for real links, and the engine already owns the prompt's protection. A
+    handle with `_` is any run holding a `_` and 2 alphanumerics, so the neutralized ChatML token
+    `< |im_end| >` now carries `im_end` as a placeholder (harmless: it is restored as written;
+    `pipeline.rs` test). `MAX_SPANS` stays 9: one-digit placeholders are the form E1 and E1b
+    measured (two-digit ones were never measured), a chat line rarely holds 9 links and IDs, and
+    when it does the marked links keep priority (`protect::tests::marks_keep_priority_over_tokens`).
+26. **Length cap weighted for wide scripts (2026-10-19, L4, fact in E1c).** The user's report was a
+    dropped pair of IDs; the measured cause is the output cap (3 x input characters + 40), which
+    cut the French translation of a long Chinese line before its last words. Protecting the IDs
+    alone would not have saved them: their placeholders would have been cut too. A Han, kana,
+    Hangul or full-width character now counts 3; runaway answers stay bounded by the cap and by
+    n_predict.
+27. **Token shapes after the integration review (2026-10-19, facts in E1c).** The first L4 shapes
+    knew only English and French game numbers: a review probe found `niv60`, `лвл60`, `60лвл`,
+    `5g50`, `5po50pa`, `50кк`, `10hm`, `20Uhr`, `pvp1800` protected as IDs (and E1 showed `60лвл`,
+    `50кк`, `niv60` and `2g50` copied untranslated), `add.me`, `merci.de` and `lol.gg` protected as
+    domains, and a full-width ID never protected (it came back respelled "KIWI48213"). The shapes
+    now cover the other languages' level, amount, time and rating shorthand by word lists (the
+    alternative, any 1-3 letters with 1-3 digits as a game number, would also have released short
+    handles such as `Bob22`, which the request names as IDs), bare domains need a known host, a
+    first label of 4 characters or 3 labels, and full-width letters, digits and punctuation are
+    read as ASCII. New E1 expectation `free=<token>`: a token the engine must not protect, checked
+    on the engine's own protection without the model (metric `freeTokens`, rule 100%).
 
 ## 12. M0 skeleton notes (kept)
 

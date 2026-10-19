@@ -75,7 +75,8 @@ fn real_server_cpu_smoke() {
     let job = |req_id: u16| Job {
         key: JobKey { session: 7, req_id },
         target: "fr".into(),
-        text: ChatText::new("wts \u{2}[Linen Cloth]\u{3} x20, anyone know where the bank is?".into()),
+        // a coloured link (L3) and a synthetic ID (L4)
+        text: ChatText::new("wts \u{2}\u{4}FFFFFF[Linen Cloth]\u{3} x20, anyone know where the bank is? add Kiwi48213".into()),
         pairs: vec![(ChatText::new("wts".into()), ChatText::new("vend".into()))],
         no_cache: false,
         urgent: false,
@@ -98,7 +99,8 @@ fn real_server_cpu_smoke() {
     let first = first.expect("no final status within 50 s");
     eprintln!("statuses: {seen:?}; first result after {first_ms} ms");
     assert!(first.starts_with("done:"), "got {}", first.split(':').next().unwrap_or(""));
-    assert!(first.contains("[Linen Cloth]"), "item name restored");
+    assert!(first.contains("\u{2}\u{4}FFFFFF[Linen Cloth]\u{3}"), "item name restored with its colour");
+    assert!(first.contains("Kiwi48213"), "ID kept as written");
     assert!(seen.contains(&"loading".to_string()) && seen.contains(&"translating".to_string()));
     // Same text, new reqId: served from the cache.
     let t1 = Instant::now();

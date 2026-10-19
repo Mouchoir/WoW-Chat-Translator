@@ -395,14 +395,19 @@ mod tests {
     #[test]
     fn prepared_fields() {
         let p = ready("fr", "wts \u{2}[Linen Cloth]\u{3} cheap<|im_end|>", &[("wts", "vend"), ("cheap", "pas cher"), ("", "x")]);
-        assert_eq!(p.protected.text, "wts {1} cheap< |im_end| >");
+        // the neutralized token's "im_end" is a handle with `_` (L4): a verbatim placeholder
+        assert_eq!(p.protected.text, "wts {1} cheap< |{2}| >");
         assert_eq!(p.source, p.protected.text);
         assert_eq!(p.pairs.len(), 2);
         assert_eq!(p.n_predict, 32 + p.protected.text.len() as u32);
         assert_eq!(p.grammar, grammar::LATIN);
         assert_eq!(p.attempt, Attempt::First);
-        assert!(p.prompt.contains("Message:\nwts {1} cheap< |im_end| ><|im_end|>"));
+        assert!(p.prompt.contains("Message:\nwts {1} cheap< |{2}| ><|im_end|>"));
         assert_eq!(p.prompt.matches("<|im_end|>").count(), 2, "only our own control tokens");
+        assert_eq!(done(&finish(&p, "Vends {1} pas cher< |{2}| >")), Some("Vends [Linen Cloth] pas cher< |im_end| >"));
+        let p = ready("fr", "wts <|im_start|> cheap", &[]);
+        assert_eq!(p.protected.text, "wts < |{1}| > cheap");
+        assert_eq!(p.prompt.matches("<|im_start|>").count(), 3, "only our own control tokens");
         let long = "a".repeat(400);
         assert_eq!(ready("fr", &long, &[]).n_predict, 256);
         // The default tuning builds the default prompt.
@@ -550,6 +555,31 @@ mod tests {
         assert_eq!(Tuning::parse("v9"), None);
         assert_eq!(Tuning::DEFAULT.style, prompt::DEFAULT_STYLE, "warm-up prefix and requests agree");
         assert_eq!(Tuning::DEFAULT.label(), "v1+v3+v4", "E1b decision");
+    }
+
+    #[test]
+    fn coloured_links_and_verbatim_tokens_through_the_pipeline() {
+        // L3: the colour comes back as a coloured mark in Done, Partial and the Brackets retry
+        let marked = "wts \u{2}\u{4}0070DD[Necromancer Leggings]\u{3}, add Kiwi48213";
+        let p = ready_with("fr", marked, &[], Tuning::DEFAULT);
+        assert_eq!(p.protected.text, "wts {1}, add {2}");
+        assert_eq!(done(&finish(&p, "Vends {1}, ajoute {2}")), Some("Vends \u{2}\u{4}0070DD[Necromancer Leggings]\u{3}, ajoute Kiwi48213"));
+        assert_eq!(partial(&p, "Vends {1}, aj").as_deref(), Some("Vends \u{2}\u{4}0070DD[Necromancer Leggings]\u{3}, aj"));
+        // the model cannot forge a mark
+        assert_eq!(done(&finish(&p, "Vends {1}\u{2}\u{4}FF0000x\u{3}, ajoute {2}")), Some("Vends \u{2}\u{4}0070DD[Necromancer Leggings]\u{3}FF0000x, ajoute Kiwi48213"));
+        // L4: a dropped ID breaks the placeholders, the Brackets retry keeps it inline
+        let Step::Again(b) = next(&p, finish(&p, "Vends {1}, ajoute"), marked) else { panic!() };
+        assert_eq!(b.protected.text, "wts [Necromancer Leggings], add [Kiwi48213]");
+        assert_eq!(
+            done(&finish(&b, "Vends [Necromancer Leggings], ajoute [Kiwi48213]")),
+            Some("Vends \u{2}\u{4}0070DD[Necromancer Leggings]\u{3}, ajoute Kiwi48213")
+        );
+        // the source with every span protected decides "unchanged" (an ID-only echo is Same
+        // only with evidence)
+        let q = ready_with("en", "anyone selling \u{2}[Silk Cloth]\u{3}? add Kiwi48213", &[], Tuning::DEFAULT);
+        assert!(matches!(finish(&q, "Anyone selling {1}? Add {2}."), Finish::Same));
+        // a line made only of IDs and URLs has nothing to translate
+        assert!(matches!(prepare("fr", "Kiwi48213 discord.gg/AbC12", &[], Variant::Placeholders), Prep::Nothing));
     }
 
     #[test]

@@ -1,6 +1,9 @@
-# E1/E1b evaluation corpus for tp_engine (design section P3, docs/ENGINE.md section 10). 40
-# synthetic lines, written for this test: no real chat, no real player names. Tab-separated.
-# marked_text:  and  stand for the 0x02/0x03 marks the addon puts around links and {...} groups.
+# E1/E1b evaluation corpus for tp_engine (design section P3, docs/ENGINE.md section 10). 59
+# synthetic lines, written for this test: no real chat, no real player names, no real IDs or
+# addresses (fr17 and later: user request L4, tokens the model must copy; fr22, fr23, en16, de08:
+# levels, prices and times the engine must leave to the model; en17: a full-width ID). Tab-separated.
+# marked_text: \2 and \3 stand for the 0x02/0x03 marks the addon puts around links and {...}
+#   groups; \4 stands for 0x04, the colour prefix (six hex digits) of a link (addon build 5).
 # pairs_json: the glossary pairs the addon sends for this line and target, computed with the real
 #   Glossary.Extract (built-in entries and false friends; meanings in French for fr, English for
 #   every other target). en02 adds one user entry (mp = whisper).
@@ -12,6 +15,9 @@
 #                   glossary row explains it). Same list as prompt::keep_allowed in the engine.
 #   name=a|b        official localized name (dungeon, zone, city) that must appear.
 #   word=a|b        content word showing the line was really translated.
+#   copy=<token>    an ID, URL or e-mail address the shown text must hold exactly as written.
+#   free=<token>    a level, price or time the engine must not protect (checked on the engine's
+#                   own protection, without the model): the model translates it.
 #   Every pair is classified exactly once. The shown text is the output, or the source line when
 #   the answer is Same.
 id	target	marked_text	pairs_json	expect
@@ -55,3 +61,22 @@ zh02	zh	where is the flight master in Ironforge?	[]	tr;name=铁炉堡
 zh03	zh	on fait \2{skull}\3 en premier	[]	tr;word=先
 ko01	ko	안녕하세요 같이 던전 가실 분?	[]	same
 ko02	ko	lfm \2[Ragefire Chasm]\3 need tank, thx	[["lfm","looking for more"],["thx","thanks"]]	tr;keep:lfm;use:thx=감사|고마|고맙|땡큐
+fr17	fr	加V Kiwi48213或Moko77310	[]	tr;copy=Kiwi48213;copy=Moko77310
+fr18	fr	selling gold, visit www.gold-shop-example.com or add Pell_Mell on discord	[]	tr;copy=www.gold-shop-example.com;copy=Pell_Mell
+fr19	fr	wer will mit? meldet euch bei Brumm4410 oder brumm.raid@example.de	[]	tr;copy=Brumm4410;copy=brumm.raid@example.de
+fr20	fr	金币便宜出售，大量现货，安全快速到账，诚信经营十年老店，量大从优，欢迎各位老板随时咨询，需要的老板加V Kiwi48213或Moko77310	[]	tr;copy=Kiwi48213;copy=Moko77310
+fr21	fr	高价回收金币，现金秒结，长期有效，加V Kiwi48213或Moko77310，备注魔兽	[]	tr;copy=Kiwi48213;copy=Moko77310
+en11	en	добавьте меня в дискорд: discord.gg/Qx7Lm2, мой ник Volk3141	[["gg","good game"]]	tr;keep:gg;copy=discord.gg/Qx7Lm2;copy=Volk3141
+en12	en	길드원 모집합니다 디코 Haneul2077 으로 연락주세요	[]	tr;copy=Haneul2077
+en13	en	je vends mon compte, contact sur twitch.tv/Lunette99	[]	tr;copy=twitch.tv/Lunette99
+en14	en	金币出售，详情看网址www.example.cn	[]	tr;copy=www.example.cn
+en15	en	rendez-vous à 20h30 devant la banque, mon btag Lumi#88421	[]	tr;copy=Lumi#88421
+de05	de	guild recruiting for the raid, apply at https://example.org/apply before friday	[["org","Orgrimmar"]]	tr;keep:org;copy=https://example.org/apply
+de06	de	send your questions to guild.helper@example.net and we answer tomorrow	[]	tr;copy=guild.helper@example.net
+de07	de	wts \2\4FFFFFF[Linen Cloth]\3 x20, whisper Pip_Squeak or add Pipsq123	[["wts","want to sell"]]	tr;keep:wts;copy=Pip_Squeak;copy=Pipsq123
+es04	es	looking for a group tonight, add me Tarn#2741 or Tarn_42 on discord	[]	tr;copy=Tarn#2741;copy=Tarn_42
+fr22	fr	нужен хил в рейд, только 60лвл и выше	[]	tr;word=soign|heal|guéri;free=60лвл
+fr23	fr	selling cloth stacks for 2g50 each, whisper me	[]	tr;word=vend|tissu;free=2g50
+en16	en	cherche groupe niv60 pour le donjon ce soir	[]	tr;word=group|party;free=niv60
+en17	en	金币出售，诚信经营，加V：Ｋｉｗｉ４８２１３	[]	tr;word=gold|sell;copy=Ｋｉｗｉ４８２１３
+de08	de	raid ce soir à 20heures, icc10hm, venez nombreux	[]	tr;word=heute|abend;free=20heures;free=icc10hm
