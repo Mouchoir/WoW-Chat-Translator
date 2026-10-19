@@ -641,7 +641,7 @@ check(GameTooltip:IsShown() and GameTooltip.lines[1] == L.CONV_TIP_T_INLINE,
 EventRegistry:TriggerEvent("ChatFrame.OnHyperlinkLeave", ChatFrame1)
 check(not GameTooltip:IsShown(), "leaving hides the tooltip")
 EventRegistry:TriggerEvent("ChatFrame.OnHyperlinkEnter", ChatFrame1, "addon:TranslateProbe:x:" .. ns.session .. ":" .. clicked)
-check(GameTooltip:IsShown() and GameTooltip.lines[1] == L.TIP_ROWS, "hovering a row explains it")
+check(not GameTooltip:IsShown(), "hovering a row shows no tooltip (it would cover the translation)")
 EventRegistry:TriggerEvent("ChatFrame.OnHyperlinkLeave", ChatFrame1)
 EventRegistry:TriggerEvent("ChatFrame.OnHyperlinkEnter", ChatFrame1, "item:2589")
 check(not GameTooltip:IsShown(), "other links get no tooltip from us")

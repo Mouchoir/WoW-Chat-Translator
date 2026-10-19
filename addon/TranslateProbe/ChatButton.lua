@@ -449,7 +449,9 @@ end
 local function OnLinkEnter(_, frame, link)
     local kind = ParseLink(link)
     local tipT = ChatButton.WindowMode(false) and L.CONV_TIP_T_WINDOW or L.CONV_TIP_T_INLINE
-    local tip = (kind == "t" and (tipT or L.TIP_T)) or (kind == "x" and L.TIP_ROWS) or nil
+    -- No tooltip on the reserved rows: it would sit on the translation, and the helper never
+    -- paints under a game frame (measured in game on 2026-10-19).
+    local tip = kind == "t" and (tipT or L.TIP_T) or nil
     if tip and GameTooltip then
         GameTooltip:SetOwner(frame or UIParent, "ANCHOR_CURSOR")
         GameTooltip:SetText(tip, 1, 1, 1, 1, true)

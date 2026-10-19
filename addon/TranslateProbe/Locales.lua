@@ -29,7 +29,6 @@ local L = {
 
     FIRST_USE = "Translations are drawn by the TranslateProbe Helper app. Start it any time, no /reload needed. Check the setup with /tpr test.",
     TIP_T = "Translate this line (needs TranslateProbe Helper). Shift-click: translate again.",
-    TIP_ROWS = "Translation by TranslateProbe Helper. Click to hide. Nothing shown? Start the Helper (/tpr app).",
     APP_1 = "TranslateProbe Helper is a Windows app that translates chat lines with an AI model running on this PC, and draws the translation under the line.",
     APP_2 = "Start it beside WoW, before or after a click: no /reload is needed. WoW must run in a window or in windowed fullscreen.",
     APP_3 = "On each click a thin strip of coloured dots flickers for about half a second in the top-left corner: that is how the addon talks to the Helper.",
@@ -162,7 +161,6 @@ local frFR = {
 
     FIRST_USE = "Les traductions sont dessinées par l'application TranslateProbe Helper. Lance-la quand tu veux, sans /reload. Vérifie l'installation avec /tpr test.",
     TIP_T = "Traduire cette ligne (il faut TranslateProbe Helper). Maj-clic : retraduire.",
-    TIP_ROWS = "Traduction par TranslateProbe Helper. Clique pour cacher. Rien ne s'affiche ? Lance le Helper (/tpr app).",
     APP_1 = "TranslateProbe Helper est une application Windows qui traduit les lignes du chat avec un modèle d'IA qui tourne sur ce PC, et dessine la traduction sous la ligne.",
     APP_2 = "Lance-la à côté de WoW, avant ou après un clic : pas besoin de /reload. WoW doit tourner en fenêtre ou en plein écran fenêtré.",
     APP_3 = "À chaque clic, une fine bande de points colorés clignote environ une demi-seconde dans le coin en haut à gauche : c'est ainsi que l'addon parle au Helper.",
