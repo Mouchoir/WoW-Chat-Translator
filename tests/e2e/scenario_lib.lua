@@ -245,12 +245,15 @@ local function Step(frames)
     end
 end
 
-local KIND = { [0x10] = "translate", [0x11] = "cancel", [0x12] = "clear", [0x13] = "test", [0x14] = "view" }
+local KIND = { [0x10] = "translate", [0x11] = "cancel", [0x12] = "clear", [0x13] = "test", [0x14] = "view",
+    [0x15] = "colours" }
 
 local function RecordSent(msg)
     local ty = msg:byte(1)
     local ev = { kind = KIND[ty] or "unknown", bytes = #msg }
-    if ty == 0x10 or ty == 0x11 then
+    if ty == 0x15 then
+        ev.req = msg:byte(2) * 256 + msg:byte(3)
+    elseif ty == 0x10 or ty == 0x11 then
         ev.req = msg:byte(2) * 256 + msg:byte(3)
         ev.slot = msg:byte(4)
         if ty == 0x10 then
@@ -582,6 +585,11 @@ end
 
 local function Translate(slot, rows, flags, target, text)
     winReq = winReq + 1
+    -- link colours go right before their TRANSLATE, as Request.lua sends them (docs\BRIDGE.md 3b)
+    local colours = ns.Bridge.ColoursMessage(winReq, text)
+    if colours then
+        ns.Bridge.Send(colours)
+    end
     ns.Bridge.Send(ns.Bridge.TranslateMessage(winReq, slot, rows, flags, target, text, {}))
     return winReq
 end
