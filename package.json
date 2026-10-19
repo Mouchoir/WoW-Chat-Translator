@@ -1,6 +1,7 @@
 {
   "name": "translate-probe",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "description": "Test harness for the TranslateProbe WoW addon and its pixel bridge",
   "scripts": {
     "test": "node tests/run.js enUS && node tests/run.js frFR && node tests/bridge/run.js"

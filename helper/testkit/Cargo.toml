@@ -1,6 +1,7 @@
 [package]
 name = "tp_testkit"
 version = "0.1.0"
+license = "AGPL-3.0-or-later"
 edition = "2021"
 publish = false
 description = "TranslateProbe end-to-end rig: fakewow plays a recorded addon scenario in a window the Helper captures, and writes the ground truth"

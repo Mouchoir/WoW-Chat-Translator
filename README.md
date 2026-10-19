@@ -238,3 +238,15 @@ python -I tests\e2e\run.py --all --capture wgc
   Every automated run uses `--no-overlay --no-clipboard`: no window is shown and the clipboard is
   never touched.
 - `npm install` uses the lock file; everything else builds offline (`cargo --offline`).
+
+## License
+
+Copyright (C) 2026 Mouchoir.
+
+This project (the TranslateProbe addon and Translate Companion) is free software: you can
+redistribute it and/or modify it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the License, or (at your option)
+any later version. It is distributed WITHOUT ANY WARRANTY; see [LICENSE](LICENSE) for details.
+
+The translation model (Qwen3-4B, Apache-2.0) and the llama.cpp runtime (MIT) are not part of this
+repository; they keep their own licenses.
