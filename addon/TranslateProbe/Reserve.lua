@@ -227,6 +227,36 @@ function Reserve.Rows(m, slot, K)
     return rows
 end
 
+-- The hint lane of an inline card (user request U1, docs\ADDON.md "Hint lanes"): one more chat row
+-- right after the K tagged rows, so its band is [row0.yTop + K * rowPx, + rowPx]. It holds the
+-- 4-space indent of every row, then, once revealed, "No translation above? Start Translate
+-- Companion." in gold and a [Download] link (ChatButton.SuffixLinks draws it). The text starts at
+-- the tag's x0 and never passes the plate's end ((8 W + plateW) texture units from x0), so it never
+-- wraps and the Helper's background samples left of the tag and right of the plate stay clean.
+-- The longest text that fits is used: the full hint, the short one, the link alone, else nothing.
+-- revealed = false: the row's room only (spaces), for the first LANE_DELAY seconds.
+-- Returns { lane = true, hint = string|nil, download = string|nil } for SuffixLinks.
+Reserve.LANE_DELAY = 1.5        -- seconds before a hint lane shows (the Helper's first paint comes first)
+function Reserve.LaneRow(chatFrame, m, revealed)
+    local row = { lane = true }
+    if not revealed then
+        return row
+    end
+    local L = ns.L
+    local room = (8 * m.W + m.plateW) * m.tex           -- chat units from the tag's x0 to the plate's end
+    local link = "[" .. L.LANE_DOWNLOAD .. "]"
+    for _, hint in ipairs({ L.LANE_HINT, L.LANE_HINT_SHORT, "" }) do
+        local text = hint == "" and link or (hint .. " " .. link)
+        local ok, width = pcall(Reserve.Measure, chatFrame, text)
+        if ok and IsNumber(width) and width <= room then
+            row.hint = hint ~= "" and (hint .. " ") or nil
+            row.download = L.LANE_DOWNLOAD
+            return row
+        end
+    end
+    return row
+end
+
 ---------------------------------------------------------------------------- slots
 function Reserve.FreeSlot(slot)
     if slot ~= nil and owner[slot] ~= nil then

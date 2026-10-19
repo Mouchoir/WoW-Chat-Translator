@@ -39,11 +39,22 @@ local SUFFIX_START = "|n|cff9fd4ff    |H" .. LINK_PREFIX .. "x:"
 -- and readable on the chat background. It never starts a row block (the tagged rows come first).
 local GLOSS_COLOR = "e6cc80"
 local GLOSS_START = "|n|cff" .. GLOSS_COLOR .. "    |H" .. LINK_PREFIX .. "x:"
+-- The hint lane right after the tagged rows (user request U1, Reserve.LaneRow): its text in the
+-- gold of NORMAL_FONT_COLOR, readable on the chat background and apart from the light blue rows,
+-- [T] and the pale gold glossary row; then a [Download] link of our own kind "d" in the light blue
+-- of our links ([T], [Show them]), which opens the Translate Companion dialog. The hint itself is
+-- an "x" link like every row (a click hides the rows). The lane never starts a row block.
+local LANE_COLOR = "ffd100"
+local LANE_START = "|n|cff" .. LANE_COLOR .. "    |H" .. LINK_PREFIX .. "x:"
+local LINK_COLOR = "66bbff"
+local DOWNLOAD_MARK = "|H" .. LINK_PREFIX .. "d:"
 local MAX_TRACKED = 1000
 ChatButton.LINK_PREFIX = LINK_PREFIX
 ChatButton.SUFFIX_START = SUFFIX_START
 ChatButton.GLOSS_START = GLOSS_START
 ChatButton.GLOSS_COLOR = GLOSS_COLOR
+ChatButton.LANE_START = LANE_START
+ChatButton.LANE_COLOR = LANE_COLOR
 
 local tracked = {}       -- lineID -> text of a decorated readable message (memory only)
 local trackedOrder = {}  -- FIFO of tracked lineIDs, to bound memory
@@ -89,25 +100,41 @@ local function LinkBodies(text)
     return bodies
 end
 
+-- The hint lane (a { lane = true, hint, download } entry of Reserve.LaneRow): the indent and the
+-- hint in one "x" link (a space alone before the reveal, so the row keeps its height), then the
+-- [Download] link.
+local function LaneLinks(id, row)
+    local out = LANE_START .. id .. (row.hint or " ") .. "|h|r"
+    if row.download then
+        out = out .. "|cff" .. LINK_COLOR .. DOWNLOAD_MARK .. id .. "[" .. row.download .. "]|h|r"
+    end
+    return out
+end
+
 -- The rows under the message. Each row starts with SUFFIX_START (the glossary row, which begins
--- with L.SUFFIX_GLOSS, with GLOSS_START: same link, its own colour); every piece of it is a
--- link, so clicking anywhere on the rows hides them all.
+-- with L.SUFFIX_GLOSS, with GLOSS_START: same link, its own colour; the hint lane, a table entry,
+-- with LANE_START); every piece of it is a link, so clicking anywhere on the rows hides them all,
+-- except the lane's [Download], which opens the Translate Companion dialog.
 function ChatButton.SuffixLinks(lineID, rows)
     local id = ns.session .. ":" .. lineID .. "|h"
     local more = "|H" .. LINK_PREFIX .. "x:" .. id
     local glossPrefix = L.SUFFIX_GLOSS
     local out = {}
     for _, text in ipairs(rows) do
-        local bodies = LinkBodies(text)
-        if #bodies == 0 then
-            bodies[1] = ""
+        if type(text) == "table" then
+            out[#out + 1] = LaneLinks(id, text)
+        else
+            local bodies = LinkBodies(text)
+            if #bodies == 0 then
+                bodies[1] = ""
+            end
+            local isGloss = glossPrefix ~= nil and text:sub(1, #glossPrefix) == glossPrefix
+            local first = (isGloss and GLOSS_START or SUFFIX_START) .. id
+            for k, body in ipairs(bodies) do
+                out[#out + 1] = (k == 1 and first or more) .. body .. "|h"
+            end
+            out[#out + 1] = "|r"
         end
-        local isGloss = glossPrefix ~= nil and text:sub(1, #glossPrefix) == glossPrefix
-        local first = (isGloss and GLOSS_START or SUFFIX_START) .. id
-        for k, body in ipairs(bodies) do
-            out[#out + 1] = (k == 1 and first or more) .. body .. "|h"
-        end
-        out[#out + 1] = "|r"
     end
     return table.concat(out)
 end
@@ -441,6 +468,9 @@ local function OnLinkClicked(_, link, _, _, chatFrame)
         end
     elseif kind == "x" then
         ns.Request.Remove(id)
+    elseif kind == "d" then
+        -- [Download] of a hint lane: the Translate Companion dialog (the rows stay)
+        ns.CompanionDialog.Open()
     elseif kind == "r" then
         ns.Restriction.Reprint(id)
     end

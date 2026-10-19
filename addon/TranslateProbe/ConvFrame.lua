@@ -14,6 +14,10 @@
 --   (CANCEL, then the 2 s quarantine of Reserve). Only bubbles in view are ever requested, so
 --   nothing is queued while the window is hidden.
 -- * Per-row visibility: a row not entirely inside the visible thread has its tag and plate hidden.
+-- * Hint lanes (user request U1, Bubble.lua): each translated bubble has one more row of fill under
+--   its rows with "No translation above? Start Translate Companion. [Download]", which the Helper
+--   paints over; it shows 1.5 s after the lane became visible for the bubble's request, and again
+--   1.5 s after it moved (a scroll, a drag or a resize of the window: hidden while dragged).
 -- * VIEW 200: the bubble column's fill, from the thread's top to the reply card's fill bottom.
 -- Stock templates and fonts, named colours and ChatTypeInfo; no hooks on Blizzard frames, no
 -- Blizzard menus, no animation. Everything is memory only; the saved variables get the window's
@@ -239,6 +243,7 @@ local function ApplyRows(b, msg)
     if b.kind ~= "in" or msg.state ~= "translate" then
         return
     end
+    b:SetLaneReq(msg.req and msg.req.reqId or nil)
     local slot = msg.req and msg.req.slot or nil
     if b.slot ~= slot or b.K ~= msg.K then
         local resized = b.K ~= msg.K
@@ -500,6 +505,7 @@ local function ConfigureIn(b, conv, msg, m)
         b:SetOriginal(msg.text, shown)
         EstimateK(msg, m)
         b:SetRows(msg.req and msg.req.slot or nil, msg.K, SessBit())
+        b:SetLaneReq(msg.req and msg.req.reqId or nil)
     else
         b:SetPlain(msg.text)
         b:SetOriginal(nil, false)
@@ -1217,8 +1223,11 @@ function ConvFrame.Build()
     end
     -- moved by its title bar
     frame:RegisterForDrag("LeftButton")
+    -- while it moves the Helper's VIEW 200 is stale: the hint lanes hide until the move ends (and
+    -- the new VIEW is sent), then wait their 1.5 s again
     frame:SetScript("OnDragStart", function(self)
         if self.TitleContainer:IsMouseOver() then
+            ns.Bubble.SetMoving(true)
             self:StartMoving()
         end
     end)
@@ -1226,6 +1235,7 @@ function ConvFrame.Build()
         self:StopMovingOrSizing()
         SavePosition()
         ns.Reserve.SyncView(true)
+        ns.Bubble.SetMoving(false)
     end)
     local tabStrip = CreateFrame("Frame", nil, frame)
     tabStrip:SetPoint("TOPLEFT", frame, "TOPLEFT", TAB_LEFT, TAB_TOP)
@@ -1268,14 +1278,22 @@ function ConvFrame.Build()
         end
     end)
     grip:Init(frame, MIN_W, MIN_H, MAX_W, MAX_H)
+    grip:HookScript("OnMouseDown", function()
+        ns.Bubble.SetMoving(true)
+    end)
+    grip:HookScript("OnMouseUp", function()
+        ns.Bubble.SetMoving(false)
+    end)
     grip:SetOnResizeStoppedCallback(function()
         SavePosition()
         ConvFrame.Relayout()
         ns.Reserve.SyncView(true)
+        ns.Bubble.SetMoving(false)
     end)
     frame:SetScript("OnShow", function()
         PlaySound(SOUNDKIT.IG_CHARACTER_INFO_OPEN)
         ConvFrame.Relayout()
+        ns.Bubble.RefreshLanes()    -- the hint lanes wait their 1.5 s again (the reply card's too)
         Conv.MarkRead(Conv.Selected())
         ns.Reserve.StartWatch()
         ns.Reserve.SyncView(true)
@@ -1294,6 +1312,7 @@ function ConvFrame.Build()
         if GameTooltip:GetOwner() and GameTooltip:IsShown() then
             GameTooltip:Hide()
         end
+        ns.Bubble.RefreshLanes()    -- every hint lane goes with the window
         ns.Reserve.SyncView(true)
         ns.Reserve.MaybeStopWatch()
     end)

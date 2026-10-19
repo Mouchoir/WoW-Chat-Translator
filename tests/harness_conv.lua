@@ -531,10 +531,18 @@ do
         end
         return partial, wrongShown, wrongHidden
     end
-    -- scroll by half a row so rows straddle both edges
+    -- scroll by a whole number of rows and a half, so rows straddle the edges (the first offset
+    -- that cuts a row: the bubbles' heights, hint lanes included, decide which one does)
     local m = ConvFrame.Metrics()
-    scroll:SetVerticalScroll(math.max(0, scroll:GetVerticalScroll() - m.rowH * 2.5))
-    local partial, wrongShown, wrongHidden = RowState()
+    local base = scroll:GetVerticalScroll()
+    local partial, wrongShown, wrongHidden
+    for _, rows in ipairs({ 2.5, 3.5, 1.5, 4.5, 0.5 }) do
+        scroll:SetVerticalScroll(math.max(0, base - m.rowH * rows))
+        partial, wrongShown, wrongHidden = RowState()
+        if partial > 0 then
+            break
+        end
+    end
     check(partial > 0 and wrongShown == 0, "a row partly outside the thread has its tag and plate hidden (" .. partial .. " cut)")
     check(wrongHidden == 0, "every row entirely inside is shown")
     M.Wheel(scroll, 1)

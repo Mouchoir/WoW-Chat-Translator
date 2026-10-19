@@ -7,10 +7,16 @@ local addonName, ns = ...
 local L = ns.L
 
 ns.name = addonName
-ns.VERSION = "0.4.0"                        -- keep in step with the TOC
-ns.ADDON_BUILD = 3                          -- STATUS.addonBuild, bump on protocol-visible changes
+ns.VERSION = "0.5.0"                        -- keep in step with the TOC
+-- Where Translate Companion (the Windows app, WoWTranslateCompanion.exe) is downloaded: the one
+-- copy of the URL on the addon side (the dialog of CompanionDialog.lua and /tpr app show it).
+ns.COMPANION_URL = "https://github.com/Mouchoir/WoW-Chat-Translator/releases"
+ns.ADDON_BUILD = 4                          -- STATUS.addonBuild, bump on protocol-visible changes
                                             -- (2: TRANSLATE rows 1..6, 2026-10-18; 3: TRANSLATE
-                                            -- reply and copy flags, 2026-10-19)
+                                            -- reply and copy flags, 2026-10-19; 4: a hint lane
+                                            -- under every card, 2026-10-19, which Translate
+                                            -- Companion 0.4.0 covers: an older one shows "older
+                                            -- than the addon")
 ns.sessionId = math.random(1, 65535)        -- u16 for the bridge, new on every UI load
 ns.session = tostring(ns.sessionId)         -- string used in links (link clicks compare strings)
 ns.inits = {}

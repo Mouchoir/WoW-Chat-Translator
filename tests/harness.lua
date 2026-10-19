@@ -282,12 +282,15 @@ local function ExpectedK(text, plateW, fontH, factor)
     local rowsSrc = width / plateW     -- not rounded up before the factor
     return math.min(6, math.max(1, math.ceil(rowsSrc * factor - 0.15)))
 end
-local function RowsFor(cf, lineID, slot, K, instant)
+-- The suffix a click writes: K tagged rows, the hint lane (spaces until revealed, then its text:
+-- user request U1), then the instant rows.
+local function RowsFor(cf, lineID, slot, K, instant, revealed)
     local m = Reserve.Metrics(cf)
     local rows = {}
     for r = 0, K - 1 do
         rows[#rows + 1] = Bridge.TagMarkup(slot, r, ns.sessionId % 2, m.W, m.H) .. Bridge.PlateMarkup(m.plateW, m.H)
     end
+    rows[#rows + 1] = Reserve.LaneRow(cf, m, revealed == true)
     for _, line in ipairs(instant or {}) do
         rows[#rows + 1] = ChatButton.Safe(line)
     end
@@ -300,7 +303,7 @@ check(not fr or L.LOADED:find("Tape", 1, true), "French strings on frFR")
 check(SLASH_TRANSLATEPROBE1 == "/tprobe" and SLASH_TRANSLATEPROBE2 == "/tpr" and slashFn ~= nil, "slash command registered")
 check(type(ns.sessionId) == "number" and ns.sessionId >= 1 and ns.sessionId <= 65535 and ns.session == tostring(ns.sessionId),
     "session id is a u16 and its string form is used in links")
-check(ns.ADDON_BUILD == 3 and Bridge.VERSION == 2 and Bridge.TEST_SLOT == 127, "addon build 3, bridge v2")
+check(ns.ADDON_BUILD == 4 and Bridge.VERSION == 2 and Bridge.TEST_SLOT == 127, "addon build 4, bridge v2")
 check(CountPrinted((L.INIT_FAILED:gsub("%%s", ""))) == 0, "no init failure printed")
 
 section("bridge builders")
@@ -508,6 +511,7 @@ check(m3 and m3.ok and m3.W == 4 and m3.H == 18 and m3.plateW == 283, "ChatFrame
 local base1, base3 = EntryFor(ChatFrame1, clicked).message, EntryFor(ChatFrame3, clicked).message
 local n0 = #sent
 M.Click(ButtonOf(clicked))
+local clickFrame = math.floor(M.Now() * 60 + 0.5)
 local msgs = Since(n0)
 check(#msgs == 2 and msgs[1].kind == "view" and msgs[2].kind == "translate" and AllOk(msgs),
     "first click: VIEW, then TRANSLATE, both well formed")
@@ -525,7 +529,7 @@ local instant = ChatButton.InstantLines(clicked, clickText)
 check(#instant == 2 and instant[1] == L.SUFFIX_GLOSS .. G.Describe(clickText, db.target)
     and instant[2] == L.NAME_LINE:format("ro ro"), "instant rows: glossary, then the romanized name")
 local e1c, e3c = EntryFor(ChatFrame1, clicked).message, EntryFor(ChatFrame3, clicked).message
-check(e1c == base1 .. RowsFor(ChatFrame1, clicked, 0, K, instant), "ChatFrame1: K tagged rows, then glossary, then name")
+check(e1c == base1 .. RowsFor(ChatFrame1, clicked, 0, K, instant), "ChatFrame1: K tagged rows, the lane, then glossary, then name")
 check(e3c == base3 .. RowsFor(ChatFrame3, clicked, 0, K, instant), "ChatFrame3: rows sized with its own metrics")
 local xLink = "|Haddon:TranslateProbe:x:" .. ns.session .. ":" .. clicked .. "|h"
 local firstRow = SUFFIX_START .. ns.session .. ":" .. clicked .. "|h"
@@ -540,7 +544,7 @@ for body in e1c:gmatch("|Haddon:TranslateProbe:x:[^|]*|h(.-)|h") do
     end
 end
 check(oneTexturePerLink, "no link holds more than one texture (the client draws only the first)")
-check(Lines(e1c) == K + 2 and Count(e1c, "|TInterface\\Buttons\\WHITE8X8:") == 9 * K, "K rows of 8 tag blocks and a plate")
+check(Lines(e1c) == K + 3 and Count(e1c, "|TInterface\\Buttons\\WHITE8X8:") == 9 * K, "K rows of 8 tag blocks and a plate, and the lane")
 check(Printed(L.FIRST_USE) and db.helpShown == true, "first click ever explains the helper")
 check(Request.Count() == 1 and Reserve.SlotsInUse() == 1 and Reserve.SlotOwner(0) == clicked, "one active request on slot 0")
 local pairsByTerm = {}
@@ -601,6 +605,11 @@ n0 = #sent
 M.Click(ButtonOf(clicked))
 check(#sent == n0, "a second click within 1 s is ignored")
 M.Tick(61)
+-- 1.5 s after the click the hint lane gets its text: the one rewrite of the line after the click
+M.Tick(math.max(0, clickFrame + 90 - math.floor(M.Now() * 60 + 0.5)))
+e1c, e3c = EntryFor(ChatFrame1, clicked).message, EntryFor(ChatFrame3, clicked).message
+check(e1c == base1 .. RowsFor(ChatFrame1, clicked, 0, K, instant, true)
+    and e3c == base3 .. RowsFor(ChatFrame3, clicked, 0, K, instant, true), "the hint lane is revealed after 1.5 s")
 M.Click(ButtonOf(clicked))
 msgs = Since(n0, "translate")
 check(#msgs == 1 and msgs[1].reqId == tr1.reqId and msgs[1].slot == tr1.slot and msgs[1].flags == 2,
@@ -632,7 +641,8 @@ check(dePairs.lf2m == "looking for 2 more" and dePairs.cheap == nil, "de pairs: 
 slash("target " .. (fr and "fr" or "en"))
 -- the glossary row starts with ChatButton.GLOSS_START (its own colour, D11), the others with SUFFIX_START
 check(Count(EntryFor(ChatFrame1, clicked).message, SUFFIX_START) + Count(EntryFor(ChatFrame1, clicked).message,
-    ChatButton.GLOSS_START) == K + 2, "rows never duplicated (the rewrite cuts first)")
+    ChatButton.GLOSS_START) == K + 2 and Count(EntryFor(ChatFrame1, clicked).message, ChatButton.LANE_START) == 1,
+    "rows never duplicated (the rewrite cuts first)")
 
 section("tooltips")
 EventRegistry:TriggerEvent("ChatFrame.OnHyperlinkEnter", ChatFrame1, ButtonOf(clicked), "[T]")
@@ -741,6 +751,7 @@ M.Tick(1)
 M.Click(ButtonOf(leaving))
 local leavingReq, leavingSlot = Request.Get(leaving)
 check(Request.Count() == 1 and Reserve.IsWatching(), "a request starts the watcher")
+M.Tick(91)      -- the hint lane's one rewrite, 1.5 s after the click
 local beforeLeave = Snapshot()
 n0 = #sent
 M.Tick(60 * 20)
@@ -787,9 +798,9 @@ check(#msgs == 1 and msgs[1].ok and #msgs[1].text <= 1024 and Count(msgs[1].text
     and msgs[1].rows == 6, "a long line: text cut on its own, 6 rows reserved")
 local longEntry = EntryFor(ChatFrame1, longLine).message
 local longSlot = msgs[1].slot
-check(Lines(longEntry) == 6 and Count(longEntry, "|TInterface\\Buttons\\WHITE8X8:") == 9 * 6
+check(Lines(longEntry) == 7 and Count(longEntry, "|TInterface\\Buttons\\WHITE8X8:") == 9 * 6
     and longEntry:find(RowsFor(ChatFrame1, longLine, longSlot, 6), 1, true),
-    "6 reserved rows under the line, each a tag and a plate")
+    "6 reserved rows under the line, each a tag and a plate, then the lane")
 check(Bridge.TagMarkup(longSlot, 4, 1, 4, 14) == Bridge.TagMarkup(longSlot, 0, 1, 4, 14)
     and Bridge.TagMarkup(longSlot, 5, 1, 4, 14) == Bridge.TagMarkup(longSlot, 1, 1, 4, 14)
     and Bridge.TagMarkup(longSlot, 3, 1, 4, 14) ~= Bridge.TagMarkup(longSlot, 0, 1, 4, 14),
@@ -1276,7 +1287,8 @@ local plain = Deliver("CHAT_MSG_SAY", "lfm dm", "Bob")
 M.Tick(1)
 M.Click(ButtonOf(plain))
 local plainK = Request.Get(plain) and select(3, Request.Get(plain))
-check(plainK and Lines(EntryFor(ChatFrame1, plain).message) == plainK, "without the glossary row: only the K reserved rows")
+check(plainK and Lines(EntryFor(ChatFrame1, plain).message) == plainK + 1,
+    "without the glossary row: only the K reserved rows and the lane")
 slash("show on")
 check(db.glossShow == true and Printed(L.SHOW_ON), "show on")
 
@@ -1317,13 +1329,14 @@ check(#Reserve.View() == 0, "a secret chat rectangle is left out of VIEW")
 M.SetLockdown(false)
 M.SetRectSecret(ChatFrame1, false)
 slash("info")
-check(Printed("1.60.1") and Printed(L.INFO_VERSION:format("0.4.0", ns.ADDON_BUILD, ns.sessionId))
+check(Printed("1.60.1") and Printed(L.INFO_VERSION:format("0.5.0", ns.ADDON_BUILD, ns.sessionId))
     and Printed(L.INFO_FRAME:format("ChatFrame1", L.YES, L.YES)), "info prints version, client and chat frames")
 check(Printed(L.INFO_REQUESTS:format(Request.Count(), Reserve.SlotsInUse())), "info prints requests and slots")
 slash("debug")
 check(Printed((L.DEBUG_REQUESTS:match("^[^%%]*"))) and Printed((L.DEBUG_SLOTS:match("^[^%%]*"))), "debug prints the counters")
 slash("app")
-check(Printed(L.APP_1) and Printed(L.APP_4), "app explains the helper")
+check(Printed(L.APP_1) and Printed(L.APP_4) and Printed(L.APP_DOWNLOAD:format("https://github.com/Mouchoir/WoW-Chat-Translator/releases")),
+    "app explains Translate Companion and prints its download page")
 slash("help")
 check(Printed(L.HELP_CLICK) and Printed(L.HELP_TEST_ROWS) and Printed(L.HELP_OPTIONS) and Printed(L.HELP_HELP),
     "help lists the commands (options included) and the click hint")

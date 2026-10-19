@@ -320,6 +320,7 @@ local handlers = {
         for _, key in ipairs({ "APP_1", "APP_2", "APP_3", "APP_4" }) do
             ns.Print(L[key])
         end
+        ns.Printf(L.APP_DOWNLOAD, ns.COMPANION_URL)
     end,
     debug = function()
         local r, s, x = ns.Request.Counters(), ns.Reserve.Counters(), ns.Restriction.Counters()

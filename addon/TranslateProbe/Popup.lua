@@ -10,7 +10,9 @@
 --
 -- Escape: the popup is in UISpecialFrames; while it is shown the conversation window leaves that
 -- list (and comes back a frame after the popup hides), so the first Escape closes the popup only.
--- No keyboard capture: EnableKeyboard is protected in combat.
+-- No keyboard capture: EnableKeyboard is protected in combat. Other frames of ours that sit over
+-- the window (the Translate Companion dialog) hold the window out of the list the same way, with
+-- Popup.HoldWindowEscape(key) on show and Popup.ReleaseWindowEscape(key) on hide.
 local _, ns = ...
 
 local Popup = {}
@@ -27,9 +29,10 @@ local POPUP_NAME = "TranslateProbePopup"
 local frame
 local rows, titles, seps = {}, {}, {}
 local currentOwner
-local suspended = false     -- the window was taken out of UISpecialFrames by this popup
+local holders = {}          -- key -> true: frames shown that keep the window out of UISpecialFrames
+local suspended = false     -- the window was taken out of UISpecialFrames by a holder
 local readdPending = false  -- a re-add is scheduled for the next frame
-local generation = 0        -- bumped on every show: a re-add scheduled before it is dropped
+local generation = 0        -- bumped on every hold: a re-add scheduled before it is dropped
 
 local function AddSpecial(name)
     if not tContains(UISpecialFrames, name) then
@@ -45,6 +48,42 @@ local function RemoveSpecial(name)
         end
     end
     return false
+end
+
+-- A frame over the window shows (key: any value): the window leaves the Escape list while any
+-- holder is shown, so the first Escape closes the holders only.
+function Popup.HoldWindowEscape(key)
+    holders[key] = true
+    generation = generation + 1
+    if readdPending then
+        -- held again before the re-add of the previous holder ran: the window is still out of
+        -- the list, keep it out (the pending re-add sees the new generation and does nothing)
+        readdPending = false
+        suspended = true
+    elseif not suspended then
+        suspended = RemoveSpecial(WINDOW_NAME)
+    end
+end
+
+-- A holder hides: once none is left, the window comes back to the list one frame later (not
+-- during CloseSpecialWindows' traversal of the list).
+function Popup.ReleaseWindowEscape(key)
+    holders[key] = nil
+    if next(holders) ~= nil or not suspended then
+        return
+    end
+    suspended = false
+    readdPending = true
+    local gen = generation
+    C_Timer.After(0, function()
+        if gen ~= generation or next(holders) ~= nil then
+            return
+        end
+        readdPending = false
+        if _G[WINDOW_NAME] then
+            AddSpecial(WINDOW_NAME)
+        end
+    end)
 end
 
 local function Rgb(color)
@@ -82,34 +121,12 @@ local function Build()
     end)
     frame:SetScript("OnShow", function(self)
         self:RegisterEvent("GLOBAL_MOUSE_DOWN")
-        generation = generation + 1
-        if readdPending then
-            -- reopened before the re-add of the previous popup ran: the window is still out of
-            -- the list, keep it out (the pending re-add sees the new generation and does nothing)
-            readdPending = false
-            suspended = true
-        else
-            suspended = RemoveSpecial(WINDOW_NAME)
-        end
+        Popup.HoldWindowEscape("popup")
     end)
     frame:SetScript("OnHide", function(self)
         self:UnregisterEvent("GLOBAL_MOUSE_DOWN")
         currentOwner = nil
-        if suspended then
-            suspended = false
-            readdPending = true
-            local gen = generation
-            -- not during CloseSpecialWindows' traversal of the list
-            C_Timer.After(0, function()
-                if gen ~= generation or self:IsShown() then
-                    return
-                end
-                readdPending = false
-                if _G[WINDOW_NAME] then
-                    AddSpecial(WINDOW_NAME)
-                end
-            end)
-        end
+        Popup.ReleaseWindowEscape("popup")
         if GameTooltip:GetOwner() and GameTooltip:GetOwner():GetParent() == self then
             GameTooltip:Hide()
         end

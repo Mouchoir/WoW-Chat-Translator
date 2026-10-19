@@ -1,9 +1,9 @@
 -- Pixel bridge, addon side (protocol v2; the normative spec is docs\BRIDGE.md).
 --
--- The addon cannot write files or sockets, so it sends requests to TranslateProbe Helper by
--- drawing a strip of coloured 2x2 physical-pixel blocks at the top-left corner of the screen,
--- which the helper captures and decodes. Nothing ever comes back through the strip: each message
--- stays on screen long enough to be captured several times, and the helper drops repeats.
+-- The addon cannot write files or sockets, so it sends requests to Translate Companion (the
+-- Helper) by drawing a strip of coloured 2x2 physical-pixel blocks at the top-left corner of the
+-- screen, which the helper captures and decodes. Nothing ever comes back through the strip: each
+-- message stays on screen long enough to be captured several times, and the helper drops repeats.
 -- The strip is only shown while a message is queued (about 0.5 s per click) and hidden otherwise.
 --
 -- Strip: block k at x = 2 * floor(k / 2), y = 2 * (k % 2) physical px from the client's top-left,

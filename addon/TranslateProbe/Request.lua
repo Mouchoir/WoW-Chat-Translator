@@ -3,6 +3,13 @@
 -- nothing ever comes back to Lua, so a request lives here until its rows are removed. The
 -- conversation window's bubbles send their TRANSLATE through StartWindow and DropWindow below.
 -- State is memory only.
+--
+-- Hint lane (user request U1): the rows end with one more row, the lane (Reserve.LaneRow), which
+-- the Helper paints over with the chat background whenever it paints the card. The addon cannot
+-- know whether the Helper runs, so the lane says "No translation above? Start Translate
+-- Companion. [Download]" and only Translate Companion hides it. It holds spaces at the click and
+-- gets its text Reserve.LANE_DELAY (1.5 s) later, in one more rewrite of the line (a C_Timer, no
+-- OnUpdate), so the hint never flashes before the Helper's first paint. It goes with the rows.
 local _, ns = ...
 local L = ns.L
 
@@ -12,7 +19,7 @@ ns.Request = Request
 local DEBOUNCE = 1.0
 local FLAG_NO_CACHE, FLAG_PLATE = 1, 2
 
-local active = {}       -- lineID -> { reqId, slot, K, target, flags }
+local active = {}       -- lineID -> { reqId, slot, K, target, flags, instant, lane }
 local byReq = {}        -- reqId -> lineID
 local lastClick = {}    -- lineID -> GetTime() of the last accepted click
 local lastClickCount = 0
@@ -21,7 +28,7 @@ local nextReq = 0
 local count = 0
 local counters = {
     clicks = 0, debounced = 0, sent = 0, resent = 0, restarted = 0, deferred = 0, tooOld = 0,
-    removed = 0, expired = 0, dropped = 0, cleared = 0, windowSent = 0, windowDropped = 0,
+    removed = 0, expired = 0, dropped = 0, cleared = 0, windowSent = 0, windowDropped = 0, lanes = 0,
 }
 
 -- 1..65535, wraps to 1. Shared by chat lines, window bubbles and the window's reply.
@@ -76,6 +83,34 @@ local function NoteClick(lineID, now)
             end
         end
     end
+end
+
+-- The suffix of a request's line, per chat frame: K tagged rows, the hint lane (spaces until
+-- revealed), then the instant rows (glossary, name).
+local function Suffix(slot, K, instant, revealed)
+    return function(frame)
+        local m = ns.Reserve.Metrics(frame)
+        if not (m and m.ok) then
+            return nil
+        end
+        local rows = ns.Reserve.Rows(m, slot, K)
+        rows[#rows + 1] = ns.Reserve.LaneRow(frame, m, revealed)
+        for _, line in ipairs(instant) do
+            rows[#rows + 1] = ns.ChatButton.Safe(line)
+        end
+        return rows
+    end
+end
+
+-- LANE_DELAY after the click: the lane gets its hint, unless the rows went meanwhile (removed,
+-- the line gone, /tpr clear) or were made again for a newer click.
+local function RevealLane(lineID, a)
+    if active[lineID] ~= a or a.lane ~= "pending" then
+        return
+    end
+    a.lane = "shown"
+    counters.lanes = counters.lanes + 1
+    ns.ChatButton.SetSuffix(lineID, Suffix(a.slot, a.K, a.instant, true))
 end
 
 function Request.Start(lineID, chatFrame, shift)
@@ -137,17 +172,7 @@ function Request.Start(lineID, chatFrame, shift)
     end
     local K = ns.Reserve.EstimateRows(chatFrame, ns.Glossary.VisibleText(text), target)
     local instant = ns.ChatButton.InstantLines(lineID, text)
-    local n = ns.ChatButton.SetSuffix(lineID, function(frame)
-        local m = ns.Reserve.Metrics(frame)
-        if not (m and m.ok) then
-            return nil
-        end
-        local rows = ns.Reserve.Rows(m, slot, K)
-        for _, line in ipairs(instant) do
-            rows[#rows + 1] = ns.ChatButton.Safe(line)
-        end
-        return rows
-    end)
+    local n = ns.ChatButton.SetSuffix(lineID, Suffix(slot, K, instant, false))
     if n == 0 then
         counters.tooOld = counters.tooOld + 1
         ns.Reserve.FreeSlot(slot)
@@ -156,13 +181,17 @@ function Request.Start(lineID, chatFrame, shift)
     end
     deferredRow[lineID] = nil
 
-    a = { reqId = NextReqId(), slot = slot, K = K, target = target, flags = Flags(shift) }
+    a = { reqId = NextReqId(), slot = slot, K = K, target = target, flags = Flags(shift), instant = instant,
+        lane = "pending" }
     active[lineID] = a
     byReq[a.reqId] = lineID
     count = count + 1
     counters.sent = counters.sent + 1
     SendTranslate(a, marked, glossPairs)
     ns.Reserve.StartWatch()
+    C_Timer.After(ns.Reserve.LANE_DELAY, function()
+        RevealLane(lineID, a)
+    end)
     if not ns.db.helpShown then
         ns.db.helpShown = true
         ns.Print(L.FIRST_USE)
@@ -281,6 +310,12 @@ function Request.Get(lineID)
     if a then
         return a.reqId, a.slot, a.K, a.flags, a.target
     end
+end
+
+-- "pending" (spaces) or "shown" (the hint) for a line's hint lane, nil without a request (tests).
+function Request.LaneState(lineID)
+    local a = active[lineID]
+    return a and a.lane or nil
 end
 
 function Request.Counters()

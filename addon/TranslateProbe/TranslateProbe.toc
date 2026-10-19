@@ -1,8 +1,8 @@
 ## Interface: 16001
 ## Title: TranslateProbe
-## Notes: Click [T] after a player chat line to translate it. Translations are drawn by the TranslateProbe Helper app (local AI, no /reload).
+## Notes: Click [T] after a player chat line to translate it. Translations are drawn by the Translate Companion app (local AI, no /reload).
 ## Author: Mouchoir
-## Version: 0.4.0
+## Version: 0.5.0
 ## SavedVariables: TranslateProbeDB
 
 Locales.lua
@@ -23,6 +23,7 @@ Conversations.lua
 Bubble.lua
 Channels.lua
 Consent.lua
+CompanionDialog.lua
 Composer.lua
 ConvFrame.lua
 Commands.lua
