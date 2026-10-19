@@ -50,23 +50,34 @@ local MIN_COLS = { [0] = 192, [1] = 384, [2] = 576 }   -- floor for the maxCols 
 local MIN_SCREEN_COLS = 200                    -- floor for a degenerate screen size: 64 B of chunk data in mono
 local MAX_TEXT, MAX_TARGET, MAX_PAIRS, MAX_TERM, MAX_MEANING, MAX_PAIR_BYTES = 1024, 8, 8, 48, 120, 512
 local MAX_VIEWS = 4
-local FLAGS_MASK = 3                           -- bit0 noCache, bit1 plate; the other bits are 0
+-- TRANSLATE flags: bit0 noCache, bit1 plate, bit2 reply (the conversation window's reply card:
+-- row 0 is the Helper's status, rows 1.. the text), bit3 copy (the Helper may put the final
+-- translation in the clipboard; only with reply). Bits 4-7 are 0.
+local FLAG_NOCACHE, FLAG_PLATE, FLAG_REPLY, FLAG_COPY = 1, 2, 4, 8
+local FLAGS_MASK = 15
 
 -- Timing (ms)
 local HOLD_MS, ROT_HOLD_MS, EXPOSE_MS, CREDIT_CAP_MS = 50, 70, 400, 100
 
 -- Row tags and plate
 local TEX_TAG = "|TInterface\\Buttons\\WHITE8X8:%d:%d:0:0:8:8:0:8:0:8:%d:%d:%d|t"   -- height, width, r, g, b
-local TAG_SYNC = { { 255, 0, 255 }, { 0, 255, 0 } }                                 -- magenta, green
+local TAG_SYNC = { { 255, 0, 255 }, { 0, 255, 0 } }                                 -- art-ok: protocol colour
 local TAG_DIGIT = { [0] = { 0, 0, 0 }, { 255, 0, 0 }, { 0, 0, 255 }, { 255, 255, 0 }, { 0, 255, 255 },
-    { 255, 255, 255 } }                        -- black, red, blue, yellow, cyan, white
-local PLATE_RGB = { 32, 40, 64 }
+    { 255, 255, 255 } }                        -- art-ok: protocol colour (black, red, blue, yellow, cyan, white)
+local PLATE_RGB = { 32, 40, 64 }               -- art-ok: protocol colour
+-- Opaque interior of the conversation window's bubbles and reply card (docs\BRIDGE.md section
+-- 8c): it fails the plate prediction and the hue rule, so the Helper never takes it for a plate.
+local BUBBLE_RGB = { 36, 30, 24 }              -- art-ok: protocol colour
 
 Bridge.VERSION = VERSION
 Bridge.TEST_SLOT = 127
 Bridge.PLATE_RGB = PLATE_RGB
+Bridge.BUBBLE_RGB = BUBBLE_RGB
 Bridge.LEVELS = LEVELS
 Bridge.MODES = MODE_NAMES
+Bridge.FLAG_NOCACHE, Bridge.FLAG_PLATE, Bridge.FLAG_REPLY, Bridge.FLAG_COPY = FLAG_NOCACHE, FLAG_PLATE, FLAG_REPLY,
+    FLAG_COPY
+Bridge.FLAGS_MASK = FLAGS_MASK
 
 ---------------------------------------------------------------------------- bytes
 local CRC_T = {}
@@ -173,10 +184,20 @@ end
 -- pairs: array of { term, meaning } (the glossary pairs matched in this line). Pairs are cut to
 -- 48 and 120 bytes; at most 8 are sent and they stop before 512 bytes (2 + #term + #meaning each).
 -- Integers are written as given (clamped to their field width): the helper refuses values out of
--- range rather than the addon remapping them.
+-- range rather than the addon remapping them. Flags are masked to bits 0-3 and the copy bit is
+-- dropped unless the reply bit is set (the Helper never copies an incoming message); a reply
+-- without the plate bit or with fewer than 2 rows is written as given and refused by the Helper.
+local function TranslateFlags(flags)
+    flags = band(Clamp(flags, 0, 255), FLAGS_MASK)
+    if band(flags, FLAG_COPY) ~= 0 and band(flags, FLAG_REPLY) == 0 then
+        flags = flags - FLAG_COPY
+    end
+    return flags
+end
+
 function Bridge.TranslateMessage(reqId, slot, rows, flags, target, text, pairs)
     text = CutMarked(type(text) == "string" and text or "", MAX_TEXT)
-    local parts = { char(MSG_TRANSLATE), U16(reqId), U8(slot), U8(rows), char(band(Clamp(flags, 0, 255), FLAGS_MASK)),
+    local parts = { char(MSG_TRANSLATE), U16(reqId), U8(slot), U8(rows), char(TranslateFlags(flags)),
         Str8(target, MAX_TARGET), U16(#text), text }
     local out, n, used = {}, 0, 0
     if type(pairs) == "table" then
@@ -285,6 +306,23 @@ end
 -- Inline markup of the plate drawn right after a tag.
 function Bridge.PlateMarkup(w, h)
     return format(TEX_TAG, Clamp(h, 1, 4096), Clamp(w, 1, 4096), PLATE_RGB[1], PLATE_RGB[2], PLATE_RGB[3])
+end
+
+-- Colours the 8 Textures of a tag drawn by a frame (the conversation window draws its tags with
+-- textures, not inline markup): textures[1..8] get the sync pair then the digits of
+-- (slot, row % 4, sessBit), opaque. Same colours as TagColors, without allocating.
+function Bridge.ApplyTag(textures, slot, row, sessBit)
+    local payload = floor(slot) % 128 * 8 + floor(row) % 4 * 2 + floor(sessBit) % 2
+    local v = payload * 32 + Bridge.Crc5(payload)
+    for i = 8, 3, -1 do
+        local c = TAG_DIGIT[v % 6]
+        textures[i]:SetColorTexture(c[1] / 255, c[2] / 255, c[3] / 255, 1)
+        v = floor(v / 6)
+    end
+    for i = 1, 2 do
+        local c = TAG_SYNC[i]
+        textures[i]:SetColorTexture(c[1] / 255, c[2] / 255, c[3] / 255, 1)
+    end
 end
 
 ---------------------------------------------------------------------------- capacity

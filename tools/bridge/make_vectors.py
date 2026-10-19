@@ -4,7 +4,8 @@
                               block colours) at the same game frames; the Rust decoder must decode
                               every frame and rebuild every message
   tags.json                   every row tag (slot 0..127, row 0..3, sessBit 0..1) plus markup samples
-  messages.json               message builder inputs with the expected bytes
+  messages.json               message builder inputs with the expected bytes, plus "raw" byte strings
+                              no builder writes (parser-only cases); each with the reference parse
   strips.json                 distorted strip captures with the reference decoder's verdict
 
 Usage: python -I tools/bridge/make_vectors.py [out_dir]   (default: tests/vectors next to tools/)
@@ -283,6 +284,32 @@ def make_messages():
     tr("worst case", 16, 17, 4, 3, "zh-TW", "\U0001F600" * 256, [("t" * 48, "m" * 120) for _ in range(8)])
     tr("6 rows (the most since 2026-10-18)", 17, 18, 6, 2, "fr", "lange Zeile", [])
     tr("7 rows refused", 18, 19, 7, 2, "fr", "x", [])
+    # reply and copy (2026-10-19, STATUS.addonBuild 3): copy needs reply; reply needs the plate,
+    # 2..6 rows and an explicit language code. The builder only drops copy without reply.
+    tr("reply (flags 6)", 257, 126, 2, 6, "de", "on part ?", [])
+    tr("reply with copy (flags 14), the BRIDGE.md example", 258, 126, 3, 14, "de", "on part dans 5 min ?", [])
+    tr("reply with copy and noCache on 6 rows (flags 15)", 259, 126, 6, 15, "zh-TW", "lf heal", [])
+    tr("reply without the plate refused (flags 4)", 260, 126, 3, 4, "de", "x", [])
+    tr("copy alone dropped by the builder (flags 8 -> 0)", 261, 20, 1, 8, "fr", "x", [])
+    tr("copy and plate without reply dropped to plate (flags 10 -> 2)", 262, 21, 2, 10, "fr", "x", [])
+    tr("reply and copy without the plate refused (flags 12)", 263, 126, 3, 12, "de", "x", [])
+    tr("reply on 1 row refused (flags 6, rows 1)", 264, 126, 1, 6, "de", "x", [])
+    tr("reply on 7 rows refused", 265, 126, 7, 14, "de", "x", [])
+    tr("reply to an undecided language refused (target ?)", 266, 126, 3, 14, "?", "x", [])
+    tr("reply target with a digit refused", 267, 126, 3, 14, "de1", "x", [])
+    tr("reply on another slot (any 0..126 is valid)", 268, 0, 2, 6, "fr", "x", [("lf", "cherche")])
+
+    def raw(note, b):
+        out.append({"fn": "raw", "note": note, "hex": b.hex()})
+
+    # bytes no builder writes: the parsers must refuse them
+    base = lambda flags, rows=3: bytes([0x10, 0, 1, 126, rows, flags, 2]) + b"de" + bytes([0, 1]) + b"x" + bytes([0])
+    raw("raw: copy alone refused (flags 8)", base(8))
+    raw("raw: copy and plate without reply refused (flags 10)", base(10))
+    raw("raw: bit 4 refused (flags 16)", base(16))
+    raw("raw: bit 7 refused (flags 128)", base(128))
+    raw("raw: reply with copy accepted (flags 14)", base(14))
+    raw("raw: reply on 2 rows accepted (flags 6, rows 2)", base(6, 2))
     out.append({"fn": "cancel", "args": [513, 126], "hex": P.msg_cancel(513, 126).hex()})
     out.append({"fn": "cancel", "args": [70000, 300], "hex": P.msg_cancel(70000, 300).hex()})
     out.append({"fn": "clear", "args": [], "hex": P.msg_clear().hex()})

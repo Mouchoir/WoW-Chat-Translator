@@ -16,7 +16,8 @@ ns.Bridge = Bridge
 local MSG_TRANSLATE, MSG_CANCEL, MSG_CLEAR, MSG_TEST, MSG_VIEW = 0x10, 0x11, 0x12, 0x13, 0x14
 local MAX_TEXT, MAX_TARGET, MAX_PAIRS, MAX_TERM, MAX_MEANING, MAX_PAIR_BYTES = 1024, 8, 8, 48, 120, 512
 local MAX_VIEWS = 4
-local FLAGS_MASK = 3
+local FLAG_NOCACHE, FLAG_PLATE, FLAG_REPLY, FLAG_COPY = 1, 2, 4, 8
+local FLAGS_MASK = 15
 local MODE_NAMES = { [0] = "dense", [1] = "robust", [2] = "mono" }
 local MODE_BY_NAME = { dense = 0, robust = 1, mono = 2 }
 local TEX_TAG = "|TInterface\\Buttons\\WHITE8X8:%d:%d:0:0:8:8:0:8:0:8:%d:%d:%d|t"
@@ -24,10 +25,15 @@ local TAG_SYNC = { { 255, 0, 255 }, { 0, 255, 0 } }
 local TAG_DIGIT = { [0] = { 0, 0, 0 }, { 255, 0, 0 }, { 0, 0, 255 }, { 255, 255, 0 }, { 0, 255, 255 },
     { 255, 255, 255 } }
 local PLATE_RGB = { 32, 40, 64 }
+local BUBBLE_RGB = { 36, 30, 24 }
 
 Bridge.VERSION = 2
 Bridge.TEST_SLOT = 127
 Bridge.PLATE_RGB = PLATE_RGB
+Bridge.BUBBLE_RGB = BUBBLE_RGB
+Bridge.FLAG_NOCACHE, Bridge.FLAG_PLATE, Bridge.FLAG_REPLY, Bridge.FLAG_COPY = FLAG_NOCACHE, FLAG_PLATE, FLAG_REPLY,
+    FLAG_COPY
+Bridge.FLAGS_MASK = FLAGS_MASK
 Bridge.LEVELS = { 0, 104, 146, 255 }
 Bridge.MODES = MODE_NAMES
 Bridge.IS_STUB = true
@@ -95,9 +101,18 @@ local function Str8(s, n)
     return char(#s) .. s
 end
 
+-- Bits 0-3 kept; copy dropped unless reply (as the real Bridge.lua, without the bit library).
+local function TranslateFlags(flags)
+    flags = Clamp(flags, 0, 255) % (FLAGS_MASK + 1)
+    if flags >= FLAG_COPY and floor(flags / FLAG_REPLY) % 2 == 0 then
+        flags = flags - FLAG_COPY
+    end
+    return flags
+end
+
 function Bridge.TranslateMessage(reqId, slot, rows, flags, target, text, pairs)
     text = CutMarked(type(text) == "string" and text or "", MAX_TEXT)
-    local parts = { char(MSG_TRANSLATE), U16(reqId), U8(slot), U8(rows), char(Clamp(flags, 0, 255) % (FLAGS_MASK + 1)),
+    local parts = { char(MSG_TRANSLATE), U16(reqId), U8(slot), U8(rows), char(TranslateFlags(flags)),
         Str8(target, MAX_TARGET), U16(#text), text }
     local out, n, used = {}, 0, 0
     if type(pairs) == "table" then
@@ -199,6 +214,14 @@ end
 
 function Bridge.PlateMarkup(w, h)
     return format(TEX_TAG, Clamp(h, 1, 4096), Clamp(w, 1, 4096), PLATE_RGB[1], PLATE_RGB[2], PLATE_RGB[3])
+end
+
+function Bridge.ApplyTag(textures, slot, row, sessBit)
+    local colors = Bridge.TagColors(slot, row, sessBit)
+    for i = 1, 8 do
+        local c = colors[i]
+        textures[i]:SetColorTexture(c[1] / 255, c[2] / 255, c[3] / 255, 1)
+    end
 end
 
 ---------------------------------------------------------------------------- stub transport

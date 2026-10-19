@@ -2,7 +2,7 @@
 -- Globals set by run.js: SRC_BRIDGE (the addon file), then TRACE / TAGS / MESSAGES (vectors).
 TEST_FAILURES = 0
 local counts = { traces = 0, ticks = 0, frames = 0, blocks = 0, setColor = 0, tags = 0, markup = 0, messages = 0,
-    api = 0 }
+    raw = 0, api = 0 }
 
 local function fail(msg)
     TEST_FAILURES = TEST_FAILURES + 1
@@ -247,12 +247,31 @@ function RunTags()
         check(B.Crc5(c.slot * 8 + c.row * 2 + c.sessBit) == c.crc5, "crc5 check value " .. c.slot)
         check(same(B.TagDigits(c.slot, c.row, c.sessBit), c.digits), "digits check value " .. c.slot)
     end
+    -- ApplyTag colours 8 textures (the conversation window's tags) with the same colours, opaque;
+    -- rows 4 and 5 of a 6-row request carry the row modulo 4
+    local texs = {}
+    for i = 1, 8 do
+        texs[i] = NewRegion("texture", nil)
+    end
+    local function Applied(slot, row, sessBit, rgb)
+        B.ApplyTag(texs, slot, row, sessBit)
+        for i = 1, 8 do
+            local t, c = texs[i], rgb[i]
+            if not (t.a == 1 and math.abs(t.r * 255 - c[1]) < 1e-9 and math.abs(t.g * 255 - c[2]) < 1e-9
+                    and math.abs(t.b * 255 - c[3]) < 1e-9) then
+                return false
+            end
+        end
+        return true
+    end
     for _, t in ipairs(TAGS.tags) do
         counts.tags = counts.tags + 1
         local id = t.slot .. "/" .. t.row .. "/" .. t.sessBit
         check(B.Crc5(t.payload) == t.crc5, "crc5 " .. id)
         check(same(B.TagDigits(t.slot, t.row, t.sessBit), t.digits), "digits " .. id)
         check(same(B.TagColors(t.slot, t.row, t.sessBit), t.colors), "colors " .. id)
+        check(Applied(t.slot, t.row, t.sessBit, t.colors), "ApplyTag " .. id)
+        check(Applied(t.slot, t.row + 4, t.sessBit, t.colors), "ApplyTag row + 4 " .. id)
     end
     for _, m in ipairs(TAGS.markup) do
         counts.markup = counts.markup + 1
@@ -263,6 +282,8 @@ function RunTags()
         check(B.PlateMarkup(m.w, m.h) == m.markup, "plate markup " .. m.w)
     end
     check(B.TEST_SLOT == 127 and B.VERSION == 2 and same(B.PLATE_RGB, { 32, 40, 64 }), "constants")
+    check(same(B.BUBBLE_RGB, { 36, 30, 24 }) and B.FLAG_NOCACHE == 1 and B.FLAG_PLATE == 2 and B.FLAG_REPLY == 4
+        and B.FLAG_COPY == 8 and B.FLAGS_MASK == 15, "window constants and TRANSLATE flags")
 end
 
 ---------------------------------------------------------------------------- messages
@@ -282,9 +303,14 @@ function RunMessages()
             out = B.ViewMessage(a[1])
         elseif m.fn == "utf8cut" then
             out = B.Utf8Cut(a[1], a[2])
+        elseif m.fn == "raw" then
+            -- parser-only bytes (no builder writes them): checked by the Rust and Python parsers
+            counts.raw = counts.raw + 1
         end
-        counts.messages = counts.messages + 1
-        check(out and hex(out) == m.hex, "message " .. i .. " " .. m.fn .. " " .. (m.note or ""))
+        if m.fn ~= "raw" then
+            counts.messages = counts.messages + 1
+            check(out and hex(out) == m.hex, "message " .. i .. " " .. m.fn .. " " .. (m.note or ""))
+        end
     end
 end
 
@@ -378,6 +404,6 @@ end
 
 function Summary()
     print(string.format("traces %d, ticks %d, frames %d, blocks %d, SetColorTexture %d, tags %d, markup %d, "
-        .. "builder vectors %d, api checks %d", counts.traces, counts.ticks, counts.frames, counts.blocks,
-        counts.setColor, counts.tags, counts.markup, counts.messages, counts.api))
+        .. "builder vectors %d (+%d parser-only), api checks %d", counts.traces, counts.ticks, counts.frames,
+        counts.blocks, counts.setColor, counts.tags, counts.markup, counts.messages, counts.raw, counts.api))
 end

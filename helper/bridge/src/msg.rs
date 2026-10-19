@@ -2,10 +2,13 @@
 //!
 //! All integers are big-endian; `str8` = u8 length + bytes, `str16` = u16 length + bytes.
 //! ```text
-//! 0x10 TRANSLATE reqId u16 | slot u8 (0..126) | rows u8 (1..6) | flags u8 (bit0 noCache, bit1 plate)
+//! 0x10 TRANSLATE reqId u16 | slot u8 (0..126) | rows u8 (1..6)
+//!                | flags u8 (bit0 noCache, bit1 plate, bit2 reply, bit3 copy, bits 4-7 = 0)
 //!                | target str8 (ASCII, 1..8) | text str16 (UTF-8, <= 1024 B, may hold 0x02/0x03 marks)
 //!                | nPairs u8 (<= 8) | pairs: term str8 (<= 48 B), meaning str8 (<= 120 B);
 //!                  sum(2 + #term + #meaning) <= 512
+//!                  copy needs reply; reply needs plate, rows 2..6 (row 0 = the Helper's status,
+//!                  rows 1.. = the text) and a target that is a language code (letters and '-')
 //! 0x11 CANCEL    reqId u16 | slot u8 (0..127)
 //! 0x12 CLEAR     (empty)
 //! 0x13 TEST      nonce u16
@@ -51,6 +54,11 @@ pub struct Translate {
     pub rows: u8,
     pub no_cache: bool,
     pub plate: bool,
+    /// The conversation window's reply card: row 0 carries the Helper's status, rows 1..rows-1
+    /// the translation (the user's own text, to be pasted into the game).
+    pub reply: bool,
+    /// The user allowed the clipboard for this reply (only ever set with `reply`).
+    pub copy: bool,
     pub target: String,
     /// Marked text: item links and `{...}` groups are wrapped in 0x02 ... 0x03.
     pub text: ChatText,
@@ -86,8 +94,15 @@ const MAX_SLOT: u8 = 126;
 /// Reserved rows per request (1..6). A row tag carries the row number modulo 4; `cards::build`
 /// numbers consecutive rows on from the first visible one.
 const MAX_ROWS: u8 = 6;
-const FLAG_NO_CACHE: u8 = 1;
-const FLAG_PLATE: u8 = 2;
+/// TRANSLATE flag bits.
+pub const FLAG_NO_CACHE: u8 = 1;
+pub const FLAG_PLATE: u8 = 2;
+pub const FLAG_REPLY: u8 = 4;
+pub const FLAG_COPY: u8 = 8;
+/// Every defined flag bit; any other bit makes the message invalid.
+pub const FLAGS_MASK: u8 = FLAG_NO_CACHE | FLAG_PLATE | FLAG_REPLY | FLAG_COPY;
+/// A reply has its status row and at least one text row.
+pub const REPLY_MIN_ROWS: u8 = 2;
 const MAX_TARGET: usize = 8;
 const MAX_TEXT: usize = 1024;
 const MAX_PAIRS: u8 = 8;
@@ -141,16 +156,30 @@ fn utf8(b: &[u8]) -> Result<String, ParseError> {
     std::str::from_utf8(b).map(str::to_owned).map_err(|_| ParseError::Utf8)
 }
 
+/// An explicit language code ("de", "zh-TW"): ASCII letters and '-', starting with a letter. A
+/// reply's target must be one; a placeholder such as "?" for an undecided language is not.
+fn is_language_code(b: &[u8]) -> bool {
+    b.first().is_some_and(u8::is_ascii_alphabetic) && b.iter().all(|c| c.is_ascii_alphabetic() || *c == b'-')
+}
+
 fn parse_translate(r: &mut Reader) -> Result<Translate, ParseError> {
     let req_id = r.u16()?;
     let slot = r.u8()?;
     let rows = r.u8()?;
     let flags = r.u8()?;
-    if slot > MAX_SLOT || rows == 0 || rows > MAX_ROWS || flags & !(FLAG_NO_CACHE | FLAG_PLATE) != 0 {
+    if slot > MAX_SLOT || rows == 0 || rows > MAX_ROWS || flags & !FLAGS_MASK != 0 {
+        return Err(ParseError::Range);
+    }
+    let (plate, reply, copy) = (flags & FLAG_PLATE != 0, flags & FLAG_REPLY != 0, flags & FLAG_COPY != 0);
+    // Never copy an incoming message; a reply always has its status row on a plate.
+    if (copy && !reply) || (reply && (!plate || rows < REPLY_MIN_ROWS)) {
         return Err(ParseError::Range);
     }
     let target = r.str8()?;
     if target.is_empty() || target.len() > MAX_TARGET || !target.iter().all(u8::is_ascii_graphic) {
+        return Err(ParseError::Range);
+    }
+    if reply && !is_language_code(target) {
         return Err(ParseError::Range);
     }
     let text = r.str16()?;
@@ -178,7 +207,9 @@ fn parse_translate(r: &mut Reader) -> Result<Translate, ParseError> {
         slot,
         rows,
         no_cache: flags & FLAG_NO_CACHE != 0,
-        plate: flags & FLAG_PLATE != 0,
+        plate,
+        reply,
+        copy,
         // checked above: ASCII only
         target: String::from_utf8_lossy(target).into_owned(),
         text: ChatText(text),
@@ -268,7 +299,7 @@ mod tests {
         b.extend_from_slice(&hex("01026c6607"));
         b.extend_from_slice(b"cherche");
         let Ok(Message::Translate(t)) = parse_message(&b) else { panic!("translate") };
-        assert_eq!((t.req_id, t.slot, t.rows, t.no_cache, t.plate), (5, 3, 2, true, true));
+        assert_eq!((t.req_id, t.slot, t.rows, t.no_cache, t.plate, t.reply, t.copy), (5, 3, 2, true, true, false, false));
         assert_eq!(t.target, "fr");
         assert_eq!(t.text.as_str(), "a\u{2}[b]\u{3}");
         assert_eq!(t.text.len(), 6);
@@ -286,7 +317,10 @@ mod tests {
         bad[4] = 0; // rows 0
         assert!(matches!(parse_message(&bad), Err(ParseError::Range)));
         let mut bad = b.clone();
-        bad[5] = 4; // unknown flag bit
+        bad[5] = 4; // reply without the plate
+        assert!(matches!(parse_message(&bad), Err(ParseError::Range)));
+        let mut bad = b.clone();
+        bad[5] = 16; // undefined flag bit
         assert!(matches!(parse_message(&bad), Err(ParseError::Range)));
         let mut bad = b.clone();
         bad[11] = 0xFF; // invalid UTF-8 in the text
@@ -309,6 +343,54 @@ mod tests {
         }
         for rows in [0u8, 7, 8, 255] {
             assert!(matches!(parse_message(&msg(rows)), Err(ParseError::Range)), "rows {rows} accepted");
+        }
+    }
+
+    /// TRANSLATE{reqId 1, slot, rows, flags, target, "x", no pairs}
+    fn tr(slot: u8, rows: u8, flags: u8, target: &[u8]) -> Vec<u8> {
+        let mut b = vec![0x10, 0, 1, slot, rows, flags, target.len() as u8];
+        b.extend_from_slice(target);
+        b.extend_from_slice(&[0, 1, b'x', 0]);
+        b
+    }
+
+    #[test]
+    fn every_flag_byte() {
+        // valid: any chat combination of noCache and plate; a reply with the plate, with or
+        // without copy and noCache; nothing else
+        for flags in 0..=255u8 {
+            let ok = matches!(flags, 0..=3 | 6 | 7 | 14 | 15);
+            match parse_message(&tr(126, 3, flags, b"de")) {
+                Ok(Message::Translate(t)) => {
+                    assert!(ok, "flags {flags} accepted");
+                    let want = (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0, flags & 8 != 0);
+                    assert_eq!((t.no_cache, t.plate, t.reply, t.copy), want, "flags {flags}");
+                }
+                Err(ParseError::Range) => assert!(!ok, "flags {flags} refused"),
+                _ => panic!("flags {flags}: unexpected result"),
+            }
+        }
+        assert_eq!((FLAG_NO_CACHE, FLAG_PLATE, FLAG_REPLY, FLAG_COPY, FLAGS_MASK), (1, 2, 4, 8, 15));
+    }
+
+    #[test]
+    fn reply_rows_slot_and_target() {
+        let reply = FLAG_PLATE | FLAG_REPLY | FLAG_COPY;
+        for rows in 2..=6u8 {
+            assert!(matches!(parse_message(&tr(126, rows, reply, b"de")), Ok(Message::Translate(t)) if t.rows == rows));
+        }
+        assert!(matches!(parse_message(&tr(126, 1, reply, b"de")), Err(ParseError::Range)), "reply on 1 row");
+        assert!(matches!(parse_message(&tr(126, 7, reply, b"de")), Err(ParseError::Range)), "reply on 7 rows");
+        // the addon uses slot 126, but any request slot is valid; 127 never is
+        assert!(matches!(parse_message(&tr(0, 2, reply, b"fr")), Ok(Message::Translate(t)) if t.slot == 0 && t.reply));
+        assert!(matches!(parse_message(&tr(127, 2, reply, b"fr")), Err(ParseError::Range)));
+        for good in [&b"de"[..], b"zh-TW", b"pt"] {
+            assert!(parse_message(&tr(126, 2, reply, good)).is_ok(), "{good:?}");
+        }
+        for bad in [&b"?"[..], b"-de", b"de1", b"d_e", b"*"] {
+            assert!(matches!(parse_message(&tr(126, 2, reply, bad)), Err(ParseError::Range)), "{bad:?}");
+            // the language rule is only for replies: a chat request keeps the printable-ASCII rule
+            assert!(parse_message(&tr(5, 2, FLAG_PLATE, bad)).is_ok(), "chat {bad:?}");
         }
     }
 }

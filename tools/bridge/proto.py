@@ -35,7 +35,12 @@ HOLD_MS, ROT_HOLD_MS, EXPOSE_MS = 50, 70, 400
 MAX_TEXT, MAX_TARGET, MAX_PAIRS, MAX_TERM, MAX_MEANING, MAX_PAIR_BYTES = 1024, 8, 8, 48, 120, 512
 MAX_VIEWS = 4
 MAX_ROWS = 6                           # TRANSLATE rows 1..6 (1..4 until 2026-10-18)
-FLAGS_MASK = 3                         # bit0 noCache, bit1 plate
+# TRANSLATE flags. reply (the conversation window's reply card: row 0 = the Helper's status,
+# rows 1.. = the text) and copy (the Helper may put the final translation in the clipboard)
+# were added on 2026-10-19 (STATUS.addonBuild 3).
+FLAG_NOCACHE, FLAG_PLATE, FLAG_REPLY, FLAG_COPY = 1, 2, 4, 8
+FLAGS_MASK = 15                        # bits 4-7 are 0
+REPLY_MIN_ROWS = 2                     # a reply has the status row and at least one text row
 
 TEST_SLOT = 127
 PLATE_RGB = (32, 40, 64)
@@ -126,12 +131,20 @@ def str8(s, n):
     return bytes([len(b)]) + b
 
 
+def translate_flags(flags):
+    """Bridge.TranslateMessage's flags byte: bits 0-3 kept, copy dropped unless reply."""
+    f = clamp(flags, 0, 255) & FLAGS_MASK
+    if f & FLAG_COPY and not f & FLAG_REPLY:
+        f &= ~FLAG_COPY
+    return f
+
+
 def msg_translate(req_id, slot, rows, flags, target, text, pairs):
     """Bridge.TranslateMessage. pairs: list of (term, meaning); entries that are not two strings
     are skipped; at most 8, each cut to 48 / 120 bytes, stopping before 512 bytes in total."""
     tb = cut_marked(_b(text), MAX_TEXT)
     out = bytes([MSG_TRANSLATE]) + bytes(u16(clamp(req_id, 0, 65535))) + bytes([clamp(slot, 0, 255)])
-    out += bytes([clamp(rows, 0, 255), clamp(flags, 0, 255) & FLAGS_MASK])
+    out += bytes([clamp(rows, 0, 255), translate_flags(flags)])
     out += str8(target, MAX_TARGET) + bytes(u16(len(tb))) + tb
     parts, used = [], 0
     for p in pairs or []:
@@ -708,6 +721,15 @@ class Reassembler:
         return out
 
 
+def is_language_code(b):
+    """An explicit language code, as a reply's target must be: ASCII letters and '-', starting
+    with a letter ("de", "zh-TW"). A placeholder such as "?" for an undecided language is not."""
+    def letter(c):
+        return 0x41 <= c <= 0x5A or 0x61 <= c <= 0x7A
+
+    return len(b) > 0 and letter(b[0]) and all(letter(c) or c == 0x2D for c in b)
+
+
 def parse_message(m):
     """Strict message parser (helper side). Returns a dict or raises ValueError."""
     p = 0
@@ -732,9 +754,16 @@ def parse_message(m):
         slot, rows, flags = take(1)[0], take(1)[0], take(1)[0]
         if slot > 126 or not 1 <= rows <= MAX_ROWS or flags & ~FLAGS_MASK:
             raise ValueError("range")
+        reply, copy, plate = bool(flags & FLAG_REPLY), bool(flags & FLAG_COPY), bool(flags & FLAG_PLATE)
+        if copy and not reply:
+            raise ValueError("copy without reply")
+        if reply and (not plate or rows < REPLY_MIN_ROWS):
+            raise ValueError("reply rules")
         tgt = take(take(1)[0])
         if not 1 <= len(tgt) <= MAX_TARGET or not all(0x21 <= b <= 0x7E for b in tgt):
             raise ValueError("target")
+        if reply and not is_language_code(tgt):
+            raise ValueError("reply target")
         text = take(int.from_bytes(take(2), "big"))
         if len(text) > MAX_TEXT:
             raise ValueError("text")
@@ -750,9 +779,9 @@ def parse_message(m):
                 raise ValueError("pair")
             pairs.append((a.decode("utf-8"), b.decode("utf-8")))
         end()
-        return {"type": "translate", "req": req, "slot": slot, "rows": rows, "noCache": bool(flags & 1),
-                "plate": bool(flags & 2), "target": tgt.decode("ascii"), "text": text.decode("utf-8"),
-                "pairs": pairs}
+        return {"type": "translate", "req": req, "slot": slot, "rows": rows, "noCache": bool(flags & FLAG_NOCACHE),
+                "plate": plate, "reply": reply, "copy": copy, "target": tgt.decode("ascii"),
+                "text": text.decode("utf-8"), "pairs": pairs}
     if t == MSG_CANCEL:
         req = int.from_bytes(take(2), "big")
         slot = take(1)[0]

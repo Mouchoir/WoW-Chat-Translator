@@ -38,12 +38,14 @@ fn describe(m: &Message) -> String {
             let pairs: Vec<String> =
                 t.pairs.iter().map(|(a, b)| format!("{}={}", to_hex(a.as_str().as_bytes()), to_hex(b.as_str().as_bytes()))).collect();
             format!(
-                "translate {} {} {} {} {} {} {} [{}]",
+                "translate {} {} {} {} {} {} {} {} {} [{}]",
                 t.req_id,
                 t.slot,
                 t.rows,
                 t.no_cache,
                 t.plate,
+                t.reply,
+                t.copy,
                 t.target,
                 to_hex(t.text.as_str().as_bytes()),
                 pairs.join(",")
@@ -180,9 +182,9 @@ fn builder_vectors_parse_like_the_reference() {
                     .map(|q| format!("{}={}", q[0].as_str().unwrap(), q[1].as_str().unwrap()))
                     .collect();
                 format!(
-                    "translate {} {} {} {} {} {} {} [{}]",
-                    p["req"], p["slot"], p["rows"], p["noCache"], p["plate"], p["target"].as_str().unwrap(),
-                    p["text"].as_str().unwrap(), pairs.join(",")
+                    "translate {} {} {} {} {} {} {} {} {} [{}]",
+                    p["req"], p["slot"], p["rows"], p["noCache"], p["plate"], p["reply"], p["copy"],
+                    p["target"].as_str().unwrap(), p["text"].as_str().unwrap(), pairs.join(",")
                 )
             }
             "cancel" => format!("cancel {} {}", p["req"], p["slot"]),
@@ -211,6 +213,32 @@ fn builder_vectors_parse_like_the_reference() {
         n += 1;
     }
     assert!(n >= 25);
+}
+
+#[test]
+fn reply_vectors_parse_as_documented() {
+    // docs\BRIDGE.md section 3: reply with copy, reqId 258, slot 126, rows 3, "de", 0 pairs
+    let b = hex("1001027e030e02646500146f6e20706172742064616e732035206d696e203f00");
+    let Ok(Message::Translate(t)) = parse_message(&b) else { panic!("reply") };
+    assert_eq!((t.req_id, t.slot, t.rows, t.no_cache, t.plate, t.reply, t.copy), (258, 126, 3, false, true, true, true));
+    assert_eq!((t.target.as_str(), t.text.as_str(), t.pairs.len()), ("de", "on part dans 5 min ?", 0));
+    // every vector with the reply or copy bit in its bytes is accounted for
+    let v = load(vectors().join("messages.json"));
+    let (mut replies, mut refused) = (0, 0);
+    for m in v.as_array().unwrap() {
+        let h = hex(m["hex"].as_str().unwrap());
+        if h.len() > 6 && h[0] == 0x10 && h[5] & 12 != 0 {
+            match parse_message(&h) {
+                Ok(Message::Translate(t)) => {
+                    assert!(t.reply && t.plate && t.rows >= 2, "{}", m["note"]);
+                    replies += 1;
+                }
+                Ok(_) => panic!("{}", m["note"]),
+                Err(_) => refused += 1,
+            }
+        }
+    }
+    assert!(replies >= 6 && refused >= 8, "reply vectors {replies} accepted, {refused} refused");
 }
 
 #[test]
@@ -254,7 +282,7 @@ fn lua_translate_with_marks_and_pairs() {
         "6b756c6c7d0302046c66326d126c6f6f6b696e6720666f722032206d6f7265056368656170087061732063686572"
     ));
     let Ok(Message::Translate(t)) = parse_message(&b) else { panic!("translate") };
-    assert_eq!((t.req_id, t.slot, t.rows, t.no_cache, t.plate), (9, 4, 2, false, true));
+    assert_eq!((t.req_id, t.slot, t.rows, t.no_cache, t.plate, t.reply, t.copy), (9, 4, 2, false, true, false, false));
     assert_eq!(t.target, "fr");
     assert_eq!(t.text.as_str(), "lf2m dps \u{2}[Linen Cloth]\u{3} cheap \u{2}{skull}\u{3}");
     let pairs: Vec<(&str, &str)> = t.pairs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();

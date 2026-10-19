@@ -74,13 +74,19 @@ record = type u8, len u16, data; unknown types are skipped (0x02 = the v1 LAYOUT
 `str8` = u8 length + bytes, `str16` = u16 length + bytes.
 
 ```
-0x10 TRANSLATE  reqId u16 | slot u8 (0..126) | rows u8 (1..6) | flags u8 (bit0 noCache, bit1 plate, others 0)
+0x10 TRANSLATE  reqId u16 | slot u8 (0..126) | rows u8 (1..6)
+                | flags u8 (bit0 noCache, bit1 plate, bit2 reply, bit3 copy, bits 4-7 = 0)
                 | target str8 (printable ASCII, 1..8) | text str16 (UTF-8 <= 1024 B, may contain 0x02/0x03 marks)
                 | nPairs u8 (<= 8) | pairs: term str8 (<= 48 B), meaning str8 (<= 120 B); sum(2+#t+#m) <= 512
+                rules: copy => reply; reply => plate and rows 2..6 (row 0 = the Helper's status, rows 1.. =
+                the text); a reply's target is a language code (ASCII letters and '-', starting with a
+                letter); a reply may use any slot 0..126 (the addon uses 126)
 0x11 CANCEL     reqId u16 | slot u8 (0..127)
 0x12 CLEAR      (empty)
 0x13 TEST       nonce u16
 0x14 VIEW       n u8 (0..4) | n x { id u8, x u16, y u16, w u16, h u16, fontPx u8, rowPx u8 }  (physical px, client origin)
+                ids 1..199: chat frames (GetID() % 256); ids 200..255: addon windows (200 = the conversation window)
+0x01 STATUS     addonBuild 3 since 2026-10-19 (TRANSLATE reply and copy)
 ```
 
 - 2026-10-18: TRANSLATE rows went from 1..4 to 1..6 (long German-to-French lines were cut); same
@@ -91,6 +97,36 @@ record = type u8, len u16, data; unknown types are skipped (0x02 = the v1 LAYOUT
   2 at the same time: either side then shows its "update" toast instead of failing silently.
 - Since 2026-10-18 the addon sends a VIEW before every TRANSLATE (changed or not), so a Helper
   started after the last VIEW leaves its discovery scan at the next click.
+- 2026-10-19: the conversation window's reply card (docs\DESIGN.md, conversation window). Two
+  TRANSLATE flags are new, same version 2:
+  - **reply** (bit 2): the request is the user's own reply. Row 0 of its card carries the Helper's
+    status ("Translating...", "Ready - Ctrl+V to paste", ...), rows 1 to rows-1 the translation.
+    So a reply needs the plate and 2..6 rows. Its target must be an explicit language code: the
+    addon resolves an undecided language with its language list before it sends (a placeholder
+    such as "?" is refused).
+  - **copy** (bit 3): the user allowed the clipboard for this reply (the in-game consent). The
+    Helper may then empty the clipboard at once and put the final translation in it. It is only
+    valid with reply: the Helper never copies a message the user received.
+  - Builders mask the flags to bits 0-3 and drop copy when reply is not set
+    (`Bridge.TranslateMessage`, `proto.msg_translate`); any other combination is written as given
+    and refused by the parsers (`msg.rs`, `proto.parse_message`). Of the 16 values, 0-3, 6, 7, 14 and
+    15 are valid.
+  - `STATUS.addonBuild` went from 2 to 3 (`ns.ADDON_BUILD`): a Helper of build 2 refuses a reply
+    (its flags check) and shows its "update" toast. The Helper of build 3 accepts builds 2 and 3
+    without a toast (a build-2 addon never sends a reply).
+  - Example (reply with copy: reqId 258, slot 126, rows 3, "de", "on part dans 5 min ?", 0 pairs),
+    also a builder vector and a Rust test:
+    ```
+    10 | 01 02 | 7E | 03 | 0E | 02 64 65 | 00 14 | 6F 6E 20 70 61 72 74 20 64 61 6E 73 20 35 20 6D 69 6E 20 3F | 00
+    ```
+  - Compatibility: a new addon with an old Helper keeps chat and window translations (window
+    bubbles are plain TRANSLATEs with the plate); its replies are dropped as parse errors ("Not
+    received", the lane hint and the "this Helper is older" toast show). An old addon with a new
+    Helper: no change.
+  - Deviation from the conversation design (B.2), backed by a fact: the design set addonBuild 2 for
+    this change because it read build 1 in the code, but build 2 already shipped with rows 1..6
+    on 2026-10-18 (`Core.lua`, `scene.rs`). Keeping 2 would leave a build-2 Helper dropping replies
+    without a toast, so the build is 3 and the Helper accepts 2..3.
 - Parsers are strict: a length that does not match exactly, a field out of range or invalid
   UTF-8 drops the message (`msg::ParseError`) and a counter is incremented.
 - Builders (`Bridge.TranslateMessage` etc.) write integers as given, clamped to the field width;
@@ -245,17 +281,39 @@ nominal 0 / 255 calibration, and converts each card's `plate_rgb` back to displa
 calibration) and reset when the game window is lost; an unchanged capture reuses the previous
 linear copy.
 
+## 8c. Window cards (the conversation window, 2026-10-19)
+
+The conversation window draws its tags and plates with textures (`Bridge.ApplyTag` colours the 8
+tag textures; the plate is a `PLATE_RGB` colour texture), inside bubbles of its own, not inline in a
+chat line. Rules the addon keeps and the Helper relies on:
+
+- The bubble and reply card interior is opaque `BUBBLE_RGB` = (36, 30, 24). It fails the plate
+  prediction and the hue rule (B 24 is under G and far under the plate's 64), so the Helper never
+  takes the fill for a plate.
+- At least 3 physical px of fill above the first row, below the last row and left of the tag. Rows
+  touch: row tops sit at exact multiples of `rowPx` physical px, so the row pitch equals VIEW
+  `rowPx`.
+- One VIEW entry, id 200, for the whole window: its x-range is the bubble fill column (so the
+  native-look backdrop samples land in the fill on both sides), from the thread top to the reply
+  card's fill bottom; `fontPx` and `rowPx` from the window's text size and scale.
+- A row not entirely inside the visible thread has its tag and plate hidden (fill only): the
+  Helper never sees a partly clipped window row.
+- The reply lane is the band `[row0.yTop + K * rowPx, + rowPx]` from the tag's x0 to the plate's
+  end: flat fill with the addon's hint text, clear of its top and bottom 2 px, which the Helper
+  covers when it paints the card.
+- Slots: 0..99 chat, 100..125 window bubbles, 126 the reply, 127 TEST.
+
 ## 9. Validation
 
 Commands (from the repo root; numbers measured on 2026-10-17 on the dev PC, re-run on 2026-10-18 and 2026-10-19 at integration with the same results where shown):
 
 | Command | Result |
 |---|---|
-| `python -I tools\bridge\make_vectors.py` | 30 traces (10 x 3 modes), 1066 frames, 387 queued messages, 1024 tags, 34 builder vectors (32 before the 6-row pair, 2026-10-19), 36 strips; byte-identical on re-run |
-| `node tests\bridge\run.js` | ALL BRIDGE TESTS PASSED: 30 traces, 16892 ticks, 1066 frames, 1268038 blocks, 1024 tags, 20 markup, 34 builder vectors, 29 API checks |
+| `python -I tools\bridge\make_vectors.py` | 30 traces (10 x 3 modes), 1066 frames, 387 queued messages, 1024 tags, 52 message vectors (46 builder vectors and 6 parser-only byte strings; 34 before the reply and copy flags, 2026-10-19), 36 strips; byte-identical on re-run, and the traces, tags and strips unchanged by the flags |
+| `node tests\bridge\run.js` | ALL BRIDGE TESTS PASSED: 30 traces, 16892 ticks, 1066 frames, 1268038 blocks, 1024 tags (each also through `ApplyTag`, at its row and row + 4), 20 markup, 46 builder vectors (+6 parser-only), 29 API checks |
 | `python -I tools\bridge\sim.py all` (150 runs each) | 4/4 PASS, see below |
 | `python -I tools\bridge\crc_mc.py` (2 M) | 0 undetected, see below |
-| `cargo test --offline` in `helper\bridge` | 59 passed, 0 failed (2 ignored: the release suites; 2026-10-19) |
+| `cargo test --offline` in `helper\bridge` | 62 passed, 0 failed (2 ignored: the release suites; 2026-10-19, with the reply and copy flags: every flag byte, reply rows, slot and target, the documented example) |
 | `cargo test --offline --release -- --ignored` | 2 passed: corruption suite, per-call cost |
 | `luacheck addon\TranslateProbe\Bridge.lua` | 0 warnings |
 
@@ -283,7 +341,7 @@ text is random glyph shapes):
 
 | Suite | Result |
 |---|---|
-| `vectors`: every trace frame drawn as pixels and decoded | 1066 frames decoded byte-identical, 339 messages rebuilt exactly as the reference; all 1024 tags drawn and scanned back; 32 builder vectors and 36 distorted strips agree with the reference |
+| `vectors`: every trace frame drawn as pixels and decoded | 1066 frames decoded byte-identical, 339 messages rebuilt exactly as the reference; all 1024 tags drawn and scanned back; 52 message vectors (with reply and copy) and 36 distorted strips agree with the reference |
 | `distort`: decode rate per category, 4000 captures each (Python reference in brackets) | dense identity +-6 noise 100% (100%); dense envelope curves, gap >= 16, block noise 99.750% (99.725%); robust envelope + harsh curves 99.825% (99.825%); mono with colour mixing 99.900% (99.850%); dense 0.5 px offset 100% (100%); torn captures decoded 21.6 / 19.9 / 19.6% (20.6 / 18.3 / 17.3%) in dense / robust / mono; **0 wrong frames** anywhere; colour mixing: dense 0/300, mono 300/300 |
 | `tags`: recall on 3000 synthetic chat panels (dark 25-100% over a random world, antialiased text in chat, class and item colours incl. (255,128,255) and (0,255,246), raid icons, blocks 4-12 px, gaps 0-2 px, alpha 0.3-1.0, offset +-2 px, top clipping, two frames) | 26601 / 26601 tags (100%), 0 wrong identity, 0 unexpected hits; every alpha bucket 100% |
 | `tags`: tag-free panels (text, item links, raid icon runs, tooltips) | 0 hits over 10000 panels |
@@ -414,10 +472,13 @@ Each is backed by a measured fact; the tests named reproduce it.
   changed from one id to another (None on the first session), so the caller can call
   `engine.clear_session(old)`.
 - `msg::parse_message` is strict: TRANSLATE needs slot 0..126, rows 1..6 (1..4 until
-  2026-10-18), flags with only bits
-  0-1, a target of 1-8 printable ASCII bytes, text <= 1024 B, <= 8 pairs with term <= 48 B,
+  2026-10-18), flags with only bits 0-3 (0-1 until 2026-10-19) where copy needs reply and reply
+  needs plate, rows 2..6 and a language-code target, a target of 1-8 printable ASCII bytes,
+  text <= 1024 B, <= 8 pairs with term <= 48 B,
   meaning <= 120 B and sum(2 + #term + #meaning) <= 512, valid UTF-8 everywhere. CANCEL accepts
   slot 0..127. VIEW accepts 0..4 views. Any other length is `Length`.
+- `msg::Translate` has `reply` and `copy` (2026-10-19); `msg::{FLAG_NO_CACHE, FLAG_PLATE,
+  FLAG_REPLY, FLAG_COPY, FLAGS_MASK, REPLY_MIN_ROWS}` are public.
 - Extra public items beyond D.2 (additive): `strip::{decode_strip_detail, DecodeDetail, Reject,
   Mode::{ALL, magic, bits, name, index}, frame_capacity, max_chunk_data, parse_frame_bytes}` and
   the format constants, `tags::diagnose`, `cards::{Mask::get, Mask::count, StickyWidth}` and the
@@ -428,7 +489,13 @@ Each is backed by a measured fact; the tests named reproduce it.
 **Lua (`Bridge.lua`)**
 - Builders write integers as given, clamped to the field width (u8 0..255, u16 0..65535); they do
   not remap values into the valid range, so a wrong slot or row count is refused by the helper
-  instead of addressing other rows. Flags are masked to bits 0-1.
+  instead of addressing other rows. Flags are masked to bits 0-3 (0-1 until 2026-10-19) and the
+  copy bit is dropped unless the reply bit is set.
+- Window helpers (2026-10-19): `Bridge.FLAG_NOCACHE`, `FLAG_PLATE`, `FLAG_REPLY`, `FLAG_COPY` (1, 2,
+  4, 8), `Bridge.FLAGS_MASK` (15), `Bridge.BUBBLE_RGB` ({36, 30, 24}) and
+  `Bridge.ApplyTag(textures, slot, row, sessBit)`, which colours 8 Textures with the tag of
+  (slot, row % 4, sessBit), opaque (`SetColorTexture(r / 255, g / 255, b / 255, 1)`, no table
+  allocated). The protocol colours carry an `art-ok: protocol colour` comment.
 - The TRANSLATE text is cut at 1024 bytes on a UTF-8 boundary; when a cut happens and the last
   0x02 mark is after the last 0x03, the text is cut before that 0x02 (same rule as
   `Glossary.PromptText`). Pairs that are not `{string, string}` are skipped; pairs stop at the
