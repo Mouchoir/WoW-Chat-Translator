@@ -25,7 +25,14 @@
 --   E2E.Window{ bubbles = {{slot, rows, text}...}, scroll }   the conversation window (below)
 --   E2E.WindowReply{ rows, text, copy }             its reply card (TRANSLATE flags plate|reply|copy)
 --   E2E.WindowScroll(px)                            scrolls its thread (rows partly out are hidden)
+--   E2E.Popup{ resend }                             the Translate Companion popup and its status card
+--   E2E.PopupClose()                                closes it (Continue, Cancel)
 --   E2E.Mark(text)                                  annotation in the truth file
+--
+-- Translate Companion runs in every scenario (user request R1, 2026-10-19): the addon reads its
+-- status file at load (CompanionStatus.lua, which the addon ships empty) and a [T] click without a
+-- confirmed Translate Companion only opens a popup. E2E.Start loads the file as a running app writes
+-- it, so the clicks reserve rows and send TRANSLATE as before.
 --   E2E.Finish(tailSeconds)                        sets the global E2E_JSON
 local M = Mock
 M.echo = false
@@ -233,13 +240,13 @@ local function Snapshot()
     end
 end
 
-local RevealDue    -- the synthetic window: a hint lane's 1.5 s are over (defined with the window)
+local PopupDue     -- the synthetic popup: its VIEW is due again (defined with the popup)
 
 local function Step(frames)
     for _ = 1, frames do
         M.Tick(1)
-        if RevealDue then
-            RevealDue()
+        if PopupDue then
+            PopupDue()
         end
         Snapshot()
     end
@@ -276,9 +283,20 @@ function E.Start(o)
     for _, cf in ipairs(M.ChatFrames()) do
         M.SetChatRect(cf, chat[1], chat[2], chat[3], chat[4])
     end
+    -- what a running Translate Companion writes into the deployed CompanionStatus.lua (its
+    -- helper\app\src\status_file.rs): the session starts confirmed (Presence.lua)
+    local status = string.format('TranslateProbe_CompanionStatus = { v = 1, version = "0.6.0", build = 6, '
+        .. 'state = "running", heartbeat = %d }', time())
+    TranslateProbe_CompanionStatus = { v = 1, version = "0.6.0", build = 6, state = "running", heartbeat = time() }
     ns = M.Load(ADDON_FILES, function(file)
+        if file == "CompanionStatus.lua" then
+            return status
+        end
         return ADDON_SOURCES[file]
     end)
+    if ns.Presence and ns.Presence.IsConfirmed then
+        assert(ns.Presence.IsConfirmed(), "the status file did not confirm Translate Companion")
+    end
     -- E.Click tests the rows under a chat line: a [T] click opens the conversation window by
     -- default since 2026-10-19 (display = "window"), so the scenarios use the inline mode
     ns.db.display = "inline"
@@ -413,13 +431,10 @@ end
 -- fakewow as a layer over the chat frames: opaque rectangles in physical px. Its rows are real
 -- protocol tags (Bridge.TagColors) and plates on the opaque bubble fill (Bridge.BUBBLE_RGB), rows
 -- touching at the row pitch, a reply card, and per-row visibility (a row not entirely inside the
--- thread is not drawn: the fill shows there). Every bubble and the reply card have a hint lane
--- (user request U1, 2026-10-19; the addon's Bubble.lua): one more row of fill under the last row,
--- the hint in gold from the plate's x and a [Download] in the links' blue, clear of the lane's top
--- and bottom 2 px, drawn LANE_DELAY seconds after the card appeared and only while the lane and the
--- card's last row are entirely inside the thread. The VIEW (window first, then the chat frame it
--- overlaps) and the TRANSLATE messages go through the addon's own Bridge.Send. The addon's window
--- modules are not used: the rig checks the Helper against the protocol.
+-- thread is not drawn: the fill shows there). No hint lane any more (addon build 6, user request
+-- R1, 2026-10-19): a bubble's box ends its padding under its last row. The VIEW (window first, then
+-- the chat frame it overlaps) and the TRANSLATE messages go through the addon's own Bridge.Send.
+-- The addon's window modules are not used: the rig checks the Helper against the protocol.
 local WIN = {
     x = 126, y = 214, w = 620, h = 640,                -- the frame (px)
     threadTop = 320, threadBottom = 700,
@@ -427,9 +442,7 @@ local WIN = {
     cardGap = 8,
     border = { 150, 120, 70 }, frameBg = { 22, 20, 18 }, header = { 34, 30, 26 }, threadBg = { 12, 12, 12 },
     composer = { 40, 36, 30 },
-    hint = { 255, 209, 0 }, link = { 102, 187, 255 },  -- NORMAL_FONT_COLOR's gold, the links' 66bbff
 }
-local LANE_DELAY = 1.5    -- seconds before a lane's hint shows (the addon's Bubble.LANE_DELAY)
 local win = nil       -- { bubbles, scroll, reply, reqs }
 local winReq = 900    -- reqIds of the synthetic window's requests (the addon's own start at 1)
 
@@ -456,7 +469,7 @@ local function CardTop()
 end
 
 local function CardHeight(k)
-    return 2 * WIN.pad + (k + 1) * WIN.rowPx    -- rows, the lane, the padding
+    return 2 * WIN.pad + k * WIN.rowPx    -- rows and the padding
 end
 
 local function ViewRect()
@@ -467,62 +480,34 @@ local function ViewRect()
     return { WIN.colX, WIN.threadTop, WIN.bw, bottom - WIN.threadTop }
 end
 
--- The hint lane at (x0, ly) of a card whose plate ends at x1: the glyphs of the hint and of the
--- [Download] link once revealed, 2 px clear of the lane's top and bottom (the addon's smallest
--- margin: 2 units and 2 physical px at least), so the Helper's 2-row edge test is exercised.
-local function Lane(rects, x0, x1, ly, revealed)
-    if not revealed then
-        return
-    end
-    local lx0 = x0 + 8 * WIN.block
-    for gx = lx0 + 2, math.min(lx0 + 300, x1 - 90), 9 do
-        rects[#rects + 1] = Rect7(gx, ly + 2, 5, WIN.rowPx - 4, WIN.hint)
-    end
-    for gx = math.min(lx0 + 310, x1 - 80), x1 - 12, 8 do
-        rects[#rects + 1] = Rect7(gx, ly + 2, 4, WIN.rowPx - 4, WIN.link)
-    end
-end
-
-local function Revealed(at)
-    return at ~= nil and M.Now() >= at
-end
-
 local DrawWindow
 
 function DrawWindow()
-    local rects, items, hidden, lanes = Array(), Array(), Array(), Array()
+    local rects, items, hidden = Array(), Array(), Array()
     local B = ns.Bridge.BUBBLE_RGB
     rects[#rects + 1] = Rect7(WIN.x - 3, WIN.y - 3, WIN.w + 6, WIN.h + 6, WIN.border)
     rects[#rects + 1] = Rect7(WIN.x, WIN.y, WIN.w, WIN.h, WIN.frameBg)
     rects[#rects + 1] = Rect7(WIN.x, WIN.y, WIN.w, 90, WIN.header)
     rects[#rects + 1] = Rect7(WIN.x + 12, WIN.threadTop, WIN.w - 24, WIN.threadBottom - WIN.threadTop, WIN.threadBg)
     local y = WIN.threadTop + 10 - win.scroll
-    local x0, x1 = WIN.colX + WIN.pad, WIN.colX + WIN.bw - WIN.pad
+    local x0 = WIN.colX + WIN.pad
     for _, b in ipairs(win.bubbles) do
-        local h = 2 * WIN.pad + (b.rows + 1) * WIN.rowPx    -- rows, the lane, the padding
+        local h = CardHeight(b.rows)
         local top, bot = math.max(y, WIN.threadTop), math.min(y + h, WIN.threadBottom)
         if bot > top then
             rects[#rects + 1] = Rect7(WIN.colX, top, WIN.bw, bot - top, B)
         end
-        local lastShown = false
         for r = 0, b.rows - 1 do
             local ry = y + WIN.pad + r * WIN.rowPx
             if ry >= WIN.threadTop and ry + WIN.rowPx <= WIN.threadBottom then
                 Row(rects, items, x0, ry, b.slot, r)
-                lastShown = r == b.rows - 1
             else
                 hidden[#hidden + 1] = Array({ b.slot, r })
             end
         end
-        local ly = y + WIN.pad + b.rows * WIN.rowPx
-        if lastShown and ly + WIN.rowPx <= WIN.threadBottom then
-            local revealed = Revealed(b.revealAt)
-            Lane(rects, x0, x1, ly, revealed)
-            lanes[#lanes + 1] = { slot = b.slot, rect = Array({ x0, ly, x1 - x0, WIN.rowPx }), revealed = revealed }
-        end
         y = y + h + 14
     end
-    local lane, card = nil, nil
+    local card = nil
     if win.reply then
         local k, top = win.reply.rows, CardTop()
         card = Array({ WIN.colX, top, WIN.bw, CardHeight(k) })
@@ -530,43 +515,14 @@ function DrawWindow()
         for r = 0, k - 1 do
             Row(rects, items, x0, top + WIN.pad + r * WIN.rowPx, 126, r)
         end
-        -- the lane: one row of fill, the hint's glyphs from the plate's x, clear of its top and
-        -- bottom 2 px
-        local ly = top + WIN.pad + k * WIN.rowPx
-        lane = Array({ x0, ly, x1 - x0, WIN.rowPx })
-        local revealed = Revealed(win.reply.revealAt)
-        Lane(rects, x0, x1, ly, revealed)
-        lanes[#lanes + 1] = { slot = 126, rect = lane, revealed = revealed }
         rects[#rects + 1] = Rect7(WIN.x + 12, top + CardHeight(k) + 8, WIN.w - 24, 30, WIN.composer)
     end
     Add({ layer = { id = 1, on = true, rects = rects, items = items, meta = { view = Array(ViewRect()), scroll = win.scroll,
-        hidden = hidden, card = card, lane = lane, lanes = lanes, replySlot = win.reply and 126 or nil,
-        bubble = Array(ns.Bridge.BUBBLE_RGB) } } })
+        hidden = hidden, card = card, replySlot = win.reply and 126 or nil, bubble = Array(ns.Bridge.BUBBLE_RGB) } } })
 end
 
--- A lane whose LANE_DELAY is over gets its hint: the window is drawn again (once per reveal).
-function RevealDue()
-    if not win then
-        return
-    end
-    local due = false
-    for _, b in ipairs(win.bubbles) do
-        if b.revealAt and not b.revealDrawn and M.Now() >= b.revealAt then
-            b.revealDrawn, due = true, true
-        end
-    end
-    local r = win.reply
-    if r and r.revealAt and not r.revealDrawn and M.Now() >= r.revealAt then
-        r.revealDrawn, due = true, true
-    end
-    if due then
-        DrawWindow()
-    end
-end
-
--- VIEW: the window first (VIEW id 200), then the chat frame it overlaps (the addon's Reserve.View
--- does the same once the window module is there).
-local function SendView()
+-- The VIEW entry of chat frame 1 (physical px), as the addon's Reserve.View writes it.
+local function ChatViewEntry()
     local _, physH = GetPhysicalScreenSize()
     local k = physH / 768
     local cf = ChatFrame1
@@ -575,11 +531,17 @@ local function SendView()
     local _, fontH = cf:GetFont()
     local eff = cf:GetEffectiveScale()
     local spacing = cf.GetSpacing and cf:GetSpacing() or 0
+    return { id = cf:GetID(), x = Round(l * k), y = Round(physH - (b + h) * k), w = Round(w * k), h = Round(h * k),
+        fontPx = Round(fontH * eff * k), rowPx = Round((fontH + spacing) * eff * k) }
+end
+
+-- VIEW: the window first (VIEW id 200), then the chat frame it overlaps (the addon's Reserve.View
+-- does the same once the window module is there).
+local function SendView()
     local v = ViewRect()
     ns.Bridge.Send(ns.Bridge.ViewMessage({
         { id = 200, x = v[1], y = v[2], w = v[3], h = v[4], fontPx = WIN.fontPx, rowPx = WIN.rowPx },
-        { id = cf:GetID(), x = Round(l * k), y = Round(physH - (b + h) * k), w = Round(w * k), h = Round(h * k),
-            fontPx = Round(fontH * eff * k), rowPx = Round((fontH + spacing) * eff * k) },
+        ChatViewEntry(),
     }))
 end
 
@@ -594,12 +556,9 @@ local function Translate(slot, rows, flags, target, text)
     return winReq
 end
 
--- o.bubbles = { { slot (100..125), rows (1..6), text }, ... }: the incoming bubbles, top first.
+-- o.bubbles = { { slot (100..124), rows (1..6), text }, ... }: the incoming bubbles, top first.
 function E.Window(o)
     win = { bubbles = o.bubbles or {}, scroll = o.scroll or 0, reply = nil }
-    for _, b in ipairs(win.bubbles) do
-        b.revealAt = M.Now() + LANE_DELAY
-    end
     SendView()
     -- each TRANSLATE is queued before the bubble's rows are shown (design A.3 step 4)
     for _, b in ipairs(win.bubbles) do
@@ -613,7 +572,7 @@ end
 -- The reply card: TRANSLATE slot 126, rows = 1 + text rows, flags plate|reply (+copy).
 function E.WindowReply(o)
     assert(win, "E2E.WindowReply needs E2E.Window first")
-    win.reply = { rows = o.rows or 3, revealAt = M.Now() + LANE_DELAY }
+    win.reply = { rows = o.rows or 3 }
     local flags = ns.Bridge.FLAG_PLATE + ns.Bridge.FLAG_REPLY + (o.copy == false and 0 or ns.Bridge.FLAG_COPY)
     SendView()
     local req = Translate(126, win.reply.rows, flags, o.target or "de", o.text)
@@ -627,6 +586,102 @@ function E.WindowScroll(px)
     assert(win, "E2E.WindowScroll needs E2E.Window first")
     win.scroll = px
     DrawWindow()
+    Step(1)
+end
+
+---------------------------------------------------------------------------- Translate Companion popup
+-- The popup a [T] click opens while no Translate Companion is confirmed (user request R1,
+-- 2026-10-19; the addon's CompanionDialog.lua, docs\BRIDGE.md section 8d), drawn by fakewow as layer
+-- 2 in the middle of the client: a dark dialog with a border, a gold title and two buttons, the
+-- status card (one row of Bridge.PRESENCE_SLOT: a real tag and the plate over a BUBBLE_RGB fill
+-- with `pad` px above, under and right of them and the wider `left` fill of the addon's
+-- CompanionDialog.CardMetrics left of the tag, where a discovery scan samples; never a TRANSLATE)
+-- and the addon's grey caption under the card (never on it). Its VIEW (id 201, the card's fill, then the chat frame) goes through the addon's own
+-- Bridge.Send when the popup opens and again every `resend` seconds while it shows (the addon: 2 s;
+-- 0: once); closing it sends the chat frame's VIEW alone, as the addon does.
+local POP = {
+    w = 420, h = 200, cardTop = 70, cardInset = 20, pad = 6, rowPx = 20, fontPx = 16, block = 6,
+    border = { 150, 120, 70 }, bg = { 18, 16, 14 }, title = { 255, 209, 0 }, grey = { 128, 128, 128 },
+    button = { 60, 52, 40 },
+}
+local PRESENCE_VIEW = 201
+local popup = nil     -- { card = {x, y, w, h}, resend, nextView }
+
+local function PopupGeometry()
+    local physW, physH = GetPhysicalScreenSize()
+    local x, y = Round((physW - POP.w) / 2), Round((physH - POP.h) / 2)
+    local card = { x + POP.cardInset, y + POP.cardTop, POP.w - 2 * POP.cardInset, POP.rowPx + 2 * POP.pad }
+    return x, y, card
+end
+
+local function DrawPopup()
+    local rects, items = Array(), Array()
+    local x, y, card = PopupGeometry()
+    rects[#rects + 1] = Rect7(x - 3, y - 3, POP.w + 6, POP.h + 6, POP.border)
+    rects[#rects + 1] = Rect7(x, y, POP.w, POP.h, POP.bg)
+    for gx = x + 30, x + 200, 9 do    -- the title's glyphs
+        rects[#rects + 1] = Rect7(gx, y + 22, 5, 14, POP.title)
+    end
+    -- the status card: its fill, the tag of slot 125 row 0, the plate to the fill's padding
+    rects[#rects + 1] = Rect7(card[1], card[2], card[3], card[4], ns.Bridge.BUBBLE_RGB)
+    local sess = ns.sessionId % 2
+    local colors = ns.Bridge.TagColors(ns.Bridge.PRESENCE_SLOT, 0, sess)
+    -- left of the tag: 0.75 of the row height (the Companion's discovery reach) and 3 px, as the addon
+    local left = math.max(POP.pad, math.ceil(ns.CompanionDialog.DISCOVERY_LEFT * POP.rowPx + 3))
+    local tx, ty = card[1] + left, card[2] + POP.pad
+    for i = 1, 8 do
+        rects[#rects + 1] = Rect7(tx + (i - 1) * POP.block, ty, POP.block, POP.rowPx, colors[i])
+    end
+    local px0 = tx + 8 * POP.block
+    local pw = card[1] + card[3] - POP.pad - px0
+    rects[#rects + 1] = Rect7(px0, ty, pw, POP.rowPx, ns.Bridge.PLATE_RGB)
+    items[#items + 1] = { view = PRESENCE_VIEW, slot = ns.Bridge.PRESENCE_SLOT, row = 0, sess = sess,
+        tag = Array({ tx, ty, 8 * POP.block, POP.rowPx }), plate = Array({ px0, ty, pw, POP.rowPx }), visible = true,
+        alpha = 1, covered = Array() }
+    -- the grey caption under the card, then the buttons
+    for gx = card[1] + POP.pad, card[1] + POP.pad + 230, 7 do
+        rects[#rects + 1] = Rect7(gx, card[2] + card[4] + 6, 4, 11, POP.grey)
+    end
+    for i = 0, 2 do
+        rects[#rects + 1] = Rect7(x + 30 + i * 125, y + POP.h - 40, 112, 22, POP.button)
+    end
+    Add({ layer = { id = 2, on = true, rects = rects, items = items,
+        meta = { presence = { view = PRESENCE_VIEW, slot = ns.Bridge.PRESENCE_SLOT, card = Array(card) } } } })
+end
+
+local function SendPopupView()
+    local _, _, card = PopupGeometry()
+    ns.Bridge.Send(ns.Bridge.ViewMessage({
+        { id = PRESENCE_VIEW, x = card[1], y = card[2], w = card[3], h = card[4], fontPx = POP.fontPx,
+            rowPx = POP.rowPx },
+        ChatViewEntry(),
+    }))
+end
+
+-- The popup's VIEW again every `resend` seconds while it shows.
+function PopupDue()
+    if popup and popup.resend > 0 and M.Now() >= popup.nextView then
+        popup.nextView = popup.nextView + popup.resend
+        SendPopupView()
+    end
+end
+
+-- o.resend: seconds between two VIEWs while the popup shows (default 2, as the addon; 0: once).
+function E.Popup(o)
+    o = o or {}
+    popup = { resend = o.resend or 2 }
+    popup.nextView = M.Now() + popup.resend
+    SendPopupView()
+    Step(1)
+    DrawPopup()
+    Step(1)
+end
+
+function E.PopupClose()
+    assert(popup, "E2E.PopupClose needs E2E.Popup first")
+    popup = nil
+    Add({ layer = { id = 2, on = false } })
+    ns.Bridge.Send(ns.Bridge.ViewMessage({ ChatViewEntry() }))
     Step(1)
 end
 

@@ -13,9 +13,9 @@
 //! windows (for the Helper's GDI capture mode, which reads the screen) and refuses to run while WoW
 //! runs. The summary's `exposedPoints` counts grid points where fakewow was the visible window.
 //!
-//! Truth (JSON Lines, `t` = Unix epoch ms): header, ui, strip, covers, plates, lanes, layers, sent,
-//! dropped, mark, selfcheck, end. `lanes` lists the inline cards' hint lanes (user request U1,
-//! 2026-10-19). A scenario's layers (the conversation window, drawn over the chat frames and under
+//! Truth (JSON Lines, `t` = Unix epoch ms): header, ui, strip, covers, plates, layers, sent,
+//! dropped, mark, selfcheck, end (the `lanes` records of the hint lanes went with them, addon
+//! build 6). A scenario's layers (the conversation window, drawn over the chat frames and under
 //! the covers) add their visible tag rows to `plates` and their meta data to `layers`.
 //! `--selfcheck` grabs the window back with GDI about once a second while the picture is stable and checks it pixel for pixel against what was drawn, then reads the tags,
 //! plates and strip calibration back at the truth rectangles. `--wgc-check` does the same with
@@ -1150,7 +1150,6 @@ fn run(args: Args) -> Result<bool, String> {
     let mut last_ui: Option<bool> = None;
     let mut last_covers = String::new();
     let mut last_layers = String::new();
-    let mut last_lanes = String::new();
     let mut pending_sent: Vec<(scenario::Sent, bool)> = applied0.sent;
     let mut pending_dropped: Vec<(u32, u32)> = applied0.dropped;
     let mut pending_marks: Vec<String> = applied0.marks;
@@ -1251,13 +1250,6 @@ fn run(args: Args) -> Result<bool, String> {
         if ikey != last_items {
             truth.emit(painted, json!({"ev": "plates", "items": items}));
             last_items = ikey;
-        }
-        // the inline cards' hint lanes (user request U1); the window's are in its layer's meta
-        let lane_items = json!(ls.iter().flat_map(truth::lanes).map(|t| truth::lane_json(&t, st.ui)).collect::<Vec<_>>());
-        let lane_key = lane_items.to_string();
-        if lane_key != last_lanes && !(last_lanes.is_empty() && lane_key == "[]") {
-            truth.emit(painted, json!({"ev": "lanes", "items": lane_items}));
-            last_lanes = lane_key;
         }
 
         // Self-checks while the picture is stable.

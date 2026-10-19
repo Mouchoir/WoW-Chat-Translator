@@ -7,9 +7,6 @@ use crate::raster::IRect;
 use crate::tagcode::{self, TagId, PLATE_RGB};
 
 pub const ROW_LINK: &str = "addon:TranslateProbe:x:";
-/// The text colour of an inline card's hint lane (the addon's `ChatButton` LANE_COLOR, ffd100,
-/// NORMAL_FONT_COLOR's gold; user request U1, 2026-10-19).
-pub const LANE_RGB: [u8; 3] = [255, 209, 0];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plate {
@@ -56,64 +53,6 @@ pub fn plates(l: &FrameLayout) -> Vec<Plate> {
         out.push(Plate { view: l.frame_id, id, tag_f, plate_f, tag: vis(tag_f), plate: plate_f.and_then(vis), alpha: row.alpha });
     }
     out
-}
-
-/// An inline card's hint lane: the chat row right after the last tagged row of a message, written
-/// in `LANE_RGB` from its indent (a blank row until the addon reveals the hint, 1.5 s after the
-/// click). The Helper must paint it over while it paints the card.
-#[derive(Clone, Debug, PartialEq)]
-pub struct LaneTruth {
-    pub view: u8,
-    pub slot: u8,
-    /// From the tag's x0 to the plate's end, the row's top and height (client px, not clipped).
-    pub rect: IRect,
-    /// Entirely inside the chat clip rectangle.
-    pub inside: bool,
-    /// The hint is written (non-blank text): what a player sees without Translate Companion.
-    pub revealed: bool,
-    pub alpha: f64,
-}
-
-/// Every hint lane of a frame layout: a row whose text starts in `LANE_RGB` (no texture) right after
-/// a tagged row of the same message. That row may lie above the chat's top (`FrameLayout::above`):
-/// the lane is then the top line, cut by the top or whole, with no row of its card shown.
-pub fn lanes(l: &FrameLayout) -> Vec<LaneTruth> {
-    let mut out = Vec::new();
-    for next in &l.rows {
-        let lane_row = matches!(next.items.first(), Some(Item::Text { rgb, .. }) if *rgb == LANE_RGB)
-            && !next.items.iter().any(|it| matches!(it, Item::Tex { .. }));
-        if !lane_row {
-            continue;
-        }
-        let Some(row) = l.rows.iter().chain(&l.above).find(|r| r.entry == next.entry && r.y + r.height == next.y) else { continue };
-        let tex: Vec<(f64, f64, [u8; 3])> = row
-            .items
-            .iter()
-            .filter_map(|it| match it {
-                Item::Tex { x0, x1, rgb, link: Some(p), .. } if p.starts_with(ROW_LINK) => Some((*x0, *x1, *rgb)),
-                _ => None,
-            })
-            .collect();
-        if tex.len() < 9 || tex[8].2 != PLATE_RGB {
-            continue;
-        }
-        let colors: Vec<[u8; 3]> = tex[..8].iter().map(|t| t.2).collect();
-        let Some(id) = tagcode::decode(&colors) else { continue };
-        let cx = f64::from(l.clip.x);
-        let rect = IRect::from_edges(cx + tex[0].0, f64::from(next.y), cx + tex[8].1, f64::from(next.y + next.height));
-        let inside = rect.intersect(&l.clip) == Some(rect);
-        let revealed = next.items.iter().any(|it| matches!(it, Item::Text { text, .. } if !text.trim().is_empty()));
-        out.push(LaneTruth { view: l.frame_id, slot: id.slot, rect, inside, revealed, alpha: next.alpha });
-    }
-    out
-}
-
-/// One `lanes` item of the truth file.
-pub fn lane_json(t: &LaneTruth, ui_shown: bool) -> Value {
-    json!({
-        "view": t.view, "slot": t.slot, "rect": t.rect.to_array(), "inside": t.inside, "revealed": t.revealed,
-        "visible": ui_shown && t.alpha > 0.0, "alpha": (t.alpha * 100.0).round() / 100.0,
-    })
 }
 
 /// Parts of the plate (and tag) hidden by covering rectangles.
@@ -182,56 +121,5 @@ mod tests {
         let cov = covered(&p[0], &[IRect::new(300, 800, 400, 200)]);
         assert_eq!(cov.len(), 1);
         assert_eq!(cov[0].x, 300);
-    }
-
-    #[test]
-    fn hint_lanes_under_the_last_tagged_row() {
-        let f = FrameState { id: 1, name: String::new(), shown: true, clip: [28, 686, 563, 253], font_px: 20, ppu: 1.40625, spacing_px: 0.0, scroll: 0 };
-        let a = TagId { slot: 3, row: 0, sess_bit: 1 };
-        let b = TagId { slot: 3, row: 1, sess_bit: 1 };
-        let lane = |hint: &str| format!("|n|cffffd100    |Haddon:TranslateProbe:x:7:101|h{hint}|h|r|cff66bbff|Haddon:TranslateProbe:d:7:101|h[Download]|h|r");
-        let gloss = "|n|cffe6cc80    |Haddon:TranslateProbe:x:7:101|hGloss: lol = laughing|h|r";
-        let entries = vec![
-            Entry { m: format!("[Bob]: hi{}{}{}{}", tag_row(a), tag_row(b), lane("No translation above? "), gloss), rgb: [255, 255, 255], ev: "CHAT_MSG_SAY".into(), ts: 0.0 },
-            Entry { m: format!("[Ann]: newer{}", tag_row(TagId { slot: 4, row: 0, sess_bit: 1 })), rgb: [255, 255, 255], ev: "CHAT_MSG_SAY".into(), ts: 0.0 },
-        ];
-        let mut m = FixedMeasure { per_char: 10.0 };
-        let l = layout_frame(&f, &entries, &|_| 1.0, &mut m);
-        let ls = lanes(&l);
-        assert_eq!(ls.len(), 1, "a lane under slot 3 only (slot 4 has none: the next row is not a lane)");
-        let t = &ls[0];
-        assert_eq!((t.view, t.slot), (1, 3));
-        // rows: text, tag a, tag b, lane, glossary, then the newer line and its row at the bottom
-        assert_eq!(t.rect.y, 939 - 40 - 40);
-        assert_eq!((t.rect.x, t.rect.h), (68, 20));
-        assert_eq!(t.rect.right(), 68 + 45 + 408);
-        assert!(t.inside && t.revealed);
-        // before the reveal the lane is a blank row
-        let entries = vec![Entry { m: format!("[Bob]: hi{}{}", tag_row(a), lane(" ").replace("[Download]", "")), rgb: [255, 255, 255], ev: "CHAT_MSG_SAY".into(), ts: 0.0 }];
-        let l = layout_frame(&f, &entries, &|_| 1.0, &mut m);
-        let ls = lanes(&l);
-        assert_eq!(ls.len(), 1);
-        assert!(!ls[0].revealed);
-    }
-
-    #[test]
-    fn a_lane_whose_rows_left_the_top_is_still_a_lane() {
-        // the card's rows above the chat's top, its lane the top line (whole, then cut by the top)
-        let a = TagId { slot: 3, row: 0, sess_bit: 1 };
-        let lane = "|n|cffffd100    |Haddon:TranslateProbe:x:7:101|hNo translation above? |h|r|cff66bbff|Haddon:TranslateProbe:d:7:101|h[Download]|h|r";
-        let mut entries = vec![Entry { m: format!("[Bob]: hi{}{}", tag_row(a), lane), rgb: [255, 255, 255], ev: "CHAT_MSG_SAY".into(), ts: 0.0 }];
-        for i in 0..3 {
-            entries.push(Entry { m: format!("[Ann]: line {i}"), rgb: [255, 255, 255], ev: "CHAT_MSG_SAY".into(), ts: 0.0 });
-        }
-        let mut m = FixedMeasure { per_char: 10.0 };
-        for (h, inside) in [(80, true), (70, false)] {
-            let f = FrameState { id: 1, name: String::new(), shown: true, clip: [28, 686, 563, h], font_px: 20, ppu: 1.40625, spacing_px: 0.0, scroll: 0 };
-            let l = layout_frame(&f, &entries, &|_| 1.0, &mut m);
-            assert!(!l.rows.iter().any(|r| r.items.iter().any(|it| matches!(it, Item::Tex { .. }))), "no tag row shows");
-            let ls = lanes(&l);
-            assert_eq!(ls.len(), 1, "clip {h}");
-            assert_eq!((ls[0].slot, ls[0].inside), (3, inside), "clip {h}");
-            assert_eq!(ls[0].rect.y, 686 + h - 80);
-        }
     }
 }

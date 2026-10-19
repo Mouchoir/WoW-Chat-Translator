@@ -15,8 +15,8 @@ scenarios\<name>.lua --make_scenario.js--> out\<name>.json --fakewow--> window +
 | File | Role |
 |---|---|
 | `scenario_lib.lua` | the `E2E` API scenarios use; records every mock frame (1/60 s) that changed: strip blocks, chat frame rectangles, fonts, scroll offsets, the visible end of each chat history, and the messages handed to `Bridge.Send` |
-| `scenarios\*.lua` | the ten scenarios below |
-| `make_scenario.js` | runs `tests\mock.lua`, the addon files (TOC order, through `tests\run.js`), `scenario_lib.lua` and a scenario; writes the recording (format in `helper\testkit\src\scenario.rs`) |
+| `scenarios\*.lua` | the twelve scenarios below |
+| `make_scenario.js` | runs `tests\mock.lua`, the addon files (TOC order, through `tests\run.js`), `scenario_lib.lua` and a scenario; writes the recording (format in `helper\testkit\src\scenario.rs`). The addon loads `CompanionStatus.lua` as a running Translate Companion writes it (`scenario_lib.lua`, `E2E.Start`), so its session starts confirmed and a [T] click reserves rows as before (since addon build 6 a click without a confirmed Translate Companion only opens the popup) |
 | `helper\testkit` (crate `tp_testkit`, bin `fakewow`) | plays a recording in a window of class `TPFakeWow` and writes the truth |
 | `check.py` | compares a truth file with the Helper's `--diag-json`; also makes synthetic diags for its self-test |
 | `run.py` | runs whole scenarios: recording, fakewow, the Helper, check.py, process clean-up |
@@ -38,7 +38,8 @@ python -I tests\e2e\run.py --scenario basic --translator llama --helper-arg=--ba
 `run.py` starts the Helper as
 `WoWTranslateCompanion.exe --wow-class TPFakeWow --translator echo --capture wgc|gdi --no-overlay --no-clipboard --no-tray --diag-json F --log-dir D --exit-after S`
 (`--no-clipboard`: the Helper never touches the clipboard; `--no-overlay` implies it, it is given
-anyway). `--helper EXE` and `--fakewow EXE` take builds from another target folder (for example a
+anyway). A test run never writes the status file into the user's WoW folders (since 0.6.0:
+`--no-overlay` and `--wow-class` turn it off unless `--status-root` names a folder). `--helper EXE` and `--fakewow EXE` take builds from another target folder (for example a
 `CARGO_TARGET_DIR` of one's own while the user's Helper locks `helper\app\target`). With a Helper of
 the user's running (either exe name: they share the mutex), add `--helper-arg=--instance-name=e2e`
 (the test Helper then takes its own single-instance mutex).
@@ -80,19 +81,15 @@ a Helper the user was running counted as a leftover). Exit codes: 0 all passed, 
   - scroll offsets.
 - **Covers and Alt-Z:** game tooltips over plates, and Alt-Z periods (UIParent hidden: no chat,
   no strip, no tooltip).
-- **Layers:** an addon window over the chat frames and under the covers (the conversation window
-  of the `conv` scenario): opaque rectangles in client px; its visible tag rows join the truth's
-  `plates` (VIEW 200), and its meta data (view rectangle, hidden rows, reply card, the reply's
-  `lane` and every card's `lanes` as `{slot, rect, revealed}`) goes to a `layers` truth record.
-- **Hint lanes (2026-10-19):** the real addon writes a lane row right after the tagged rows of a
-  clicked line (`|cffffd100` gold, blank until its hint shows 1.5 s after the click, then the hint
-  and a `[Download]` link). fakewow lays it out like any row and writes `lanes` truth records:
-  `{view, slot, rect, inside, revealed, visible, alpha}`, the rect from the tag's x0 to the plate's
-  end over the lane row (`truth::lanes`: the row right after a message's last tagged row whose text
-  starts in the lane's gold). Since the integration review that tagged row may lie above the chat's
-  top (`FrameLayout::above`, never drawn): a lane whose card's rows left the top is still listed,
-  whole (`inside`) or cut by the top. The synthetic window draws its hint 2 px clear of the lane's
-  edges (the addon's smallest margin), so the Helper's 2-row edge test is exercised.
+- **Layers:** addon windows over the chat frames and under the covers: opaque rectangles in client
+  px; their visible tag rows join the truth's `plates`, and their meta data goes to a `layers`
+  truth record. Layer 1 is the conversation window of the `conv` scenario (VIEW 200; meta: view
+  rectangle, hidden rows, reply card, `bubble`); layer 2 the Translate Companion popup of the
+  `presence` scenarios (2026-10-19, user request R1; meta `presence`: `{view: 201, slot: 125,
+  card}`), drawn in the middle of the client.
+- **Hint lanes (2026-10-19, gone since addon build 6):** fakewow still writes a `lanes` truth
+  record for a gold row right after a message's last tagged row (`truth::lanes`), but the addon no
+  longer writes such rows, the synthetic window draws none, and check.py reads no lane.
 - **Display curve:** applied last, `out = 255 * clamp((in/255 - 0.5) * contrast + 0.5) ^ (1/gamma)`.
   `--gamma 2.2` brightens, like a higher WoW Gamma setting. Values under 1 darken.
 - **Truth:** JSON Lines, `t` = Unix epoch ms when the frame was painted. The events are `header`,
@@ -113,7 +110,7 @@ a Helper the user was running counted as a leftover). Exit codes: 0 all passed, 
 | Name | What happens |
 |---|---|
 | `basic` | 3 clicks (2, 2 and 5 reserved rows since the 1.35 row factor) |
-| `scroll` | 3 cards, 8 new lines push them up and out, scroll up 4 and 12 messages, back down, then 26 new lines push every card out of the top: for a while each card's hint lane is the chat's top line with no row of its card above it (orphan lanes, 2026-10-19) |
+| `scroll` | 3 cards, 8 new lines push them up and out, scroll up 4 and 12 messages, back down, then 26 new lines push every card out of the top |
 | `fade` | fade shortened to 5 s + 3 s; cards fade and hide; a scroll resets the fade and they come back |
 | `cover` | a tooltip over the right half of a plate, then one over the middle of two rows |
 | `tabs` | a second chat window shows the same lines, then tab switches |
@@ -121,7 +118,9 @@ a Helper the user was running counted as a leftover). Exit codes: 0 all passed, 
 | `dropped` | the strip is not painted during one request; "Not received" must show; a re-click repairs it |
 | `late_start` | 3 clicks, then the Helper starts at 7 s (no VIEW, no TRANSLATE); "Not received", re-click |
 | `gamma22` | `basic` through Gamma 2.2 (the Helper measures the curve on the strip and undoes it before the tag scan) |
-| `conv` | the conversation window (`E2E.Window`, a synthetic layer with the real tag colours; VIEW 200 first, then the chat frame it overlaps): 3 bubbles over the opaque fill, each with its hint lane (gold hint and blue `[Download]` 1.5 s after the bubble, clear of the lane's edges), a reply card with flags 14 and its hint lane, then a scroll that leaves the first bubble half out |
+| `conv` | the conversation window (`E2E.Window`, a synthetic layer with the real tag colours; VIEW 200 first, then the chat frame it overlaps): 3 bubbles over the opaque fill (no hint lane since addon build 6), a reply card with flags 14, then a scroll that leaves the first bubble half out |
+| `presence` | the Translate Companion popup (`E2E.Popup`, layer 2 in the middle of the client): its status card of slot 125 (a real tag and the plate over a `BUBBLE_RGB` fill, never a TRANSLATE) and the addon's grey caption under it; its VIEW 201 (the card's fill, then the chat frame) when it opens and every 2 s, as the addon sends it; after 4 s it closes (Continue: the chat frame's VIEW alone) and the held click runs (VIEW and TRANSLATE) |
+| `presence_late` | the same popup 3 s before the Helper starts, its VIEW sent once: the Helper has no VIEW and must find the card by its discovery scan in the middle of the client, then paint it; Continue and the click as in `presence` |
 
 ## check.py
 
@@ -145,19 +144,17 @@ See the docstring for details.
   the D3D11 device), which is 1-2% of a 15-30 s run, and process times are sampled by the clock
   interrupt, so two identical runs can differ by more than 1%.
 - **fakewow:** fakewow never had the focus.
-- **lanes** (every scenario whose truth has hint lanes, since 2026-10-19: the inline cards' and
-  the window's): at settled captures, every lane that is visible, entirely inside its view, not
-  under a cover and right under a card row that must be shown has its card's lane in the diag
-  within +-2 px with at least 60% of its columns passing; an inline lane with no row of its slot
-  shown right above it (its card's rows left the top of the chat, or only a sliver under 8 px
-  shows) must be among the diag's orphan lanes (the `lanes` list of the `cards` record), counted
-  as `orphan_checks` (the integration review dropped the skip that let such lanes go unchecked);
-  no diag lane, a card's or an orphan, is where the truth has none (a lane painted over the next
-  chat line; an orphan cut by the top lies over the truth lane's visible rows); lane pixels were
-  painted (`lanePx`); every lane revealed after its card was shown had been found before its
-  reveal (the hint never flashes). The hint itself is in fakewow's picture (`revealed`): what a
-  player sees with no Helper.
-- **conv only** (the truth has a window layer): `window_fill` (every background sample of a window
+- **lanes:** gone with the hint lanes (addon build 6, Translate Companion 0.6.0, 2026-10-19).
+- **presence** (scenarios whose truth has the popup layer, 2026-10-19, user request R1): every
+  time the popup shows while the Helper runs, a card of kind `presence` on slot 125 appears within
+  1.5 s of the later of the popup and the Helper's first capture (`detect_ms`; by discovery when
+  the Helper has no VIEW), the overlay draws text in its view (201, or the discovery view 0), its
+  background samples are within 6 levels of `BUBBLE_RGB` in VIEW 201 and by discovery alike (the
+  card's fill left of the tag is wider than the discovery scan's left span since the integration
+  review; the discovery ones are also listed as `discovery_samples`), slot 125 is never another
+  kind while the popup shows, and the card is gone within 400 ms of the popup closing.
+  The popup's plate is also a VIEW 201 plate for `bands`, `hidden` and `masks`.
+- **conv only** (the truth has the conversation window's layer, VIEW 200): `window_fill` (every background sample of a window
   card within 6 levels of `BUBBLE_RGB`, every window card with at least one sample, since a card
   with none is painted with the navy plate colour; tags painted), `reply_status` (final, clipboard outcome
   "off", never copied), `partial_rows` (a half-out bubble's hidden rows never get a band, its visible rows do),
@@ -165,15 +162,15 @@ See the docstring for details.
   VIEW that covers it, reported as `strip_delay`), `cpu_vs_i2` (within 10% of the highest CPU
   figures of DESIGN.md I.2).
 
-`--selftest --truth T` builds a perfect diag for a truth file (with the orphan lanes where the
-truth has them) and a copy shifted by 5 px: the first must pass and the second must fail. For a
-truth with a window layer (`conv`) the perfect diag also carries what the window checks read
-(background samples in `BUBBLE_RGB`, the reply bit and the outcome "off" on slot 126, `overlay`
-and `clip` records), and a third, broken diag (window samples in the plate colour or missing) must
-fail `window_fill` (integration review fix: the window checks had never been shown to fail).
-Every card of the perfect diag carries the truth's
-lane; for a truth with lanes, a diag with no lane and one with each lane a row too low (over the
-next chat line) must both fail `lanes`. `--synth-diag OUT [--shift-px N]` writes such a diag.
+`--selftest --truth T` builds a perfect diag for a truth file and a copy shifted by 5 px: the
+first must pass and the second must fail. For a truth with the conversation window (`conv`) the
+perfect diag also carries what the window checks read (background samples in `BUBBLE_RGB`, the
+reply bit and the outcome "off" on slot 126, `overlay` and `clip` records), and a third, broken
+diag (window samples in the plate colour or missing) must fail `window_fill` (integration review
+fix: the window checks had never been shown to fail). For a truth with the Translate Companion
+popup the perfect diag has a `presence` card on slot 125 with an `overlay` record holding text,
+and a diag that takes slot 125 for an unknown slot (pending, then missing) must fail `presence`.
+`--synth-diag OUT [--shift-px N]` writes such a diag.
 
 ## Deviations from the design (amendment A9) and why
 
@@ -228,13 +225,26 @@ next chat line) must both fail `lanes`. `--synth-diag OUT [--shift-px N]` writes
    `lanes`. `Diag.window_view_since` now also requires the rectangle the Helper scanned with
    (decoded in an earlier capture) to hold the tag or lane; the same diag then passes.
 
-9. **Lanes at the top of the chat (integration review, 2026-10-19).** check.py skipped every lane
+9. **Lanes at the top of the chat (integration review, 2026-10-19; moot since addon build 6, which
+   draws no lane).** check.py skipped every lane
    without a shown row right above it, and no scenario reached that state, so a hint left visible
    at the chat's top line went unseen. The `scroll` scenario now pushes every card out of the top,
    the truth lists a lane whose tagged row is above the chat, and check.py requires the orphan lane
    in the diag; a first run of the new Helper also showed a 4 px sliver painted for one more line
    where the truth had no lane any more (the line under the lane): the orphan search now requires
    the lane's remembered ink, and the truth lists cut lanes, so the false-lane check sees them.
+
+10. **The Translate Companion popup is synthetic too (2026-10-19, user request R1).** The addon's
+    popup (`CompanionDialog.lua`) is a frame of the mock, which fakewow does not draw (only the chat
+    frames, the strip and layers): the rig draws the popup as layer 2 with the real tag colours of
+    slot 125 and sends its VIEW 201 through the addon's own `Bridge.Send`, as `E2E.Window` does for
+    the conversation window. The addon's own popup flow (Presence, Continue) is covered by the
+    harness (`tests\harness*.lua`). The card's geometry follows the addon's: one row, the tag and
+    the plate over an opaque `BUBBLE_RGB` fill with `pad` px above, under and right of them and the
+    addon's wider fill left of the tag (`CompanionDialog.DISCOVERY_LEFT`: 0.75 of the row height and
+    3 px), VIEW 201 the fill. It is drawn at integer px for one size; the real metrics at fractional
+    px are checked by `helper\app\tests\presence_card.rs` (1080p) and in game (G21 step 5, two UI
+    scales).
 
 ## What the rig found in the Helper build of 2026-10-16 21:22 (echo, WGC)
 

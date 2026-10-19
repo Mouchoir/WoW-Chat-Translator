@@ -30,7 +30,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
-SCENARIOS = ["basic", "scroll", "fade", "cover", "tabs", "altz", "dropped", "late_start", "gamma22", "conv"]
+SCENARIOS = ["basic", "scroll", "fade", "cover", "tabs", "altz", "dropped", "late_start", "gamma22", "conv",
+             "presence", "presence_late"]
 GAME_EXES = ["WowB.exe", "Wow.exe", "WowClassic.exe", "WowT.exe"]
 CREATE_NO_WINDOW = 0x08000000
 # (pid, image name) of every process this script started

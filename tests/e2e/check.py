@@ -6,8 +6,8 @@
     python -I tests/e2e/check.py --selftest --truth T   (a conv truth also checks the window checks:
                                                          a perfect synthetic diag passes them, a
                                                          broken one fails window_fill; a truth with
-                                                         hint lanes: diags with no lane, or with a
-                                                         lane over the next line, fail lanes)
+                                                         the Translate Companion popup: a diag that
+                                                         never says "presence" fails presence)
 
 Exit code 0 when every check passes, 1 otherwise (2 on bad input).
 
@@ -35,18 +35,19 @@ Checks (design section E, P6 step 2):
 - cpu: the Helper used at most 3% of one core (when --helper-cpu-pct is given). The report also
   gives steady_pct_one_core, the same figure without the first 2 s (informational, not judged).
 
-Hint lanes (user request U1, 2026-10-19; every scenario whose truth has lanes: the inline cards'
-from fakewow's `lanes` events, the window's bubbles and reply card from its layer's meta):
-- lanes: at settled captures, every lane that is visible, entirely inside its view, not under a
-  cover and right under a card row that must be shown, has its card's lane in the diag within
-  +-px of the truth with at least 60% of its columns passing (covered while the card is painted);
-  an inline lane whose card's rows have left the top of the chat (no row of its slot right above
-  it, or only a sliver under 8 px: the tag scan cannot see it) must be in the diag's orphan lanes
-  (the `lanes` list of the cards record), counted apart as orphan checks; no diag lane, a card's
-  or an orphan, is ever where the truth has none (nothing is painted over the next chat line);
-  the overlay painted lane pixels (lanePx > 0); and every lane revealed (the hint drawn in the
-  game picture, what a player without Translate Companion sees) after its card was shown was
-  already found before its reveal (the hint never flashes).
+Hint lanes (user request U1, 2026-10-19) are gone since addon build 6 (user request R1): no
+check reads them, and the diag has no lane any more.
+
+Translate Companion popup (scenarios presence and presence_late; only when the truth has a layer
+whose meta has `presence`, user request R1, 2026-10-19): its one-row status card of slot 125 is a
+plate of VIEW 201 in the truth, so bands, hidden and masks apply to it too, and:
+- presence: every time the popup shows while the Helper runs, a card of kind "presence" on slot 125
+  appears within 1.5 s of the later of the popup and the Helper's first capture (detect_ms; the
+  app may have no VIEW and find it by discovery), the overlay draws text in its view (201, or the
+  discovery view 0), its background samples are the card's BUBBLE_RGB fill in VIEW 201 and found
+  by discovery alike (the addon's fill left of the tag is wider than the discovery scan's reach;
+  the discovery ones are also listed as discovery_samples), slot 125 is never another kind while
+  the popup shows, and the card is gone within 400 ms of the popup closing.
 
 Conversation window (scenario conv; only when the truth has `layers`, design B.4 E2E): the
 window's visible rows are plates of VIEW 200 in the truth, so latency, bands, hidden and done
@@ -85,7 +86,10 @@ PLATE_RGB = (32, 40, 64)
 REPLY_SLOT = 126
 WINDOW_VIEW_MIN = 200
 FILL_TOL = 6
-LANE_SHARE = 0.6
+# The Translate Companion popup's status card (docs\BRIDGE.md section 8d)
+PRESENCE_SLOT = 125
+PRESENCE_DETECT_MS = 1500.0
+PRESENCE_GONE_MS = 400.0
 # DESIGN.md I.2: the highest CPU figures of the 9 echo scenarios (whole run, after the first 2 s)
 I2_CPU_WHOLE = 3.55
 I2_CPU_STEADY = 1.96
@@ -158,29 +162,6 @@ class Truth:
                 continue
             self.states.append((e["t"], items, covers, ui))
         self.times = [s[0] for s in self.states]
-        # hint lanes: the inline cards' ("lanes" events) and the window's (its layer's meta), as
-        # (t, [{view, slot, rect, inside, revealed, visible, alpha}, ...])
-        self.lane_states, self.lane_changes = [], []
-        chat, win, last_sig = [], [], None
-        for e in events:
-            ev = e.get("ev")
-            if ev == "lanes":
-                chat = e.get("items", [])
-            elif ev == "layers":
-                shown = e.get("shown", True)
-                win = [{"view": WINDOW_VIEW_MIN, "slot": ln["slot"], "rect": ln["rect"], "inside": True,
-                        "revealed": ln.get("revealed", True), "visible": shown, "alpha": 1.0}
-                       for m in layer_meta(e) for ln in (m.get("lanes") or [])]
-            else:
-                continue
-            lanes = chat + win
-            self.lane_states.append((e["t"], lanes))
-            sig = tuple(sorted((ln["view"], ln["slot"], tuple(ln["rect"]), bool(ln.get("inside")), bool(ln.get("visible")))
-                               for ln in lanes))
-            if sig != last_sig:
-                self.lane_changes.append(e["t"])
-                last_sig = sig
-        self.lane_times = [s[0] for s in self.lane_states]
         self.sent = [e for e in events if e.get("ev") == "sent"]
         self.dropped = [e for e in events if e.get("ev") == "dropped"]
         self.layers = [e for e in events if e.get("ev") == "layers"]
@@ -208,14 +189,6 @@ class Truth:
     def last_change(self, t):
         k = bisect.bisect_right(self.changes, t) - 1
         return self.changes[k] if k >= 0 else -math.inf
-
-    def lanes_at(self, t):
-        k = bisect.bisect_right(self.lane_times, t) - 1
-        return self.lane_states[k][1] if k >= 0 else []
-
-    def last_lane_change(self, t):
-        k = bisect.bisect_right(self.lane_changes, t) - 1
-        return self.lane_changes[k] if k >= 0 else -math.inf
 
 
 # ------------------------------------------------------------------------------------------- diag
@@ -279,12 +252,6 @@ class Diag:
         e = self.cards_ev[k]
         return e.get("cards", []), e.get("hidden")
 
-    def orphans_before(self, t):
-        """The orphan lanes of the last cards record before t: [{view, slot, lane}, ...]."""
-        k = bisect.bisect_left(self.cards_t, t) - 1
-        if k < 0 or self.cards_ev[k].get("hidden"):
-            return []
-        return self.cards_ev[k].get("lanes") or []
 
 
 def shown_bands(cards, hidden):
@@ -512,8 +479,9 @@ def steady_cpu_pct(diag, cpu_pct):
 
 
 def window_cards(diag):
-    """(t, card) of every card shown in a window view (VIEW id >= 200)."""
-    return [(e["t"], c) for e in diag.cards_ev for c in e.get("cards", []) if c.get("view", 0) >= WINDOW_VIEW_MIN]
+    """(t, card) of every card shown in the conversation window's view (VIEW id 200; 201 is the
+    Translate Companion popup, checked by `presence`)."""
+    return [(e["t"], c) for e in diag.cards_ev for c in e.get("cards", []) if c.get("view", 0) == WINDOW_VIEW_MIN]
 
 
 def records_in_effect(diag, t0, t1):
@@ -618,116 +586,78 @@ def check_window(truth, diag, rep, cpu_pct):
                 max_whole=round(1.1 * I2_CPU_WHOLE, 2), max_steady=round(1.1 * I2_CPU_STEADY, 2))
 
 
-def orphan_lane(ln, items, covers, px):
-    """True when an inline lane's card rows have left the top of its chat: no row of its slot ends
-    right above it, or that row shows less than 8 px (the tag scan cannot see it)."""
-    if ln["view"] >= WINDOW_VIEW_MIN:
-        return False
-    r = ln["rect"]
-    above = [it for it in items if it["slot"] == ln["slot"] and it["view"] == ln["view"] and it.get("tag")
-             and abs(bottom(it["tag"]) - r[1]) <= px + 1]
-    if not above:
-        return True
-    return all(it["tag"][3] < 8 and it.get("alpha", 0) >= 0.45 and not any(intersects(it["tag"], cv) for cv in covers)
-               for it in above)
+def conv_window(truth):
+    """True when the truth has the conversation window's layer (its meta names the bubble fill)."""
+    return any(m.get("bubble") for e in truth.layers for m in layer_meta(e))
 
 
-def lane_ok(lane, y, px):
-    """A diag lane within +-px of the truth's top y, with at least LANE_SHARE of its columns passing."""
-    return bool(lane) and abs(lane["rect"][1] - y) <= px and lane["cols"] > 0 and lane["pass"] >= LANE_SHARE * lane["cols"]
+def presence_periods(truth):
+    """(t_on, t_off, meta) of every time the Translate Companion popup's status card shows: a
+    layer whose meta has `presence` ({view, slot, card}) while the UI is shown."""
+    out, on, meta = [], None, None
+    for e in truth.layers:
+        m = next((mm["presence"] for mm in layer_meta(e) if mm.get("presence")), None)
+        shown = bool(m) and e.get("shown", True)
+        if shown and on is None:
+            on, meta = e["t"], m
+        elif not shown and on is not None:
+            out.append((on, e["t"], meta))
+            on = None
+    if on is not None:
+        out.append((on, truth.until, meta))
+    return out
 
 
-def check_lanes(truth, diag, rep, captures, px, strict):
-    """Hint lanes (see the module docstring)."""
-    if not any(lanes for _, lanes in truth.lane_states):
+def check_presence(truth, diag, rep):
+    """The popup's status card (see the module docstring)."""
+    periods = presence_periods(truth)
+    if not periods:
         return
-    caps = diag.captures if strict else diag.scan_caps
-    checks, found, missed, false_lanes, first_missed, first_false = 0, 0, 0, 0, [], []
-    orphan_checks, orphan_found = 0, 0
-    for c in caps:
-        ch = max(truth.last_change(c), truth.last_lane_change(c))
-        if count_in(caps, ch, c) < captures:
+    start = diag.first_capture
+    results = []
+    for t_on, t_off, meta in periods:
+        view = meta.get("view", 201)
+        r = {"shown": round(t_on, 1), "closed": round(t_off, 1), "view": view}
+        if start is None or start >= t_off - PRESENCE_DETECT_MS:
+            r["skipped"] = "the Helper ran too little of the time the popup showed"
+            results.append(r)
             continue
-        nxt = diag.next_capture(c)
-        if nxt > truth.until:
-            break
-        cards, hidden = diag.cards_before(nxt)
-        orphans = diag.orphans_before(nxt)
-        items, covers, ui = truth.at(c)
-        lanes = truth.lanes_at(c)
-        shown = [] if hidden else [cd for cd in cards if not cd.get("covered")]
-        for ln in lanes:
-            r = ln["rect"]
-            if not (ui and ln.get("visible") and ln.get("inside")) or ln.get("alpha", 1.0) < 0.45:
-                continue
-            if any(intersects(r, cv) for cv in covers):
-                continue
-            # the card's row right above the lane must be shown, or the lane is an orphan: its
-            # card's rows have left the top of the chat (2026-10-19)
-            above = [it for it in items if it["slot"] == ln["slot"] and it["view"] == ln["view"] and it.get("tag")
-                     and expectation(it, covers) == "band" and abs(bottom(it["tag"]) - r[1]) <= px + 1]
-            orphan = not above and orphan_lane(ln, items, covers, px)
-            if not above and not orphan:
-                continue
-            if not strict:
-                since = diag.view_since(ln["view"], c)
-                if since is not None and ln["view"] >= WINDOW_VIEW_MIN:
-                    since = diag.window_view_since(ln["view"], r, c)
-                if since is None or count_in(caps, max(ch, since), c) < captures:
+        t0 = max(t_on, start)
+        recs = [e for e in diag.cards_ev if t0 <= e["t"] < t_off and not e.get("hidden")]
+        first = next((e["t"] for e in recs if any(c["slot"] == PRESENCE_SLOT and c.get("kind") == "presence"
+                                                    for c in e.get("cards", []))), None)
+        r["helper_late"] = start > t_on
+        r["detect_ms"] = None if first is None else round(first - t0, 1)
+        r["views"] = sorted({c.get("view", 0) for e in recs for c in e.get("cards", []) if c["slot"] == PRESENCE_SLOT})
+        r["other_kinds"] = sorted({c.get("kind") for e in recs for c in e.get("cards", [])
+                                   if c["slot"] == PRESENCE_SLOT and c.get("kind") != "presence"})
+        # drawn: text in the card's view (201, or the discovery view 0) once it is found
+        r["painted"] = first is not None and any(o["t"] >= first - 1 and o.get("textPx", 0) > 0 and o.get("view") in (0, view)
+                                                 for o in diag.overlay)
+        # the card's fill: every background sample is within FILL_TOL of BUBBLE_RGB, in the
+        # popup's VIEW and by discovery alike (no VIEW, until the addon sends it again: the left
+        # span reaches 0.75 x the row height left of the tag, inside the addon's wider left fill;
+        # integration review, before it the samples were the popup's own background)
+        off, disc = [], []
+        for e in recs:
+            for c in e.get("cards", []):
+                if c["slot"] != PRESENCE_SLOT:
                     continue
-            checks += 1
-            orphan_checks += int(orphan)
-            ok = any(cd["slot"] == ln["slot"] and cd.get("view", 0) in (0, ln["view"]) and lane_ok(cd.get("lane"), r[1], px)
-                     for cd in shown) or any(o["slot"] == ln["slot"] and o["view"] == ln["view"] and lane_ok(o.get("lane"), r[1], px)
-                                             for o in orphans)
-            if ok:
-                found += 1
-                orphan_found += int(orphan)
-            else:
-                missed += 1
-                if len(first_missed) < 12:
-                    lane = next((cd.get("lane") for cd in shown if cd["slot"] == ln["slot"]), None) or \
-                        next((o.get("lane") for o in orphans if o["slot"] == ln["slot"]), None)
-                    first_missed.append({"t": c, "view": ln["view"], "slot": ln["slot"], "truth": r, "diag": lane, "orphan": orphan})
-        # nothing is ever painted where no lane is (a card's lane, or an orphan: an orphan cut by the
-        # top of the chat lies over the truth lane's visible rows)
-        painted = [(cd.get("view", 0), cd["slot"], cd.get("lane")) for cd in shown] + \
-            [(o["view"], o["slot"], o.get("lane")) for o in orphans]
-        for view, slot, dl in painted:
-            if not dl:
-                continue
-            ok = any(ln["slot"] == slot and view in (0, ln["view"])
-                     and (abs(ln["rect"][1] - dl["rect"][1]) <= px + 1
-                          or (dl["rect"][1] > ln["rect"][1] and abs(bottom(ln["rect"]) - bottom(dl["rect"])) <= px + 1))
-                     and ln["rect"][0] < right(dl["rect"]) and dl["rect"][0] < right(ln["rect"]) for ln in lanes)
-            if not ok:
-                false_lanes += 1
-                if len(first_false) < 12:
-                    first_false.append({"t": c, "view": view, "slot": slot, "diag": dl["rect"]})
-    lane_px = max((o.get("lanePx", 0) for o in diag.overlay), default=0)
-    # no flash: a lane revealed after its card was shown was found before its reveal
-    revealed, late = 0, []
-    seen_reveal = set()
-    for t, lanes in truth.lane_states:
-        for ln in lanes:
-            key = (ln["view"], ln["slot"])
-            if not ln.get("revealed") or key in seen_reveal:
-                continue
-            seen_reveal.add(key)
-            revealed += 1
-            card_t = next((e["t"] for e in diag.cards_ev if any(cd["slot"] == ln["slot"] and cd.get("view", 0) in (0, ln["view"])
-                                                                  for cd in e.get("cards", []))), None)
-            if card_t is None or card_t > t - 300:
-                continue  # the Helper did not show the card well before the reveal (it started late)
-            lane_t = next((e["t"] for e in diag.cards_ev if any(cd["slot"] == ln["slot"] and cd.get("view", 0) in (0, ln["view"])
-                                                                  and cd.get("lane") for cd in e.get("cards", []))), None)
-            if lane_t is None or lane_t > t:
-                late.append({"view": ln["view"], "slot": ln["slot"], "reveal": t, "lane_found": lane_t})
-    ok = checks > 0 and missed == 0 and false_lanes == 0 and lane_px > 0 and revealed > 0 and not late
-    rep.add("lanes", ok, lane_checks=checks, found=found, missed=missed, first_missed=first_missed,
-            orphan_checks=orphan_checks, orphans_found=orphan_found,
-            false_lanes=false_lanes, first_false=first_false, lane_px=lane_px, revealed=revealed,
-            found_after_reveal=late)
+                samples = [smp for pair in c.get("bg") or [] for smp in pair or [] if smp is not None]
+                if c.get("view", 0) != view:
+                    disc.extend(samples)
+                off.extend(smp for smp in samples if max(abs(smp[k] - BUBBLE_RGB[k]) for k in range(3)) > FILL_TOL)
+        r["fill_off"] = off[:6]
+        r["discovery_samples"] = sorted({tuple(x) for x in disc})[:6]
+        # gone soon after the popup closed
+        k = bisect.bisect_left(diag.cards_t, t_off + PRESENCE_GONE_MS) - 1
+        r["gone"] = t_off >= truth.until or k < 0 or not any(c["slot"] == PRESENCE_SLOT for c in diag.cards_ev[k].get("cards", []))
+        r["ok"] = (r["detect_ms"] is not None and r["detect_ms"] <= PRESENCE_DETECT_MS and r["painted"]
+                   and not r["other_kinds"] and not off and r["gone"])
+        results.append(r)
+    judged = [r for r in results if "skipped" not in r]
+    rep.add("presence", bool(judged) and all(r["ok"] for r in judged), periods=len(results), results=results,
+            detect_limit_ms=PRESENCE_DETECT_MS, gone_limit_ms=PRESENCE_GONE_MS)
 
 
 def run_checks(truth, diag, captures, px, cpu_pct, done_within_s, strict=False):
@@ -740,9 +670,9 @@ def run_checks(truth, diag, captures, px, cpu_pct, done_within_s, strict=False):
     check_frames(truth, diag, rep, captures, px, strict)
     check_missing(truth, diag, rep)
     check_done(truth, diag, rep, done_within_s)
-    check_lanes(truth, diag, rep, captures, px, strict)
-    if any(e.get("items") for e in truth.layers):
+    if conv_window(truth):
         check_window(truth, diag, rep, cpu_pct)
+    check_presence(truth, diag, rep)
     if cpu_pct is not None:
         rep.add("cpu", cpu_pct <= CPU_MAX_PCT, helper_pct_one_core=cpu_pct, max=CPU_MAX_PCT,
                 steady_pct_one_core=steady_cpu_pct(diag, cpu_pct))
@@ -754,15 +684,14 @@ def run_checks(truth, diag, captures, px, cpu_pct, done_within_s, strict=False):
 
 
 # ------------------------------------------------------------------------------- synthetic diag
-def synth_diag(truth, shift=0, hz=30.0, process_ms=12.0, window_broken=False, lanes_mode="truth"):
+def synth_diag(truth, shift=0, hz=30.0, process_ms=12.0, window_broken=False, presence_broken=False):
     """A diag file a perfect Helper would write for this truth (shift moves every rectangle).
-    Every card carries the truth's hint lane under it (when there is one), and an overlay record
-    says lane pixels were painted. Window cards (VIEW id >= 200) also carry what the window checks
-    read: background samples in BUBBLE_RGB, the reply bit and clipboard outcome "off" on the reply
-    slot, and overlay and clip records. window_broken: the window cards' samples are the plate
-    colour or missing (window_fill must fail). lanes_mode "none": no card ever has a lane (a
-    Helper that leaves every hint visible); "extra": every card claims its lane a row too low
-    (painted over the next chat line). Either must fail the lanes check."""
+    Window cards (VIEW id >= 200) also carry what the window checks read: background samples in
+    BUBBLE_RGB, the reply bit and clipboard outcome "off" on the reply slot, and overlay and clip
+    records. window_broken: the window cards' samples are the plate colour or missing (window_fill
+    must fail). The popup's status card (slot 125) is a "presence" card with an overlay record
+    with text in its view; presence_broken: it is "pending" then "missing" like an unknown slot
+    (a Helper that does not know the card: presence must fail)."""
     h = truth.header
     start = h["playStart"] + h.get("helperStartMs", 0)
     end = truth.end["t"] if truth.end else (truth.states[-1][0] if truth.states else start) + 1000
@@ -779,7 +708,8 @@ def synth_diag(truth, shift=0, hz=30.0, process_ms=12.0, window_broken=False, la
     t = start
     k = 0
     lag = period * 0.9  # the picture a capture sees is almost one capture old
-    window_seen, lane_seen = False, False
+    window_seen = False
+    presence_views = set()
     while t <= end:
         out.append({"t": round(t, 1), "ev": "capture", "fresh": True, "method": "wgc"})
         while k < len(msg_times) and msg_times[k][0] <= t:
@@ -801,6 +731,9 @@ def synth_diag(truth, shift=0, hz=30.0, process_ms=12.0, window_broken=False, la
             req = known.get(slot)
             if req is not None:
                 kind, state = "request", "done"
+            elif slot == PRESENCE_SLOT and not presence_broken:
+                kind = state = "presence"
+                presence_views.add(view)
             else:
                 kind = "missing" if t - first_seen[slot] >= 1500 else "pending"
                 state = kind
@@ -831,21 +764,7 @@ def synth_diag(truth, shift=0, hz=30.0, process_ms=12.0, window_broken=False, la
                 masks.append({"rect": [plate[0] + 1 + shift, plate[1] + shift, plate[2] - 1, plate[3]], "runs": runs})
             card = {"slot": slot, "req": req, "view": view, "kind": kind, "rows": [i["row"] for i in its],
                     "bands": bands, "tags": tags, "gaps": [], "masks": masks, "alpha": 1.0, "plate": True,
-                    "state": state, "covered": False, "lane": None}
-            last_tag = its[-1]["tag"]
-            for ln in ([] if lanes_mode == "none" else truth.lanes_at(t - lag)):
-                lr = ln["rect"]
-                if (ln["view"], ln["slot"]) == (view, slot) and ln.get("inside") and ln.get("visible") \
-                        and abs(lr[1] - bottom(last_tag)) <= 1 and not any(intersects(lr, cv) for cv in covers):
-                    card["lane"] = {"rect": [lr[0] + shift, lr[1] + shift, lr[2], lr[3]],
-                                    "kind": "window" if view >= WINDOW_VIEW_MIN else "chat",
-                                    "rgb": list(BUBBLE_RGB), "rgbRight": None, "cols": lr[2], "pass": lr[2]}
-                    lane_seen = True
-            if lanes_mode == "extra" and its:
-                lr = [last_tag[0], bottom(last_tag) + 2 * last_tag[3], 300, last_tag[3]]
-                card["lane"] = {"rect": [lr[0] + shift, lr[1] + shift, lr[2], lr[3]], "kind": "chat", "rgb": list(BUBBLE_RGB),
-                                "rgbRight": None, "cols": lr[2], "pass": lr[2]}
-                lane_seen = True
+                    "state": state, "covered": False}
             if view >= WINDOW_VIEW_MIN:
                 window_seen = True
                 fill = list(PLATE_RGB) if window_broken else list(BUBBLE_RGB)
@@ -856,27 +775,16 @@ def synth_diag(truth, shift=0, hz=30.0, process_ms=12.0, window_broken=False, la
                 if slot == REPLY_SLOT:
                     card["clip"] = "off" if state in FINISHED else None
             cards.append(card)
-        # orphan lanes: the inline lanes whose card's rows have left the top of the chat
-        orphans = []
-        if lanes_mode == "truth":
-            for ln in truth.lanes_at(t - lag):
-                lr = ln["rect"]
-                if ln.get("inside") and ln.get("visible") and not any(intersects(lr, cv) for cv in covers) \
-                        and (ln["view"], ln["slot"]) not in groups and orphan_lane(ln, items, covers, 2):
-                    orphans.append({"view": ln["view"], "slot": ln["slot"],
-                                    "lane": {"rect": [lr[0] + shift, lr[1] + shift, lr[2], lr[3]], "kind": "chat",
-                                             "rgb": [20, 20, 20], "rgbRight": None, "cols": lr[2], "pass": lr[2]}})
-                    lane_seen = True
-        key = json.dumps([cards, orphans], sort_keys=True)
+        key = json.dumps(cards, sort_keys=True)
         if key != last_cards:
-            out.append({"t": round(t + process_ms, 1), "ev": "cards", "hidden": None, "cards": cards, "lanes": orphans})
+            out.append({"t": round(t + process_ms, 1), "ev": "cards", "hidden": None, "cards": cards})
+            for v in sorted({c["view"] for c in cards if c["kind"] == "presence"}):
+                out.append({"t": round(t + process_ms + 1, 1), "ev": "overlay", "view": v, "shown": True, "tagPx": 1, "textPx": 40})
             last_cards = key
         t += period
     if window_seen:
-        out.append({"t": round(end, 1), "ev": "overlay", "view": WINDOW_VIEW_MIN, "tagPx": 1, "lanePx": 1 if lane_seen else 0})
+        out.append({"t": round(end, 1), "ev": "overlay", "view": WINDOW_VIEW_MIN, "tagPx": 1})
         out.append({"t": round(end, 1), "ev": "clip", "what": "finish", "outcome": "off"})
-    elif lane_seen:
-        out.append({"t": round(end, 1), "ev": "overlay", "view": 1, "tagPx": 1, "lanePx": 1})
     out.sort(key=lambda e: e["t"])
     return out
 
@@ -912,21 +820,19 @@ def main():
         result = {"perfect": perfect.json(), "shifted5": {"pass": shifted.ok(), "failed_checks": [
             k for k, v in shifted.checks.items() if not v["pass_"]]}}
         ok = perfect.ok() and not shifted.ok()
-        if any(e.get("items") for e in truth.layers):
+        if conv_window(truth):
             broken = run_checks(truth, Diag(synth_diag(truth, 0, window_broken=True)), a.captures, a.px, None,
                                 a.done_within_s)
             failed = [k for k, v in broken.checks.items() if not v["pass_"]]
             result["window_broken"] = {"pass": broken.ok(), "failed_checks": failed}
             ok = ok and "window_fill" in failed
-        if any(lanes for _, lanes in truth.lane_states):
-            # hint lanes: a Helper that never covers them, and one that paints a lane over the next
-            # line, must both fail
-            for mode in ("none", "extra"):
-                broken = run_checks(truth, Diag(synth_diag(truth, 0, lanes_mode=mode)), a.captures, a.px, None,
-                                    a.done_within_s)
-                failed = [k for k, v in broken.checks.items() if not v["pass_"]]
-                result[f"lanes_{mode}"] = {"pass": broken.ok(), "failed_checks": failed}
-                ok = ok and "lanes" in failed
+        if presence_periods(truth):
+            # the popup's status card: a Helper that takes it for an unknown slot must fail
+            broken = run_checks(truth, Diag(synth_diag(truth, 0, presence_broken=True)), a.captures, a.px, None,
+                                a.done_within_s)
+            failed = [k for k, v in broken.checks.items() if not v["pass_"]]
+            result["presence_broken"] = {"pass": broken.ok(), "failed_checks": failed}
+            ok = ok and "presence" in failed and "presence" in perfect.checks
         result["selftest"] = "pass" if ok else "fail"
         print(json.dumps(result, indent=1))
         return 0 if ok else 1
