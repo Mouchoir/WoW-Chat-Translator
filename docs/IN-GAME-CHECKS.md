@@ -1,14 +1,17 @@
-# In-game checks (G1-G18)
+# In-game checks (G1-G19)
 
 The automated suites (`docs\DESIGN.md`, section E) run without the game: the addon on a mock
 client, the bridge against reference vectors, and the Helper against a stand-in game window. What
 only the real client can show is listed here. Each check says what to do, what to expect and what
 to report. Commands are typed from the repo root in PowerShell unless they start with `/tpr`
-(typed in the WoW chat).
+(typed in the WoW chat). The Windows app is **Translate Companion** (`WoWTranslateCompanion.exe`;
+builds before 0.4.0 were "TranslateProbe Helper", `TranslateProbeHelper.exe`), called "the
+Helper" below.
 
 G1-G10 cover the rows under a chat line (inline mode). G11-G18 cover the conversation window and
-replies (2026-10-19). The window design numbered its checks G9-G16; they follow the existing ones
-here, so code comments that say "G9" to "G16" for the window mean:
+replies (2026-10-19). G19 covers the hint lanes and the Translate Companion dialog (2026-10-19).
+The window design numbered its checks G9-G16; they follow the existing ones here, so code comments
+that say "G9" to "G16" for the window mean:
 
 | Design number | Here | Topic |
 |---|---|---|
@@ -51,14 +54,15 @@ here, so code comments that say "G9" to "G16" for the window mean:
    scripts\helper.ps1 -Build
    ```
 
-   It prints the exe size (about 1.2 MB). Stop a running Helper first (its icon, Exit, or
-   `taskkill /IM TranslateProbeHelper.exe`): the running exe locks the file. The translator
+   It prints the exe size (about 1.3 MB). Stop a running Helper first (its icon, Exit, or
+   `taskkill /IM WoWTranslateCompanion.exe`; an older build runs as `TranslateProbeHelper.exe`):
+   the running exe locks the file. The translator
    runtime folder is read from `$LlamaRuntimeDir` in `scripts\dev.local.ps1` (or `-RuntimeDir`,
    or the environment variable `TPROBE_LLAMA_RUNTIME`); the model is found through the Ollama store
-   (`hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M`). `TranslateProbeHelper.exe --selftest` (in
+   (`hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M`). `WoWTranslateCompanion.exe --selftest` (in
    `helper\app\target\release`) prints what it finds without loading the model.
 5. **Start the game** in Windowed or Windowed (Fullscreen) mode, log in, and type `/tpr info`.
-   Expect the version of the build under test with `(build 3)` and `TransformMessages yes,
+   Expect the version of the build under test with `(build 4)` and `TransformMessages yes,
    FontStringContainer yes` for each chat frame. No Lua error.
    - **[T] opens the conversation window by default** since 2026-10-19 (Ctrl-click [T] draws the
      rows under the line). For G1-G10, type `/tpr display inline` first, and `/tpr display window`
@@ -75,17 +79,24 @@ here, so code comments that say "G9" to "G16" for the window mean:
    It prints the path of the diagnostics file (`%LOCALAPPDATA%\TranslateProbe\logs\diag-<time>.jsonl`)
    and puts an icon in the notification area. The log is
    `%LOCALAPPDATA%\TranslateProbe\logs\helper.log`. Neither file ever holds chat text. To stop
-   the Helper: right-click its icon, Exit, or `taskkill /IM TranslateProbeHelper.exe` (no `/F`
+   the Helper: right-click its icon, Exit, or `taskkill /IM WoWTranslateCompanion.exe` (no `/F`
    needed since Helper 0.2.0). A second copy refuses to start (exit code 2). A Helper older than
-   the addon shows "this Helper is older than the addon" once per session (and the other way
-   round): addon build 3 sends replies (reply and copy flags), which a build-2 Helper drops, and
-   build 2 sent up to 6 rows, which an older Helper ignores.
+   the addon shows an "older than the addon" toast once per session (and the other way round):
+   addon build 4 draws a hint lane under every card (G19), which a Helper older than 0.4.0 does
+   not paint over (its gold hints would show under its translations: the toast says why), build 3
+   sends replies (reply and copy flags), which a build-2 Helper drops, and build 2 sent up to 6
+   rows, which an older Helper ignores.
+7. **Start Translate Companion by double-click** (no console needed): `WoWTranslateCompanion.exe`
+   in `helper\app\target\release` (or wherever the release package puts it). It reads the
+   translator runtime folder from `runtimeDir` in `%APPDATA%\TranslateProbe\settings.json` (set it
+   once by hand; a `--runtime` argument wins over it), else the Ollama install; its icon appears in
+   the notification area, and its tooltip shows "Translate Companion 0.4.0".
 
 ## G1 Bridge and capture
 
 1. With WoW in front, `/tpr test`.
 2. **Expect:** a strip of coloured dots flickers for about half a second in the top-left corner;
-   a toast "TranslateProbe Helper: bridge OK (dense, margin NN, WGC 30 Hz)" for 4 s near the
+   a toast "Translate Companion: bridge OK (dense, margin NN, WGC 30 Hz)" for 4 s near the
    top-left of the game; a sample line with a [T] and reserved rows under it; within a few
    seconds (CPU) or about a second (GPU) the sample's translation replaces the dark rows (see
    G10 for how it should look). The first
@@ -368,6 +379,61 @@ Helper's clipboard writer runs outside the game. The whole flow is checked here.
    in the Helper menu)". Tick "Sound when a reply is copied": a short beep on each copy.
 7. **Report:** each state seen (a screenshot of the green line and of the dialog), whether
    anything old was ever pasted, and the Win+V result.
+
+## G19 Hint lanes and the Translate Companion dialog (2026-10-19)
+
+The addon cannot know whether the Helper runs: under every card it draws one more row, the lane,
+with a gold hint and a [Download] link, and the Helper paints that row over whenever it paints the
+card. `docs\ADDON.md`, "Hint lanes and the Translate Companion dialog", has the details.
+
+1. **Without the Helper** (exit it from its icon). `/tpr display inline`, then click [T] on a line.
+   **Expect:** the reserved rows (colour tags, dark plates) and one more row under them, empty for
+   about 1.5 s, then "No translation above? Start Translate Companion." (or "Start Translate
+   Companion." in a narrow chat) in gold, then [Download] in light blue, on one line. The chat
+   line does not move up by a row when the hint appears (the empty row was already there).
+2. Click [Download]. **Expect:** a "Translate Companion" dialog (start it, or download it) with
+   the link `https://github.com/Mouchoir/WoW-Chat-Translator/releases` selected. Press Ctrl+C and
+   paste it in a web browser outside WoW: the releases page opens. Escape closes the dialog. Open
+   it again and click Close. Open it during a fight (a training dummy): movement and ability keys
+   still work. The rows stay under the line.
+3. `/tpr display window`, click [T] on a line in another language. **Expect:** the bubble's tags
+   and plates, and 1.5 s later the gold hint and [Download] under them, inside the bubble. Its
+   [Download] opens the dialog over the window; click outside the dialog's link box, press Escape
+   once: only the dialog closes, a second Escape closes the window. Translate a reply: the reply
+   card's lane says "No status above? Start Translate Companion." with [Download], 1.5 s later.
+   At text size 12 (Options) the hint is still drawn (a little smaller), and with the window scale
+   at 80% too. Drag the window by its title: the bubble hints hide while it moves and come back
+   1.5 s after; the same after a resize with the grip and after a scroll of the thread.
+   Right-click on a bubble's [Download]: the bubble's menu opens (not the dialog); hovering it shows
+   the bubble's tooltip.
+4. **With the Helper** (`scripts\helper.ps1 -Run`, or a double-click on the exe), click [T] on new
+   lines (inline and window), scroll the chat and the thread, switch tabs, hide and show the window,
+   translate a reply, then start the Helper only after a click (exit it, click [T], start it).
+   **Expect:** no gold hint while things are still: the lane looks like the chat background
+   (inline) or the bubble fill (window), with no square, streak or leftover glyph, and a tooltip
+   over a lane is never painted over. Inherent exceptions, as for the tags and plates: when the
+   chat scrolls or a new line arrives, an inline hint moves one capture (about 30 ms) before the
+   paint follows, a brief flash at most; a bubble's hint hides on every move and waits 1.5 s, so it
+   does not flash. Then:
+   - push an inline translation up with new lines (or wait in a busy channel) until its rows have
+     left the top of the chat and its hint line is the chat's top line: it stays covered (the
+     Helper follows a lane whose card's rows left the top); when only the bottom of the line still
+     shows at the very top, that sliver is covered too;
+   - make the chat background transparent (Chat settings, background opacity 0) over a busy world
+     (grass, foliage, a city, spell effects, nameplates behind the chat): no gold fragment in the
+     lanes (report any columns of gold left, with a screenshot);
+   - hover a unit or an item so that a tooltip covers part of an inline lane from below (its top
+     edge inside the lane): the tooltip is never painted over (report a chat-coloured band on it).
+5. Exit the Helper while translations are shown: the hints come back under the cards, with the
+   tags and plates.
+6. `/tpr app`: its four lines, then "Not installed? Download it from
+   https://github.com/Mouchoir/WoW-Chat-Translator/releases". On a French client, the same in
+   French ("Pas de traduction au-dessus ? Lance Translate Companion." under a chat line, "Lancez"
+   in the window, "[Télécharger]").
+7. **Report:** a screenshot of an inline lane and of a bubble lane without the Helper, any jump of
+   the chat line at 1.5 s, any hint that wraps or is cut with "...", and any moment a hint shows
+   while the Helper runs (when, for how long, what was behind the chat), the top-of-chat case and
+   the transparent chat over a busy world.
 
 ## What to send back
 

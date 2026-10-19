@@ -1,10 +1,14 @@
 # Addon (Lua side of the exe route)
 
 The addon no longer translates. A [T] click sends a TRANSLATE request over the pixel bridge
-(`docs\BRIDGE.md`) and TranslateProbe Helper draws the translation. Since 2026-10-19 the click
-opens the line in the **conversation window** (one tab per sender, bubbles the Helper paints, a
-reply composer); Ctrl-click keeps the first route, **inline**: rows reserved under the chat line
-(a colour tag and a dark plate per row). Modules, in TOC order:
+(`docs\BRIDGE.md`) and **Translate Companion** draws the translation: the Windows app
+`WoWTranslateCompanion.exe`, called "the Helper" in these docs and in code comments (user decision
+U2, 2026-10-19: every user-facing string says "Translate Companion"; the addon keeps its name
+TranslateProbe). Since 2026-10-19 the click opens the line in the **conversation window** (one tab
+per sender, bubbles the Helper paints, a reply composer); Ctrl-click keeps the first route,
+**inline**: rows reserved under the chat line (a colour tag and a dark plate per row). Every card
+that waits for the Helper ends with a **hint lane** that only the Helper hides (see "Hint lanes and
+the Translate Companion dialog"). Modules, in TOC order:
 
 | File | Role |
 |---|---|
@@ -17,15 +21,16 @@ reply composer); Ctrl-click keeps the first route, **inline**: rows reserved und
 | `Lang.lua` | targets, default target, script of a line |
 | `LangData.lua` | character trigram profiles of en, de, fr, es, it, pt (restored from 8b7750e, `tools\make_langid.py`) |
 | `LangDetect.lua` | the sender's language: writing system, trigrams, chat words, the "unknown" rule, votes |
-| `Reserve.lua` | row metrics, row count estimate, reserved rows, slots (chat and window), VIEW watcher, window metrics, old-session cleanup |
-| `ChatButton.lua` | the [T] link and its routing, rows under a line (`SetSuffix`), line details (`LineInfo`), link clicks and tooltips |
-| `Request.lua` | the inline click flow and active requests; window bubbles' TRANSLATE (`StartWindow`, `DropWindow`) |
+| `Reserve.lua` | row metrics, row count estimate, reserved rows and the inline hint lane (`LaneRow`), slots (chat and window), VIEW watcher, window metrics, old-session cleanup |
+| `ChatButton.lua` | the [T] link and its routing, rows under a line (`SetSuffix`, the lane's markup), line details (`LineInfo`), link clicks (the lane's [Download]: kind `d`) and tooltips |
+| `Request.lua` | the inline click flow and active requests, the inline lane's 1.5 s reveal; window bubbles' TRANSLATE (`StartWindow`, `DropWindow`) |
 | `Restriction.lua` | chat restrictions: deferred clicks, lines that arrived secret, [Show them] |
-| `Popup.lua` | the window's own popup menu (no Blizzard menu) |
+| `Popup.lua` | the window's own popup menu (no Blizzard menu); keeps the window out of the Escape list while it or the dialog shows (`HoldWindowEscape`) |
 | `Conversations.lua` | `ns.Conv`: conversations, messages, following, closed tabs, memory bounds (memory only) |
-| `Bubble.lua` | bubbles (incoming, mine), the reply card, `TranslateProbeConvFont` |
+| `Bubble.lua` | bubbles (incoming, mine), the reply card, the hint lanes of both, `TranslateProbeConvFont`, `TranslateProbeLaneFont` |
 | `Channels.lua` | the reply's channels and sending (work package R) |
 | `Consent.lua` | the in-game clipboard consent dialog (work package R) |
+| `CompanionDialog.lua` | the Translate Companion dialog: start it or download it, the download page in a read-only box (U1) |
 | `Composer.lua` | the reply composer in `ConvFrame.composerHost` (work package R) |
 | `ConvFrame.lua` | the window: tabs, header, thread, slot manager, per-row visibility, VIEW 200, position, key binding functions |
 | `Commands.lua` | `/tpr` (`/tprobe`) commands |
@@ -229,10 +234,14 @@ bubble ("typed"), unless it is the echo of a reply sent from the window in the l
 - **Mine:** right-aligned, the mirrored tail, the exact text in white, "You wrote: ..." under it
   when the draft differs, the meta line "You > channel time" and the state set by the composer
   (`Conv.SetOutState`: Sending..., Sent, Not confirmed, Not delivered: X is offline, Blocked).
+- **Hint lane** (incoming bubbles, U1): one more row of fill under the K rows, with "No
+  translation above? Start Translate Companion." and [Download] (see "Hint lanes and the
+  Translate Companion dialog"); an untranslated bubble has none.
 - **The reply card** (`Bubble.AcquireReply`, laid out by the composer): "Your text: ..." with
   `card.EditButton` and `card.CancelButton`, the reply's rows (row 0 the Helper's status), and the
-  lane: one row of fill right under the last row with the hint "No status above? Start or update
-  TranslateProbe Helper." from the plate's x, clear of its top and bottom 2 px.
+  lane: one row of fill right under the last row with the hint "No status above? Start Translate
+  Companion." and [Download], from the plate's x, clear of its top and bottom 2 units, shown 1.5 s
+  after each layout of the card (a new reply, width or settings) and after the window shows.
 - **Geometry** (`Reserve.WindowMetrics(frame, contentWidth, contentLeft)`, `ConvFrame.Metrics()`):
   `ppu = effective scale * physH / 768`; tag blocks `W = max(2, ceil(5 / ppu))` units (at least
   5 px); rows `H = convText + 2`, `rowPx = round(H * ppu)`, pitch `rowH = rowPx / ppu`, so row tops
@@ -241,6 +250,8 @@ bubble ("typed"), unless it is the echo of a reply sent from the window in the l
   reaches 6 units from the edge under it, so rows and tags start at `border + pad` (16 at the
   defaults, Blizzard's ChatBubble text inset). The bubble column starts 6 units into the thread's
   content, `bubbleWidth = contentWidth - 36`, `plateWidth = bubbleWidth - 2 border - 2 pad - 8 W`.
+  A translated bubble's box is `2 inset + (K + 1) rowH` high (the K rows, then the lane), snapped
+  to the pixel grid.
   K = `min(6, max(1, ceil(textWidth / plateWidth * factor * 1.1 - 0.15)))` with the script factors
   of the inline rows (`Reserve.EstimateWindowRows`).
 
@@ -391,6 +402,89 @@ are never copied; nothing leaves the PC), "Remember my choice" (unticked) and [A
   to the clipboard" is on (on by default, D6), and empties the clipboard as soon as a consented
   reply request arrives (D2); see `docs\HELPER.md`.
 
+## Hint lanes and the Translate Companion dialog
+
+User requests U1-U3 of 2026-10-19: when Translate Companion is not running, a [T] click must say
+so, with the download page (`https://github.com/Mouchoir/WoW-Chat-Translator/releases`, the one
+constant `ns.COMPANION_URL` in `Core.lua`). The addon can never learn whether the Helper runs (no
+channel from the Helper into the game), so the message is **self-revealing**: every card that
+waits for the Helper ends with one more row, the **lane**, holding a hint in gold; the Helper paints
+every lane over (window: the bubble fill; chat: the sampled chat background) whenever it paints the
+card, so the hint is seen exactly when nothing paints it. The hint's [Download] opens the dialog.
+
+### Geometry (shared with the helper package)
+
+| | Inline (rows under a chat line) | Window bubble (incoming) | Reply card |
+|---|---|---|---|
+| Where | one more chat line of the same history entry, right after the K tagged rows, before the glossary and name rows | in the bubble's box, right under row K | in the card, right under row K (unchanged) |
+| Band (physical px) | `[row0.yTop + K * rowPx, + rowPx]`, rowPx = the chat frame's VIEW `rowPx` (`(fontH + spacing) * eff * physH / 768`) | `[row0.yTop + K * rowPx, + rowPx]`, rowPx = VIEW 200 `rowPx` (rows are exactly rowPx apart) | same as the bubble |
+| x range | from the tag's x0 (after the 4-space indent, the same x as the tags) to the plate's end: `x0 + (8 W + plateW) * tex` chat units | from the tag's x0 (`inset`) to the plate's end (`inset + 8 W + plateWidth`) | same as the bubble |
+| Ground | the translucent chat background (spaces only left of x0, nothing right of the plate's end) | opaque `BUBBLE_RGB` (36, 30, 24); the tag column `[x0, x0 + 8 W)` of the lane is plain fill | same as the bubble |
+| Text | 4 spaces, then, once revealed, the hint in the chat font and size (its shadow included) and `[Download]`; the chat font's glyphs may touch the band's top and bottom rows | the hint from the plate's x (`inset + 8 W`), `LaneEdge` under the lane's top (2 units, and 2 physical px at least: `max(2, 2 / ppu)`), `rowH - 2 LaneEdge` units high, then `[Download]` 4 units after it; both end before the plate's end | same as the bubble |
+| Colours | hint `ffd100` (NORMAL_FONT_COLOR), `[Download]` `66bbff` (the addon's links: [T], [Show them]) | hint `TranslateProbeLaneFont` (a copy of GameFontNormalSmall: Friz Quadrata 10, gold 1.0, 0.82, 0.0, its shadow), at most `floor(rowH - 2 LaneEdge) - 1` points, one under its box for the 1-unit shadow (8 at text size 12 and 1.1 px per unit; 10 at a window scale of 80% on a pixel-perfect UI, 0.8 px per unit, where the margin is 2.5 units); `[Download]` in `66bbff`, same font | same as the bubble (it was GameFontDisableSmall grey before) |
+| Before the reveal | the line holds the 4-space indent and one space (same height, no jump) | plain fill | plain fill |
+| Text that fits | the longest of "No translation above? Start Translate Companion. [Download]", "Start Translate Companion. [Download]", "[Download]", else nothing, measured in the chat frame's font against `(8 W + plateW) * tex`: it never wraps | the longest of `CONV_LANE_IN` and `CONV_LANE_SHORT` beside `[Download]` within `plateWidth`, else `[Download]` alone | `RPL_LANE_HINT`, else `CONV_LANE_SHORT` |
+| Markup | `\|n\|cffffd100    \|Haddon:TranslateProbe:x:<session>:<lineID>\|h<hint> \|h\|r\|cff66bbff\|Haddon:TranslateProbe:d:<session>:<lineID>\|h[Download]\|h\|r` (`ChatButton.LANE_START`) | textures and font strings | same |
+
+At the defaults (1920 x 1080, UI scale 1, chat font 14, window text 14): inline rowPx 20, the
+lane 20 px high; window rowPx 23 (rowH 16.4 units at 1.40625 px per unit), the hint box 12.4
+units, the hint 10 points. In the mock the full hints do not fit the default chat (400 units) nor the default
+window (plate 296 units), so the short forms show there; in game Arial Narrow and Friz Quadrata are
+narrower than the mock's 0.5 x size per character.
+
+**Window: whenever a hint shows, the card's last row (row K - 1) is a fully visible tag row right
+above it** (the lane and row K must both be entirely inside the visible thread). So the Helper finds
+a bubble's lane right under its lowest visible tag row, with or without a request for that slot (a
+Helper started after the click), and never under a bubble whose last row is hidden.
+
+**Inline: the lane is the next line of the same entry**, but the addon does not decide which chat
+lines show: as new lines push an entry up, its tagged rows leave the top of the chat one line
+before its lane does, and for a while the lane is the chat's top line with no row of its card in
+view (an *orphan* lane; integration review, 2026-10-19). The Helper follows such a lane from where
+it last found it under its card (`docs\HELPER.md`, "Hint lanes"). A last row cut by the top of the
+chat (a partial line) is measured by the Helper from its bottom.
+
+### When a hint shows
+
+- **Inline:** the click writes the rows with the lane holding spaces; `Reserve.LANE_DELAY` (1.5 s)
+  later a `C_Timer` (no `OnUpdate`) rewrites the line once with the hint (`Request.LaneState`:
+  `pending`, then `shown`). A re-click keeps the rows and the lane (no second rewrite). The lane
+  goes with the rows: a click on them, the line leaving the chat, `/tpr clear`, an older session;
+  a reveal whose rows went meanwhile does nothing.
+- **Window:** the hint shows 1.5 s after the lane became **ready** for the bubble's current
+  request, slot, row count and place: the bubble has a slot (rows drawn), the window is shown and
+  not being dragged or resized, and the lane and row K are entirely inside the visible thread. A
+  new request (a bubble click with 6 rows, Shift-click, a slot given back and taken again), any
+  move of the lane on the screen (a scroll, a new message above it, a tab switch, the window
+  dragged or resized: the reveal key holds the box's screen position in physical px) or the window
+  shown again start the delay again (integration review, 2026-10-19: before, a scroll that left
+  the lane inside kept it, so the hint moved one capture ahead of the Helper's paint and flashed).
+  While the window is dragged or resized (`Bubble.SetMoving`, from `OnDragStart` / the grip's
+  `OnMouseDown` to `OnDragStop` / the resize end) every lane is hidden: the Helper's VIEW 200 is
+  stale until the move ends. Not ready: hidden at once. A removed or released bubble (closed tab,
+  eviction, a clear) hides its lane and drops its pending reveal; an untranslated bubble has no
+  lane.
+- **Reply card:** 1.5 s after each layout and after the window shows; hidden with the window.
+- **"Translation done" is not known to the addon:** a lane stays as long as its card. The Helper
+  keeps painting it over for every card it paints, in every state, so the hint never shows while
+  it runs; when the Helper exits, the hints come back with the tags and plates.
+
+### The dialog (`CompanionDialog.lua`)
+
+[Download] (inline link of kind `d`, or the button in a bubble's or the reply card's lane) calls
+`CompanionDialog.Open(anchor)`: `TranslateProbeCompanion`, 400 wide (taller when the French needs
+it), strata DIALOG, toplevel, clamped, centred on the conversation window when opened from a bubble
+or the reply card (an inline `d` link opens it on the screen's centre), the consent dialog's art
+(`DialogBorderDarkTemplate`, else a tooltip border, else a flat fill). Content: the title "Translate Companion"; "Translate Companion is not running. Start it on
+your computer."; "Not installed? Download it from:"; the URL in an `InputBoxTemplate` edit box,
+read-only (any edit puts it back) and highlighted, focused out of combat so Ctrl+C copies it (WoW
+cannot open a browser); "Press Ctrl+C to copy the link, then paste it in your web browser."; a
+Close button (the client's `CLOSE`). Escape in the box closes it; without the box's focus, Escape
+reaches `UISpecialFrames`, and while the dialog shows the conversation window leaves that list
+(`Popup.HoldWindowEscape`, shared with the popup), so the first Escape closes only the dialog. In
+combat the box never takes the focus, and combat start takes it back. The rows and the lane stay.
+`/tpr app` prints the same URL after its four lines.
+
 ## Settings of the conversation window
 
 Validated in `Core.lua` (schema 4); the window reads them from `ns.db` at each layout.
@@ -449,6 +543,25 @@ chat rows.
   "Copy the original", the glossary line, the romanized title, the key bindings, the empty window,
   position saving and the clamped resize, combat, the language detector on the shared corpus,
   the inline glossary row's colour, and nothing left in the saved variables.
+- `tests\harness_companion.lua` (U1-U3): the strings in both locales (no user string names the old
+  Helper; the lane, dialog and `/tpr app` texts; no pipe in the inline lane's strings; the one
+  URL; version 0.5.0), `Reserve.LaneRow`'s fitting (full, short, link alone, nothing), the inline
+  lane (one row right after the K rows, spaces at the click, unchanged at 1.5 s minus one frame,
+  the hint and the `d` link at 1.5 s, the same row count, in every chat frame, no other rewrite,
+  no tooltip), [Download] and the dialog (title, texts, the exact URL focused and highlighted,
+  read-only, Escape in the box, Close, Escape through `UISpecialFrames`, combat), removal (a click,
+  before the reveal, `/tpr clear`, a re-click keeps one lane), the bubble lane (geometry against
+  row0 and the plate's end, fill under it, the box one row taller, the fitting text, the lane font
+  and its shrink at text size 12, hidden before 1.5 s and shown at 1.5 s, the dialog centred on the
+  window, Escape closing the dialog only, with a popup too, a 6-row re-click, the window hidden and
+  shown, a layout that moves nothing, a removed bubble, an untranslated bubble), lanes at the
+  thread's edges (a cut lane or a lane under a cut last row never shows, every lane hides right
+  after a scroll and every whole lane shows 1.5 s after it) and the reply card's lane. Since the
+  integration review: the margin of 2 units and 2 px (`Bubble.LaneEdge`) and the font a point under
+  its box (text size 12 at 1.1 px per unit; a window scale of 80% on a pixel-perfect UI, 0.8 px per
+  unit, with the hint's box clear of the lane's outer 2 px rows), [Download]'s right-click and hover
+  going on to the bubble, the hint hidden during a drag, a move and a resize and shown 1.5 s after
+  it, and addon build 4.
 - `tests\vectors\lang_corpus.json`: the shared language corpus (158 synthetic lines, `[code, line]`).
   `tests\run.js` gives the harness `READ_TEST_FILE(name)` to read it (fengari has no `io.open`).
 
@@ -666,3 +779,51 @@ also a module: `require('./run.js')` gives `BIT_SHIM`, `newState`, `runLua`, `to
     manager re-sent only when the row count changed, so only the first click repaired a bubble the
     Helper marked "Not received - click the bubble". The click now flags the bubble for one more
     TRANSLATE (a new reqId, served from the cache unless Shift is held).
+52. **Hint lanes are self-revealing (user request U1, 2026-10-19).** The request was a message on
+    [T] when the Helper is not running; the addon cannot know that, so the hint is drawn under
+    every waiting card and the Helper paints over it (see "Hint lanes and the Translate Companion
+    dialog"). The lane's wording follows the reply card's ("No translation above? Start Translate
+    Companion."); the dialog holds the requested sentence and the URL.
+53. **One timed rewrite of an inline line.** Decision 14 and the C.5 design keep rows from being
+    rewritten on a timer (a rewrite repackages the entry and restarts its fade). The lane's reveal
+    rewrites the line once, 1.5 s after the click (its fade restarts 1.5 s later than before), and
+    never again; the harness checks both. The lane holds spaces meanwhile so the line keeps its
+    height; G19 checks in game that a line of spaces keeps its row (the idiom `AddLine(" ")` says
+    it does).
+54. **The reply card's lane changed too:** the hint is gold (was GameFontDisableSmall grey), has
+    [Download], and waits 1.5 s after each layout and after the window shows (it showed at once,
+    before the Helper's first paint). Its geometry is unchanged.
+55. **[Download] stays clickable under the Helper's paint.** The overlay is click-through, so a
+    left click on a covered lane where [Download] sits opens the dialog (the rest of an inline lane
+    hides the rows like any row; the rest of a bubble's lane retranslates like the bubble).
+    Harmless; the dialog closes with Escape. In a bubble, a right-click on [Download] and the hover
+    go on to the bubble (its menu, its tooltip; integration review: the button swallowed both).
+56. **`ADDON_BUILD` 4** (integration, 2026-10-19; the addon package had kept 3). The lanes are a
+    contract the Helper must honour: Translate Companion 0.4.0 speaks build 4 (`scene::ADDON_BUILD`,
+    still serving builds 2 and 3), and an older Helper (0.3.x, `TranslateProbeHelper.exe`) now shows
+    "older than the addon" instead of leaving every new hint visible without a word. The Helper
+    also searches the lanes only where the addon draws them: under the reply card only for builds 2
+    and 3, never under the `/tpr test rows` card.
+57. **`Popup.lua` (work package A) generalized:** the window leaves `UISpecialFrames` while any holder
+    is shown (`Popup.HoldWindowEscape(key)` / `ReleaseWindowEscape(key)`): the popup and the
+    dialog. The decision 49 behaviour is unchanged (its checks pass).
+58. **`TranslateProbeLaneFont`.** A lane's text box is `rowH - 2 LaneEdge` units high, under 10 at
+    text size 12 at some scales (9.6 at 1.1 px per unit), and a font string taller than its box may
+    not draw: the lane font is GameFontNormalSmall capped at one point under the box (`floor(h) - 1`,
+    the 1-unit shadow fits too; integration review: `floor(h)` let the shadow reach the lane's edge
+    rows).
+59. **What keeps the name TranslateProbe (U2):** the addon (folder, TOC title, `/tpr` and `/tprobe`,
+    the options category, the key binding header), its frames (`TranslateProbeConvFrame`,
+    `TranslateProbeConsent`, `TranslateProbeCompanion`...), fonts, saved variables
+    (`TranslateProbeDB`) and link prefix (`addon:TranslateProbe:`), none of them a name of the app.
+    Code comments keep "the Helper". Addon version 0.5.0.
+60. **Known limit:** an inline lane on a line fading under 30% opacity is no longer painted (the
+    Helper drops the card, as for the plate), so the hint can show faintly for the rest of the fade.
+61. **The window lane's margin is in pixels too** (integration review, 2026-10-19). The Helper reads
+    the lane's outer 2 physical px rows as plain fill; 2 units are only 1.6 px at 0.8 px per unit
+    (a window scale of 80% on a pixel-perfect UI), so `LaneEdge = max(2 units, 2 px)`; the Helper
+    also accepts the hint's own glyph edges there (`docs\HELPER.md` deviation 47).
+62. **Window lanes wait again after any move** (integration review): see "When a hint shows". The
+    inline lane cannot (the chat moves it, and the addon rewrites a line only once): when the chat
+    scrolls or a new line arrives it moves one capture before the Helper's paint follows, a flash of
+    about 30 ms, as the tags and plates already do.

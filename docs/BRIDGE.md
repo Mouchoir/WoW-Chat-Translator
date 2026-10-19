@@ -1,6 +1,7 @@
 # Pixel bridge v2
 
-The addon talks to TranslateProbe Helper through pixels only: a strip of coloured blocks at the
+The addon talks to Translate Companion (`WoWTranslateCompanion.exe`, "the Helper" in these docs;
+TranslateProbe Helper until 2026-10-19) through pixels only: a strip of coloured blocks at the
 client's top-left corner carries messages (addon to helper), and row tags printed in the chat
 identify the reserved rows the helper draws on. This file is the normative spec of both, the
 record of how they were validated, and the list of places where the implementation differs from
@@ -86,7 +87,8 @@ record = type u8, len u16, data; unknown types are skipped (0x02 = the v1 LAYOUT
 0x13 TEST       nonce u16
 0x14 VIEW       n u8 (0..4) | n x { id u8, x u16, y u16, w u16, h u16, fontPx u8, rowPx u8 }  (physical px, client origin)
                 ids 1..199: chat frames (GetID() % 256); ids 200..255: addon windows (200 = the conversation window)
-0x01 STATUS     addonBuild 3 since 2026-10-19 (TRANSLATE reply and copy)
+0x01 STATUS     addonBuild 3 since 2026-10-19 (TRANSLATE reply and copy), 4 the same day (a hint
+                lane under every card, section 8c)
 ```
 
 - 2026-10-18: TRANSLATE rows went from 1..4 to 1..6 (long German-to-French lines were cut); same
@@ -114,6 +116,11 @@ record = type u8, len u16, data; unknown types are skipped (0x02 = the v1 LAYOUT
   - `STATUS.addonBuild` went from 2 to 3 (`ns.ADDON_BUILD`): a Helper of build 2 refuses a reply
     (its flags check) and shows its "update" toast. The Helper of build 3 accepts builds 2 and 3
     without a toast (a build-2 addon never sends a reply).
+  - `STATUS.addonBuild` went from 3 to 4 the same day, with no message change: the addon draws a
+    hint lane under every card that waits for the Helper (section 8c), which only a Helper of build
+    4 covers. A Helper of build 3 shows its "update" toast for a build-4 addon; the Helper of build
+    4 serves builds 2 to 4 without a toast and searches the lanes only where the addon's build
+    draws them.
   - Example (reply with copy: reqId 258, slot 126, rows 3, "de", "on part dans 5 min ?", 0 pairs),
     also a builder vector and a Rust test:
     ```
@@ -298,10 +305,35 @@ chat line. Rules the addon keeps and the Helper relies on:
   card's fill bottom; `fontPx` and `rowPx` from the window's text size and scale.
 - A row not entirely inside the visible thread has its tag and plate hidden (fill only): the
   Helper never sees a partly clipped window row.
-- The reply lane is the band `[row0.yTop + K * rowPx, + rowPx]` from the tag's x0 to the plate's
-  end: flat fill with the addon's hint text, clear of its top and bottom 2 px, which the Helper
-  covers when it paints the card.
+- The hint lane (the reply card's, and since addon build 4 every translated bubble's) is the band
+  `[row0.yTop + K * rowPx, + rowPx]` from the tag's x0 to the plate's end: flat fill with the
+  addon's gold hint and its [Download] button from the plate's x, clear of the lane's top and
+  bottom by 2 units and 2 physical px at least, which the Helper covers whenever it paints the
+  card. The addon draws a bubble's lane only while the bubble's last row and the lane are entirely
+  inside the visible thread, and not while the window is dragged or resized.
 - Slots: 0..99 chat, 100..125 window bubbles, 126 the reply, 127 TEST.
+
+### Hint lanes under inline rows (addon build 4, 2026-10-19)
+
+User request U1: the addon cannot learn whether the Helper runs, so every card that waits for it
+ends with a lane holding "No translation above? Start Translate Companion." and a [Download] link,
+shown 1.5 s after the rows (window: after the lane became visible or moved), which the Helper paints
+over whenever it paints the card. Under a chat line the lane is one more row of the same history
+entry, right after the K tagged rows and before the glossary and name rows:
+
+```
+|n|cffffd100    |Haddon:TranslateProbe:x:<session>:<lineID>|h<hint> |h|r|cff66bbff|Haddon:TranslateProbe:d:<session>:<lineID>|h[Download]|h|r
+```
+
+- The 4-space indent of every row, then the hint in gold (`ffd100`, NORMAL_FONT_COLOR) from the
+  tag's x0, then `[Download]` in the light blue of the addon's links (`66bbff`, link kind `d`
+  opens the Translate Companion dialog); nothing right of the plate's end, so the native-look
+  samples on both sides stay clean. Before the reveal the row holds the indent and one space.
+- Band: `[row0.yTop + K * rowPx, + rowPx]` (one chat line pitch), x from the tag's x0 to
+  `x0 + (8 W + plateW) * tex` chat units.
+- No tag of its own: the Helper finds it under the card's last row, or, once the card's rows have
+  scrolled above the top of the chat, at the chat's top line where it follows it (orphan lanes,
+  `docs\HELPER.md`, "Hint lanes"). The `/tpr test rows` card (slot 127) has no lane.
 
 ## 9. Validation
 

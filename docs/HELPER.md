@@ -1,9 +1,24 @@
-# TranslateProbe Helper (helper\app)
+# Translate Companion (helper\app)
 
-`TranslateProbeHelper.exe` reads the addon's pixel bridge from the WoW window, translates with the
-local engine (`helper\engine`, llama.cpp + Qwen3 4B) and draws the translations over the chat rows
-the addon reserved. It never opens a handle to the game process, never sends input to it and never
-reads its memory: it only looks at the window's pixels.
+**Translate Companion** (`WoWTranslateCompanion.exe`; TranslateProbe Helper, `TranslateProbeHelper.exe`,
+until 2026-10-19) reads the TranslateProbe addon's pixel bridge from the WoW window, translates with
+the local engine (`helper\engine`, llama.cpp + Qwen3 4B) and draws the translations over the chat
+rows the addon reserved. It never opens a handle to the game process, never sends input to it and
+never reads its memory: it only looks at the window's pixels. This document calls it the Helper,
+as the code does.
+
+**Naming (user request U2, 2026-10-19).** Everything users see says Translate Companion: the exe
+(Cargo `[[bin]]` `WoWTranslateCompanion`), the tray tooltip (with the version) and menu, the
+balloons, the toasts, the status strings, `--help` and `--version`. Internal identifiers users
+never see keep the old name, so nothing else has to move: the crate names (`translateprobe-helper`,
+`tp_helper`, `tp_engine`, `tp_bridge`, `tp_testkit`), the single-instance mutex
+`Local\TranslateProbeHelper` (an old `TranslateProbeHelper.exe` and the new exe therefore never run
+together: the second one exits with code 2), the window classes `TPHelperMain`, `TPHelperOverlay`
+and `TPHelperToast`, and the folders `%APPDATA%\TranslateProbe` (settings) and
+`%LOCALAPPDATA%\TranslateProbe` (logs, run files), so settings and logs carry over. The hidden
+windows' titles say "Translate Companion". Download page (user request U3): `tp_helper::RELEASES_URL`
+= https://github.com/Mouchoir/WoW-Chat-Translator/releases (the addon has its own copy), shown by
+`--help` and opened by the tray's "Get updates".
 
 ## Files
 
@@ -22,7 +37,7 @@ reads its memory: it only looks at the window's pixels.
 | `src\scene.rs` | Pure state machine: messages and cards in, scene out (replies, view kinds, the background rule) |
 | `src\clip.rs` | Clipboard of translated replies: `ReplyClip` (begin, finish, release), `ClipOs` with the real `WinClip` and the tests' `FakeClip`, `one_line_255` |
 | `src\reply.rs` | The UI thread's replies: one `ReplyBook` per reply request (clipboard state, the request's own text), memory only |
-| `src\lane.rs` | The reply card's hint lane: `find_lane` in a capture |
+| `src\lane.rs` | Hint lanes under every card: `find_window_lane` (bubble fill), `find_chat_lane` (inline rows), `find_orphan_chat_lane` and `ChatLaneMemo` (a lane whose card left the top of the chat), `settle` |
 | `src\backdrop.rs` | The chat background around each card's rows, sampled in the current capture (native look) |
 | `src\overlay\{mod,window,render,fit,fonts}.rs` | Layered windows, pixel composition, wrapping, fonts |
 | `src\toast.rs`, `src\tray.rs` | Bridge toast, notification-area icon |
@@ -34,6 +49,7 @@ reads its memory: it only looks at the window's pixels.
 | `tests\window_pipeline.rs` | Window-level smoke tests of the whole pipeline (ignored by default) |
 | `tests\native_look.rs` | Pixel test: a synthetic capture through tag scan, cards, background sampling and painting; the reserved rows disappear into the ground |
 | `tests\graceful_exit.rs` | `taskkill` without /F stops a spawned Helper cleanly (exit code 0, log closed) |
+| `tests\hint_lane.rs` | Pixel test of the hint lanes: a synthetic capture through tag scan, cards, background, lane search and painting; the lane disappears, a tooltip and the next chat line are never painted; an ignored timing test |
 
 Build, test and run with `scripts\helper.ps1` (`-Build`, `-Test`, `-Run`, `-Diag`, `-RuntimeDir`).
 The translator runtime folder comes from `-RuntimeDir`, else `$LlamaRuntimeDir` in the gitignored
@@ -42,7 +58,7 @@ The translator runtime folder comes from `-RuntimeDir`, else `$LlamaRuntimeDir` 
 ## Command line
 
 ```
-TranslateProbeHelper.exe [--runtime DIR] [--model FILE] [--backend auto|cpu|vulkan|cuda] [--capture auto|wgc|gdi]
+WoWTranslateCompanion.exe [--runtime DIR] [--model FILE] [--backend auto|cpu|vulkan|cuda] [--capture auto|wgc|gdi]
   [--translator llama|echo] [--wow-class CLASS] [--diag] [--diag-json FILE] [--log-dir DIR] [--no-tray]
   [--exit-after SECS] [--selftest]
 test flags: [--no-overlay] [--assume-foreground] [--overlay-probe] [--no-clipboard]   other: [--help] [--version]
@@ -57,7 +73,7 @@ hidden test flags: [--instance-name NAME] [--assume-background] (not in --help)
   `WindowFromPoint` covering test (see Deviations).
 - `--assume-foreground`: the game window counts as foreground (the E2E window never takes focus).
 - `--no-clipboard`: the clipboard is never touched; a reply shows "Ready (not copied - off in the
-  Helper menu)", as with the tray switch off. `--no-overlay` implies it, so no automated run ever
+  Translate Companion menu)", as with the tray switch off. `--no-overlay` implies it, so no automated run ever
   touches the user's clipboard; `tests\e2e\run.py` gives it anyway.
 - `--overlay-probe`: no capture; one synthetic 2-row test card (376 x 52 px, bottom right of the
   primary monitor's work area, at most 5 s) checks that `WindowFromPoint` at the card centre never
@@ -70,9 +86,11 @@ hidden test flags: [--instance-name NAME] [--assume-background] (not in --help)
   whatever Windows says (background rate, background covering rule); it wins over
   `--assume-foreground` and the one `--no-overlay` implies, so an E2E run can check that the strip
   is read while the game is in the background (review fix, deviation 38).
+- `--help` starts with the app's name and the download page; `--version` prints
+  "Translate Companion 0.4.0".
 - Exit codes: 0 normal, 1 failed start or failed probe, 2 another instance is running
-  (`Local\TranslateProbeHelper`), 64 bad arguments.
-- Stopping: the tray's Exit, `--exit-after`, or `taskkill /IM TranslateProbeHelper.exe` without
+  (`Local\TranslateProbeHelper`, also taken by an old `TranslateProbeHelper.exe`), 64 bad arguments.
+- Stopping: the tray's Exit, `--exit-after`, or `taskkill /IM WoWTranslateCompanion.exe` without
   /F. All three end the message loop, then stop the capture thread (waiting at most 3 s), shut the
   engine down (llama-server killed, key file deleted) and close the log (exit code 0). `taskkill
   /F` still works but skips that (the job object still kills llama-server).
@@ -80,7 +98,10 @@ hidden test flags: [--instance-name NAME] [--assume-background] (not in --help)
 ## Threads
 
 - **UI thread**: hidden window `TPHelperMain` (a plain top-level window, never shown, also the
-  clipboard owner of replies), tray icon, overlay windows (`TPHelperOverlay`, one per VIEW id) and
+  clipboard owner of replies), tray icon (tooltip "Translate Companion 0.4.0 - <translator state>";
+  menu: Unload translator now, Get updates (opens `RELEASES_URL` in the default browser with
+  `ShellExecuteW`, on the user's own click only; logged as `TrayUpdates`), Open log folder, the two
+  reply switches, Exit), overlay windows (`TPHelperOverlay`, one per VIEW id) and
   the toast (`TPHelperToast`, created hidden at start unless `--no-overlay`). With overlay windows
   it sets two out-of-context WinEvent hooks (foreground change, minimize start/end) so that the
   overlay's z-order follows the game window at once (decision D12, below). `WM_CLOSE` on any of these windows exits like the tray's
@@ -94,12 +115,13 @@ hidden test flags: [--instance-name NAME] [--assume-background] (not in --help)
   regions (one per VIEW rectangle, two merged only when their union is at most 1.3 times their
   total area, window views first; or the discovery area at 2 Hz), decodes, reassembles, feeds the
   engine, scans tags (one tag search and one card cache per region; a tag read in two overlapping
-  views is kept once, in the first), builds cards, finds a reply card's lane, runs the covering
-  test (at most 10 Hz per card) and publishes the scene when it changed. The Helper speaks
-  `STATUS.addonBuild` 3 (`scene::ADDON_BUILD`; 3: TRANSLATE reply and copy bits, the conversation
-  window, 2026-10-19; 2: rows 1..6, 2026-10-18) and serves builds 2 and 3 without a toast
+  views is kept once, in the first), builds cards, finds each card's hint lane (and the orphan
+  lanes at the top of a chat), runs the covering test (at most 10 Hz per card) and publishes the
+  scene when it changed. The Helper speaks `STATUS.addonBuild` 4 (`scene::ADDON_BUILD`; 4: a hint
+  lane under every card, 2026-10-19; 3: TRANSLATE reply and copy bits, the conversation window,
+  2026-10-19; 2: rows 1..6, 2026-10-18) and serves builds 2 to 4 without a toast
   (`scene::ADDON_BUILD_MIN`): a strip frame from another build shows the "addon is older" or
-  "Helper is older" toast once per session.
+  "app is older" toast once per session.
 
   | State | Rate |
   |---|---|
@@ -232,7 +254,7 @@ windows, 1..199 chat frames).
   |---|---|---|
   | grey 0.6 (153) | waiting | "Waiting (N ahead)...", "Starting the translator...", "Translating..." (also while a partial result streams; partial text is shown, never copied) |
   | green, `GREEN_FONT_COLOR` (25, 255, 25) | the clipboard holds it | "Ready - Ctrl+V to paste", "... (shortened to 255 bytes)", "Already in German - Ctrl+V to paste", "Nothing to translate - Ctrl+V to paste" |
-  | amber, `NORMAL_FONT_COLOR` (255, 209, 0) | not copied | "Ready (not copied)" (no consent), "Ready (not copied - off in the Helper menu)" (tray switch off or `--no-clipboard`), "Not copied - you copied something else. Click Translate again", "Not copied - clipboard busy. Click Translate again" |
+  | amber, `NORMAL_FONT_COLOR` (255, 209, 0) | not copied | "Ready (not copied)" (no consent), "Ready (not copied - off in the Translate Companion menu)" (tray switch off or `--no-clipboard`), "Not copied - you copied something else. Click Translate again", "Not copied - clipboard busy. Click Translate again" |
   | red, `RED_FONT_COLOR` (255, 25, 25) | failed | "Translation failed - click Translate again", "Not received - click Translate again" (an unknown slot 126), low memory, translator files not found |
 
   Green is painted only after the clipboard write succeeded. The text rows show what went to the
@@ -253,10 +275,7 @@ windows, 1..199 chat frames).
   The Helper never reads the clipboard's content (sequence numbers only). Tray item "Sound when a
   reply is copied" (default off): `MessageBeep(MB_OK)` after a write.
 - **Hint lane** (`lane.rs`): one fill row under the reply card's last row with the addon's "No
-  status above?" hint. `find_lane` looks for it at `row0.yTop + K * rowPx` (+-2 px), samples the
-  fill under the tag column and passes a column when its top and bottom 2 rows are that colour (a
-  tooltip breaks them); with at least 60% of the columns passing, the overlay paints the passing
-  columns flat with that colour, so the hint shows exactly when nothing is painted.
+  status above?" hint; since 2026-10-19 every bubble has one too (next section).
 - **Engine:** a reply is an urgent job (`Job.urgent`): it waits ahead of the chat requests
   (`docs\ENGINE.md` section 5).
 - **Capture:** one region per VIEW rectangle with its own tag search and card cache; the window
@@ -266,6 +285,111 @@ windows, 1..199 chat frames).
   planned with the previous VIEW, so a window's new rows, shown together with the VIEW that
   covers them, would be read against the chat view under them for one capture); the next
   capture scans with the new VIEW, and the previous cards stay meanwhile.
+
+## Hint lanes (user request U1, 2026-10-19)
+
+The addon can never learn whether the Helper runs. So under the last reserved row of every card
+that waits for the Helper (each incoming bubble, the reply card, and the rows under a chat line)
+it draws one more row, the lane, with a gold hint ("No translation above? Start Translate
+Companion." and a `[Download]` link or button; "No status above? ..." under the reply card), shown
+1.5 s after the rows so it never flashes before the Helper's first paint. The Helper covers the
+lane of every card it paints, in every state (waiting, translating, done, "Not received", the
+tags-only pending state), as long as the card is painted, so the hint shows exactly when no
+Helper paints it. No message changes; the addon's STATUS build went to 4 for it, and the Helper
+searches lanes only where the addon draws them (`SceneMachine::lanes_for`): under every card for
+build 4 or an unknown build (a Helper started after the clicks), under the reply card only for
+builds 2 and 3, never under the `/tpr test rows` card (slot 127: the next line is the addon's own
+print, whose `TranslateProbe:` prefix is the link blue).
+
+- **Window lanes** (`find_window_lane`, VIEW ids 200..255, design A.6.4 as for the reply card):
+  the bubble fill at `row0.yTop + K * rowPx` (+-2 px), from the tag's x0 to the plate's end; the
+  hint and the button start at the plate's x, clear of the lane's top and bottom by 2 units and
+  2 physical px at least (the addon's `Bubble.LaneEdge`), so the tag column is plain fill. Only
+  under the request's last row: the addon draws no lane under a bubble whose last row is hidden
+  (cut by the thread or under a tooltip), and VIEW 200 reaches down over the reply card, so a lane
+  taken under a lower visible row would paint over the card's draft line or over a tooltip
+  (integration review). The fill is the median of the tag column over the rows every candidate
+  shares (its spread must be at most 6, else something covers it) and must lie within 8 levels of
+  the card's own background sample next to its last row (a tooltip's or a menu's uniform body is
+  not the bubble fill). A column passes when its top 2 and bottom 2 rows are within 8 levels of
+  the fill, or are the hint's own glyph (gold or link-blue lane ink, or within 2 px of it a mix of
+  the fill, the shadow and a lane colour) should it reach them at a small UI scale; a tooltip's or
+  a menu's border and body break them. Painted flat with that colour. K comes from the TRANSLATE;
+  for a slot the Helper does not know ("Not received"), the lane is taken right under the last
+  visible row. The lane must lie entirely inside the view.
+- **Chat lanes** (`find_chat_lane`): the chat line right under the card's last tag row (the row
+  above it must be the request's last, K - 1, else whatever hides it may hide the lane), one line
+  pitch tall (the card's own row pitch, else VIEW `rowPx`), from the tag's x0 to the plate's end.
+  A last row cut by the top of the chat (a partial line the tag scan still reads) is measured from
+  its bottom, with the height of a whole row of the card. The addon writes the lane as a row of the
+  chat message: the 4-space indent, the hint in gold (`ffd100`, NORMAL_FONT_COLOR) from the tag's
+  x0, then `[Download]` in the light blue of its links (`66bbff`), never past the plate's end; a
+  blank row until the hint shows.
+  - *Lane ink*: a pixel that is the ground blended toward the hint's gold or the link's blue (the
+    text colour is estimated from the blend, taking its red (gold) or blue (link) as full: gold's
+    green 165..235 and blue at most 95, the link's red 65..135 and green 155..220; the glossary
+    row's pale gold `e6cc80`, the name row's `9fd4ff`, white, yellow, orange and the channel
+    colours fail over any ground).
+  - *Not the next line*: the indent left of the tag column holds no ink (the next message starts at
+    the chat's left edge: a timestamp, a channel, a name, the addon's own prefix), judged against
+    the indent's own median and texture; and the tag column holds at most 3% of other ink (the
+    glossary and name rows start there in another colour).
+  - *Ground, first the gradient*: the card's last row's background (`backdrop`, the gradient the
+    rows above are painted with), a pixel within 24 levels of it being ground. A column passes
+    when its top 2 and bottom 2 rows are ground, lane ink, or within 2 px of lane ink a mix of the
+    ground, black and a lane colour (a glyph's antialiased edge or its 1 px shadow, a two-share
+    least-squares fit within 12 levels), and, under the plate, the last row's mask shows the plate
+    there (a game tooltip over the lane almost always covers the row above it too).
+  - *Then the local ground* (integration review: a textured world behind a transparent chat, or a
+    darker or lighter feature neither sample sees, failed columns and left the hint visible):
+    each column that fails against the gradient is judged again against a local ground made from
+    the lane's own plain pixels (not lane ink, not within 2 px of it, not more than 40 luma above
+    the gradient: text never becomes ground) of the 6 columns on each side (12 or 24 where glyphs
+    leave fewer than 8), one estimate per 5 columns from at most 96 evenly picked pixels, kept
+    within 64 levels of the gradient; its tolerance is 2.5 times their texture (the
+    75th-percentile distance from the median, which a step between two grounds widens too) plus
+    8, from 24 to 48, and the fringe test grows with it.
+  - *Cover edges* (integration review: a tooltip whose top border lies in the lane's middle rows
+    over a dark chat was painted over): a straight horizontal edge inside the lane, from the first
+    row after the last tag row's partial row down, fails its columns and 3 more on each side: a
+    run of at least 12 columns whose pixels jump by 16 levels or more from the row above (not both
+    lane ink) while one of the two rows stays flat (each pixel within 8 of its left neighbour) and
+    holds no lane ink. A tooltip's border or a panel's top makes one; glyph strokes and their
+    shadows are shorter, and a textured world is not flat.
+  - The lane follows the card's last painted row: a row the band does not hold at a fractional line
+    position (up to 2) is painted with it. Painted with the gradient, opaque.
+- **Orphan chat lanes** (`find_orphan_chat_lane`, integration review): as new lines push an entry
+  up, its tagged rows leave the top of the chat one line before its lane, which then is the chat's
+  top line with no card to find it under (and the hint stayed until the next line came, minutes in
+  a quiet channel). The capture remembers every chat lane it found under its card for 1.5 s
+  (`lane::ChatLaneMemo`, with the lane's ink pixel by pixel); while that card is missing from its
+  view, it looks for the lane a whole number of line pitches higher (0 to 8), in the view's top
+  line only (the row above it shows less than 60% of a line: a row with more of it showing is read
+  by the tag scan, and a lane lower down with its card missing is under a cover), +-2 px. A
+  candidate must show the remembered ink at its offset (at least 60% of the remembered ink pixels
+  of its visible rows are ink again, few new ones), so a blank line or another message never
+  passes; then it is judged like a chat lane on its visible rows (at least 3; cut by the top, only
+  its bottom edge rows), against the background sampled on its own line (its indent, and the room
+  right of the plate's end), with the gradient, the indent and tag-column tests and the cover
+  edges, but no local ground (no row above to tell a cover's body from the ground). Painted on its
+  visible rows; the memo follows it, and is dropped with its VIEW or when not found for 1.5 s.
+  The scene holds orphan lanes per view (`SceneView::lanes`), the covering test applies to them
+  as to a card's lane, and the `cards` diag record lists them in `lanes`.
+- Both: at least 60% of the columns must pass (else the lane is left alone and the hint stays);
+  the expected position is tried first, then up to 2 px off, and a candidate whose every open
+  column passes (not under the mask or a cover edge) ends the search. A lane has its own covering
+  test, as the reply lane had (deviation 40), and a covered lane is dropped while the card stays.
+  Lanes are kept with the cards when the scan area is pixel-identical, and a chat lane's fill
+  settles like the background samples (`lane::settle`). A chat lane found under rows that did not
+  move is searched again at most every 100 ms (`lane::RESEARCH_MS`, like the covering test): in
+  between it keeps its rectangle and passing columns and takes each capture's background, so a
+  world moving behind a translucent chat (every capture changes then) does not cost a full search
+  per capture. The scene fingerprint holds each lane (rectangle, kind, fill, passing runs).
+- Cost (release, `hint_lane::lane_search_cost`, a 401 px lane under a 2-row card with its hint):
+  chat 152 us (88 us before the eager pixel grid that the local ground and the cover edges read;
+  39.6 us before the integration review), over a busy world (+-20 texture and a darker trunk: the
+  local ground is made) 240 to 270 us, window 19 to 24 us per card, on captures whose scan area
+  changed, and at most every 100 ms per chat card while its rows stay put.
 
 ## Game window in the background (decision D12)
 
@@ -314,7 +438,8 @@ Design D.6 records, with extra fields and events:
    "gaps":[[x,y,w,h]],"maskPx":1234,"masks":[{"rect":[x,y,w,h],"runs":[[y,x0,x1],..]}|null,..],
    "alpha":1.0,"plate":true,"textWidth":297,"state":"sent|queued|loading|translating|partial|done|same|nothing|failed|lowmem|notinstalled|test|missing|pending","covered":false,
    "reply":false,"clip":null|"copied|copied_cut|changed|busy|not_allowed|off","bg":[[[r,g,b]|null,[r,g,b]|null],..],
-   "lane":null|{"rect":[x,y,w,h],"rgb":[r,g,b],"cols":528,"pass":528}}],"fg":true}
+   "lane":null|{"rect":[x,y,w,h],"kind":"window|chat","rgb":[r,g,b],"rgbRight":[r,g,b]|null,"cols":528,"pass":528}}],"fg":true,
+   "lanes":[{"view":1,"slot":3,"lane":{..as above..}},..]}   (orphan lanes, since the integration review)
 {"t":..,"ev":"overlay","view":1,"shown":true,"rect":[x,y,w,h],"window":false,"px":13240,"textPx":1812,"tagPx":1536,"fillPx":0,"lanePx":0}
 {"t":..,"ev":"clip","req":904,"what":"begin|finish|release","outcome":"emptied|busy|not_allowed|copied|copied_cut|changed|off","cut":false,"excluded":true}
 {"t":..,"ev":"z","mode":"topmost|above","moved":true}
@@ -370,15 +495,18 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
 | Command | What |
 |---|---|
 | `cargo test --offline` (helper\app) | unit tests: CLI (incl. the hidden `--instance-name`), settings round trip, validation and the old default colour, i18n completeness, fit (shrink to the largest size down to 80%, then "...", 6 rows), render (canvas and DIB: mask, alpha, full-opacity shadow, gap fill, tag cover, no-plate, background gradient over tag, plate, edges and gaps, no outline without `--diag`, dirty-rectangle reuse), background sampling (gradient, text-like pixels, borrowed sides, blended edges only at partial tag rows and at a consistent end column, no right sample for a card cut on the right, discovery spans, a borderless panel next to a plate, sample hysteresis), the 80% shrink with real fonts, the font cell cap (a French line with accents and descenders loses at most 1.5% of its ink at bands of 12-22 px), scene state machine (missing after 1.5 s, covered, stale 500 ms, minimized, session change, messages, weak signal, row counts, background in the fingerprint), diag records, candidate rows (SSE2 against scalar), GDI double buffers, WM_CLOSE on a hidden layered window quits the UI loop; `tests\sentinel.rs`; `tests\tagscan_equiv.rs` (the tag search finds exactly what `tags::scan` finds on 400 synthetic panels, and kept cards equal a new `cards::build`); `tests\native_look.rs` (plates sized as the addon sizes them; alpha 1.0 over a 70-level gradient, alpha 1.0 and 0.6 over a 35-level one: every pixel of the reserved rows within 6 levels of the ground, no plate colour; a tooltip over a plate is never painted, its outer rows included; a frame over the right end of every row of a 1- or 2-row card, parchment or tooltip coloured, leaves the visible plate within 6 levels of the chat; discovery with the game world on both sides of the chat: within 6 levels; a borderless panel in WoW's tooltip colour right under a plate is never painted; an ignored timing test); `tests\graceful_exit.rs` (a spawned Helper, own mutex, echo, no tray, no game window, hidden windows only: `taskkill` without /F through the hidden toast window and, with `--no-overlay`, through the main window; exit code 0 within 8 s and the log's Exit record) |
-| `cargo test --offline` (2026-10-19 additions) | clipboard flow on a fake clipboard (empty on receipt, copy when unchanged, Changed, Busy after 3 tries, a busy empty still copies when nothing changed, release only when own, no consent and switch off touch nothing, `one_line_255` with UTF-8, word boundaries and pipes); replies (start, finish only on a final result, Same and Nothing copy the player's text, failures write nothing, exit releases); the lane (clean, under a tooltip, absent); scene (reply start, replace and end, urgent, never the language; build 2 and 3 without a toast; lanes on reply cards only; the background rule of D12); overlay (row 0 colours and texts per outcome, window wording, status on row 0 and text below in pixels, window text origin, lane painted on passing columns only); z-order with hidden windows; region planning and duplicate tags; settings, CLI, tray ids; `tests\tagscan_equiv.rs` overlapping views (each tag once, the window's reading equal to a full scan); `tests\sentinel.rs` reply flow |
+| `cargo test --offline` (2026-10-19 additions) | clipboard flow on a fake clipboard (empty on receipt, copy when unchanged, Changed, Busy after 3 tries, a busy empty still copies when nothing changed, release only when own, no consent and switch off touch nothing, `one_line_255` with UTF-8, word boundaries and pipes); replies (start, finish only on a final result, Same and Nothing copy the player's text, failures write nothing, exit releases); the lane (clean, under a tooltip, absent); scene (reply start, replace and end, urgent, never the language; build 2 and 3 without a toast; lanes on reply cards only, every card since the hint lanes below; the background rule of D12); overlay (row 0 colours and texts per outcome, window wording, status on row 0 and text below in pixels, window text origin, lane painted on passing columns only); z-order with hidden windows; region planning and duplicate tags; settings, CLI, tray ids; `tests\tagscan_equiv.rs` overlapping views (each tag once, the window's reading equal to a full scan); `tests\sentinel.rs` reply flow |
 | `cargo test --offline` (integration review fixes) | the capture period in and out of front (`app::tests::the_strip_is_read_at_its_own_rate_in_the_background_too`), the hidden `--assume-background` flag, every exclusion format tried after a failure (`clip::tests::every_exclusion_format_is_tried_even_after_a_failure`), `ReplyClip::own_write`, clipprobe's skip rules (`unreadable_text_is_never_touched`) and its parent-side comparison of a child's reading |
 | `cargo test --offline --release --lib -- --ignored --nocapture render_cost candidate_cost` | render and candidate-row timings |
 | `cargo test --offline --release --test native_look -- --ignored --nocapture` | background sampling cost of a 6-row card |
+| `cargo test --offline` (2026-10-19, integration review) | `lane`: no window lane under a bubble whose last row is hidden or on a tooltip's body, the card's own fill, the hint's glyphs at the lane's edges; chat lanes over a +-6 to +-30 texture (+-40: 270 of 300 columns at least), a feature 20 to 45 levels off the gradient, a tooltip edge in the middle rows (3 positions), the addon's print under the test rows, a last row cut by the top; orphan lanes followed whole and cut by the top, over a texture, and never on the next message, a blank line, the glossary row or where the card could be seen; `scene::lanes_for` per build and for the test slot; addon build 4; toast widths; `hint_lane::a_chat_lane_over_a_busy_world_disappears` (pixel level) |
+| `cargo test --offline` (2026-10-19, hint lanes and Translate Companion) | `lane` (window lanes: clean, under a tooltip, absent, unknown slot, outside the view; chat lanes: the addon's gold hint and blue link from the indent or the plate, the link alone and a blank lane all covered, the fill within 8 levels of the ground; the next line in white, party, channel, guild, yellow or orange and the glossary and name rows never taken; a tooltip from inside the lane, a cover over the last row and the lane, most of the lane covered; the last row hidden, outside the view, no-plate; glyph edges and shadows told from covers; settled fills); scene (every card keeps its lane, an unknown slot's too); overlay (a chat lane painted with the gradient whatever the card state); i18n (the new name in every string, no "Helper" left, `tray.updates`); tray ids; the diag lane record; `tests\hint_lane.rs` (pixel level: a chat lane disappears into the ground within 3 levels, a tooltip from inside the lane is never painted, the next chat line under a card is never painted, a bubble lane becomes the fill) |
+| `cargo test --offline --release --test hint_lane -- --ignored --nocapture` | lane search cost |
 | `cargo test --offline --test window_pipeline -- --ignored` | real exe against a 400 x 260 window at the bottom of the z-order: strip, VIEW, TRANSLATE, echo translation, card, in-memory rendering; and a late start (discovery, "missing") |
 | `target\release\capprobe.exe` | WGC and GDI read a known pattern exactly (popup and captioned windows), plus WGC on an off-screen window and on a window at the bottom of the z-order (informational) |
-| `TranslateProbeHelper.exe --overlay-probe --diag --exit-after 5 --no-tray` | click-through and focus check |
+| `WoWTranslateCompanion.exe --overlay-probe --diag --exit-after 5 --no-tray` | click-through and focus check |
 | `clipprobe.exe live` (by hand, once, decision D9) | the real clipboard path: skipped when the clipboard holds anything but plain text, when its text is listed but cannot be read, or when something is copied between the save and the empty; else saves the text in memory (never printed, never on a command line), runs `ReplyClip` on `WinClip` with a synthetic sentence, has a child process read it back and check the history exclusion formats (the child prints a length and a hash on its stdout pipe; the parent compares), then puts the saved text back (kept out of the history) only over the probe's own last change, and has a child check it; prints verdicts only, never clipboard text |
-| `TranslateProbeHelper.exe --selftest` | discovery JSON |
+| `WoWTranslateCompanion.exe --selftest` | discovery JSON |
 
 ## Measured facts
 
@@ -461,6 +589,52 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
   test's own "focus never moves" check (the foreground window changed between two windows of other
   applications during the 6 s run, while the PC was in use); the Helper runs there with
   `--no-overlay` and owns no visible window.
+
+- **Hint lanes and the rename (2026-10-19, `WoWTranslateCompanion.exe` 0.4.0, release build with
+  no warning: 1,297,408 bytes; the runs below used the build just before it, 1,300,992 bytes, which
+  differs only in how the `--help` text is assembled; a WoW client and the user's own Helper
+  running, so every E2E run used `--helper-arg=--instance-name=e2e`, fakewow off screen and
+  `--no-overlay --no-clipboard`):**
+  the 10 echo scenarios under WGC pass every functional check, the new `lanes` check included
+  (every lane under a shown card found within 2 px with at least 60% of its columns passing, none
+  where the truth has none, painted, and found before the addon revealed its hint):
+
+  | Scenario | TRANSLATE P99 ms | band failures / checks | lanes found / checks | false lanes | lanes revealed | CPU whole run % | CPU after 2 s % |
+  |---|---|---|---|---|---|---|---|
+  | basic | 161.1 | 0 / 3509 | 1213 / 1213 | 0 | 3 | 3.63 | 1.89 |
+  | scroll | 109.5 | 0 / 3181 | 1965 / 1965 | 0 | 3 | 2.96 | 1.76 |
+  | fade | 81.2 | 0 / 1459 | 972 / 972 | 0 | 2 | 3.54 | 2.41 |
+  | cover | 109.6 | 0 / 3963 | 1025 / 1025 | 0 | 2 | 2.80 | 1.65 |
+  | tabs | 126.3 | 0 / 1984 | 1333 / 1333 | 0 | 4 | 3.92 | 2.30 |
+  | altz | 80.5 | 0 / 2754 | 801 / 801 | 0 | 2 | 3.81 | 1.93 |
+  | dropped | 153.1 | 0 / 1363 | 927 / 927 | 0 | 2 | 2.94 | 1.53 |
+  | late_start | 65.3 | 0 / 1668 | 834 / 834 | 0 | 3 | 4.20 | 1.79 |
+  | gamma22 | 96.7 | 0 / 3441 | 1191 / 1191 | 0 | 3 | 3.86 | 2.09 |
+  | conv | 72.9 | 0 / 3021 | 1466 / 1466 | 0 | 4 | 4.64 | 2.75 |
+
+  - The CPU rule (3% of one core over the whole run) fails in 7 of 10, as it did for the previous
+    build on this machine state. A/B on basic, 3 interleaved pairs, the process cycle count after
+    the first 2 s: the previous build (`TranslateProbeHelper.exe` of HEAD, the same exe file the user
+    runs, started as a second instance with its own mutex) 53.4, 51.7, 50.5 Mcycles/s, this build
+    48.0, 55.1, 50.5: no difference beyond the run-to-run spread. On conv: 73.1 against 73.5.
+  - The previous build fails `lanes` in basic and conv (it covers only the reply card's lane): the
+    check tells a Helper that leaves the hints visible from one that covers them.
+  - A first run of all 10 found gamma22's lanes never covered: the lane search got the card's
+    background samples after their conversion back to display colours while it searched the
+    linearized capture. The search now runs in the linear capture with the linear samples, and
+    the lane's fill goes back to display colours with the card's (`app.rs`, `scan_img`).
+  - One `conv` run failed `bands` (3 rows) and `lanes` in one capture: the check expected the
+    reply card as soon as VIEW 200 was known, before the grown VIEW that covers it was decoded
+    (`tests\e2e\README.md`, deviation 8; check.py fixed, no Helper change).
+  - Log sentinel grep (the scenarios' chat words and sender names, "ZZSENTINELZZ") over the 50
+    diag, truth, report, fakewow and log files of the final run: 0 hits.
+- **Integration review fixes (2026-10-19, the release build of `scripts\helper.ps1 -Build`,
+  1,340,416 bytes):** the 10 echo scenarios under WGC pass every functional check, `lanes` included
+  (1,923 lane checks and 61 orphan lanes in `scroll`, 0 false lanes anywhere); the CPU rule fails
+  in 8 of 10 (3.08 to 4.91%, after 2 s 1.64 to 2.96%), within the spread of identical runs (conv:
+  4.91, 3.95, 4.21%). Lane search in release: chat 152 us, over a busy world 240 to 270 us, window
+  19 to 24 us; a chat lane under rows that did not move is searched at most every 100 ms.
+  `docs\DESIGN.md` section L.3 has the tables.
 
 ## Deviations from the design
 
@@ -664,3 +838,68 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
     its empty when nothing was written), checked with the clipboard open. The saved text's length
     and hash no longer go on the child's command line: the child prints its reading on its stdout
     pipe and the parent compares.
+43. **Hint lanes under every card (user request U1, 2026-10-19).** The reply card's lane (design
+    A.6.4) was the only one; the addon now draws a lane under every card that waits for the Helper,
+    and the Helper covers each one while it paints the card, in any state ("Hint lanes" above).
+    `lane::find_lane` became `find_window_lane` (with an unknown K: right under the last visible
+    row; the lane must lie inside the view) and `find_chat_lane` is new; `Lane` holds its kind and
+    a fill (`BandBg`: flat for a window, a gradient for the chat) instead of one colour; the scene
+    keeps a lane for every card kind (it dropped all but the reply's); the `cards` diag record's
+    `lane` gains `kind` and `rgbRight`. Facts behind the chat rules: the chat font's glyphs and
+    their shadow reach the line's top and bottom rows (the window's hint is placed clear of them),
+    and the addon starts the inline hint at the tag's x0 (`Reserve.LaneRow`) with `[Download]` in
+    its links' blue, so the tag column test accepts the lane's own colours and the edge test
+    accepts glyph edges and shadows next to them. The ground is the card's last row's background
+    rather than a new sample on the lane's rows: a first version sampled each of the 5 candidate
+    positions and classified and fitted every pixel, 2,139 us per card in release; reading the
+    rows once, lazily, with the row's samples brings it to 39.6 us (`hint_lane::lane_search_cost`).
+44. **Known limits of the chat lanes** (updated by the integration review). A tooltip's navy body
+    is close to a mix of 17% link blue and black, so where it touches a `[Download]` glyph its outer
+    2 px may join the lane. A cover whose top edge lies exactly at the lane's top (its body over the
+    whole lane, the row above uncovered) is not told from the chat: since the local ground, of any
+    colour (before, only over a ground of nearly its colour). A straight horizontal edge of the
+    game world behind a transparent chat (a horizon, a UI element under the chat) inside the lane
+    is taken for a cover: those columns are left, and the hint shows there. Per-pixel texture beyond
+    about +-30 levels exceeds the largest tolerance (48): some columns are left. The hint's partial
+    rows at a fractional line position below the lane are not covered (the lane is whole rows; the
+    row above it is painted with it). An orphan lane is followed only from where the Helper saw it
+    under its card (a Helper started with a lane already at the top leaves it), and no local ground
+    is made for it. With the gold boss emote of an older addon no longer an issue (no chat lane is
+    searched for builds before 4), that limit is gone.
+45. **Rename to Translate Companion (user request U2, 2026-10-19).** The exe and every
+    user-visible string changed; the crate names, the mutex, the window classes and the data
+    folders did not (see the top of this file). `tp_helper::{PRODUCT_NAME, EXE_NAME, RELEASES_URL}`
+    are new, the tray menu gains "Get updates" (`MenuCmd::Updates`, `tray.updates`) and the tooltip
+    the version (`tray.tip` takes `{version}`); `AppEvent::TrayUpdates` is new. Helper version 0.4.0.
+46. **Addon build 4, and lanes only where the addon draws them (integration review, 2026-10-19).**
+    `scene::ADDON_BUILD` is 4 with the addon's `ns.ADDON_BUILD` (builds 2 to 4 served): a Helper
+    0.3.x shows "older than the addon" instead of leaving every new hint visible. The capture
+    searches a card's lane only per `SceneMachine::lanes_for`: every card for build 4 or a build not
+    known yet, the reply card only for builds 2 and 3, never the test card (slot 127: under its rows
+    the addon prints "TranslateProbe: ... Overlay OK", whose link-blue prefix passed for a lane).
+47. **Window lanes: the request's last row, the card's own fill, glyph edges (integration review).**
+    `find_window_lane` refuses a lane when the request's last row is not the card's last visible row
+    (a bubble cut by the thread or under a tooltip: VIEW 200 reaches over the reply card, so a lane
+    under a lower row painted over its draft line) and when the tag-column fill is more than 8 levels
+    from the card's background sample (a tooltip's body); its edge rows accept the hint's own glyph
+    edge at a small UI scale, as the chat lanes do. `find_window_lane` takes the card's `CardBg`.
+48. **Chat lanes: local ground, cover edges, indent, cut rows (integration review).** See "Hint
+    lanes": a column failing against the row samples' gradient is judged again against a local
+    ground and texture from the lane's own plain pixels; straight horizontal cover edges inside the
+    lane fail their columns; the indent left of the tag column must be free of ink; a last row cut
+    by the top of the chat is measured from its bottom; the lane takes the card's last partial row.
+    Before, a +-30 texture left the lane unfound (816 gold pixels visible under a painted card), a
+    feature 30 to 45 levels off the gradient left its columns, and a tooltip edge in the lane's
+    middle rows over a dark chat was painted over.
+49. **Orphan lanes (integration review).** See "Hint lanes": a chat lane whose card's rows left the
+    top of the chat is followed there from the memo of where it was found (its ink must match), and
+    painted on its visible rows; `SceneView::lanes`, `FoundLane`, `SceneMachine::update_found_lanes`
+    and the `lanes` list of the `cards` diag record are new.
+50. **A chat lane is searched again at most every 100 ms while its card's rows stay put
+    (integration review).** In between it keeps its columns and takes each capture's background
+    (`app.rs`, `lane::RESEARCH_MS`): the full search, with the local ground and the cover edges,
+    costs 0.15 to 0.27 ms, and a world moving behind a translucent chat changes every capture. A
+    cover arriving over a lane is therefore seen within 100 ms, like the covering test.
+51. **Toasts fit a small game window (integration review).** The French "older than the addon"
+    toast was 1,106 px wide on its single line; every toast is now at most 800 px wide in English
+    and French (`toast::tests::every_toast_fits_a_small_game_window`).

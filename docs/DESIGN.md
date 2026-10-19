@@ -2,15 +2,18 @@
 
 TranslateProbe puts a [T] link after each readable player line in the WoW Forever chat. A click
 opens the line in the **conversation window** (one tab per sender; since 2026-10-19, section K), or,
-with Ctrl held, reserves a few rows under the line (inline mode), and asks **TranslateProbe Helper**,
-a Windows app running beside the game, to translate the line with a local AI model (llama.cpp and
-Qwen3 4B). The Helper draws the translation on the reserved rows, in the chat or in the window's
-bubbles. From the window the player can also reply: the Helper translates the reply and puts it in
-the clipboard, the player pastes it and clicks the channel. Nothing leaves the PC, and the Helper
-never touches the game process: the addon and the Helper talk through pixels only.
+with Ctrl held, reserves a few rows under the line (inline mode), and asks **Translate Companion**
+(`WoWTranslateCompanion.exe`; TranslateProbe Helper, `TranslateProbeHelper.exe`, until 2026-10-19;
+"the Helper" in these docs and the code), a Windows app running beside the game, to translate the
+line with a local AI model (llama.cpp and Qwen3 4B). The Helper draws the translation on the
+reserved rows, in the chat or in the window's bubbles. From the window the player can also reply:
+the Helper translates the reply and puts it in the clipboard, the player pastes it and clicks the
+channel. Nothing leaves the PC, and the Helper never touches the game process: the addon and the
+Helper talk through pixels only.
 
-This file is the design as it was built (addon 0.4.0, Helper 0.3.0). The detailed specs, the
-measurements behind them and every deviation from the original plan are in:
+This file is the design as it was built (addon 0.5.0, protocol build 4; Translate Companion 0.4.0;
+section L for the hint lanes and the rename of 2026-10-19). The detailed specs, the measurements
+behind them and every deviation from the original plan are in:
 
 | File | Part |
 |---|---|
@@ -19,7 +22,7 @@ measurements behind them and every deviation from the original plan are in:
 | `docs\ENGINE.md` | the translation engine: discovery, llama-server lifecycle, prompt, evaluations |
 | `docs\HELPER.md` | the Helper app: threads, capture, overlay, CLI, diagnostics, CPU measurements |
 | `tests\e2e\README.md` | the end-to-end rig (fakewow) and its checks |
-| `docs\IN-GAME-CHECKS.md` | what only the real client can show (G1-G18) |
+| `docs\IN-GAME-CHECKS.md` | what only the real client can show (G1-G19) |
 
 ---
 
@@ -141,7 +144,7 @@ Ollama store.
 |---|---|---|
 | Readable player line arrives | ` [T]` link after the line | nothing |
 | Click [T] | K reserved rows (tag and plate) under the line, then the glossary row (if `show on` and any match), then the romanized name row (if `names on`) | a status in the plate within about 100 ms ("Waiting (N ahead)...", "Starting the translator...", "Translating..."), then the translation |
-| Helper not running | rows stay dark; tooltips on [T] and rows name the Helper; the first click ever prints FIRST_USE once per account | - |
+| Helper not running | rows stay dark; tooltips on [T] and rows name the Helper; 1.5 s after the click a gold hint line under the rows ("No translation above? Start Translate Companion. [Download]", section L); the first click ever prints FIRST_USE once per account | - |
 | Helper started after the click | same | "Not received - click [T] again" once a plate has been seen for 1.5 s without a request |
 | Re-click [T] | rows unchanged; the same request is sent again (served from the cache; repairs a missed request) | same card |
 | Shift-click [T] | rows unchanged; new request with noCache | the card restarts |
@@ -283,7 +286,12 @@ All in `Locales.lua` (English and frFR). The Helper's strings are in `helper\app
 
 ---
 
-## D. TranslateProbe Helper
+## D. Translate Companion (the Helper)
+
+The Windows app is named Translate Companion for users since 2026-10-19 (exe
+`WoWTranslateCompanion.exe`, tray, toasts, balloons, strings); the internal names below (crates,
+the mutex `Local\TranslateProbeHelper`, the `TPHelper*` window classes, the
+`%APPDATA%\TranslateProbe` and `%LOCALAPPDATA%\TranslateProbe` folders) did not change (section L).
 
 ### D.1 Layout (four crates, no Cargo workspace)
 
@@ -292,7 +300,8 @@ helper\.cargo\config.toml   +crt-static, [build] jobs = 3
 helper\bridge\    tp_bridge   strip decoder, messages, reassembly, tag scan, cards, synthetic images (feature synth)
 helper\engine\    tp_engine   discovery, flags probe, device policy, llama-server, prompt, post-processing, queue, cache
                               bin evalprompt (E1 evaluation)
-helper\app\       tp_helper   the app (bin TranslateProbeHelper, bin capprobe)
+helper\app\       tp_helper   the app (bin WoWTranslateCompanion, until 2026-10-19 TranslateProbeHelper;
+                              bins capprobe and clipprobe)
 helper\testkit\   tp_testkit  bin fakewow (the E2E stand-in game window)
 ```
 
@@ -429,7 +438,8 @@ See section I.
 
 `docs\IN-GAME-CHECKS.md` lists the setup (deploy, build and start the Helper) and the checks G1
 (bridge and capture) to G10 (native look) for inline mode, then G11 (client facts) to G18
-(clipboard end to end) for the conversation window and replies, with what to report.
+(clipboard end to end) for the conversation window and replies, and G19 (hint lanes and the
+Translate Companion dialog), with what to report.
 
 ---
 
@@ -485,6 +495,7 @@ Each is recorded with its evidence in the component docs; the main ones:
   normal off-screen window); `run.py`; check.py waits for the VIEW and compares rows modulo 4;
   since 2026-10-19 a window layer (scenario `conv`) and the window checks.
 - **Conversation window** (2026-10-19): see section K.4.
+- **Hint lanes and Translate Companion** (2026-10-19): see section L.2.
 
 ---
 
@@ -686,8 +697,9 @@ background", deviations 35-42), `tests\e2e\README.md` (scenario `conv`) and
   and then paints green "Ready - Ctrl+V to paste" ("Ready (not copied)" in amber otherwise). The
   player pastes into the box (the addon shows "Pasted"), the paste checks run, and a click on a
   channel button sends; CANCEL then lets the Helper empty the clipboard if it still holds its own
-  text. A hint lane under the card ("No status above? Start or update TranslateProbe Helper.") is
-  painted over by the Helper, so it shows exactly when no Helper paints.
+  text. A hint lane under the card (now "No status above? Start Translate Companion." with a
+  [Download] button) is painted over by the Helper, so it shows exactly when no Helper paints;
+  since addon build 4 every card has one (section L).
 - **Helper in the background (D12):** the overlay windows are topmost only with the game in front;
   otherwise they sit right above the game window, so other windows hide them pixel for pixel. The
   strip and the tags are read in the background too (5 Hz, 20 Hz while the strip is active), so a
@@ -820,3 +832,96 @@ those figures describe the sleeping display, not this build.
   so the user's image was never at risk. The real clipboard path is checked in game (G18).
 - Log sentinel grep (the scenarios' chat words and sender names, "ZZSENTINELZZ") over 123 output
   files of `tests\e2e\out`: 0 hits.
+
+---
+
+## L. Hint lanes and Translate Companion (2026-10-19, user requests U1-U3)
+
+Built in two work packages (addon, helper), reviewed twice (one review per side), then integrated.
+The component docs hold the details: `docs\ADDON.md` ("Hint lanes and the Translate Companion
+dialog", decisions 52-62), `docs\HELPER.md` ("Hint lanes", deviations 43-51), `docs\BRIDGE.md`
+(STATUS build 4, section 8c), `tests\e2e\README.md` (the `lanes` check, deviation 9) and
+`docs\IN-GAME-CHECKS.md` (G19).
+
+### L.1 User requests
+
+| # | Request | As built |
+|---|---|---|
+| U1 | When the Helper is not running, a [T] click says so, with the download page | The addon cannot know whether the Helper runs, so the message is self-revealing: under the last reserved row of every card that waits for the Helper (incoming bubbles, the reply card, the rows under a chat line) the addon draws one more row, the lane, with "No translation above? Start Translate Companion." in gold and a [Download] link (window: a button), 1.5 s after the rows (window: after the lane became visible, and again after any move); the Helper paints every lane over whenever it paints the card. [Download] opens a "Translate Companion" dialog (start it or download it, the URL in a read-only box already selected for Ctrl+C, Close, Escape); `/tpr app` prints the URL. The reply card keeps "No status above? Start Translate Companion." |
+| U2 | Rename the Windows app, user-facing, to Translate Companion | `WoWTranslateCompanion.exe` (Cargo `[[bin]]` WoWTranslateCompanion), tray tooltip (with the version) and menu (new "Get updates"), toasts, balloons, `--help`, `--version`, the en and fr strings of both sides, the slash help, README and docs. Kept: the addon's name TranslateProbe, the crate names, the mutex `Local\TranslateProbeHelper` (an old and a new exe never run together), the `TPHelper*` window classes and the `%APPDATA%\TranslateProbe` / `%LOCALAPPDATA%\TranslateProbe` folders (settings and logs carry over). Versions: addon 0.5.0 (protocol build 4), Translate Companion 0.4.0 |
+| U3 | The download link is https://github.com/Mouchoir/WoW-Chat-Translator/releases | One constant per side: `ns.COMPANION_URL` (`Core.lua`), `tp_helper::RELEASES_URL` (`lib.rs`) |
+
+### L.2 Integration review findings
+
+| Finding (severity, review) | Status |
+|---|---|
+| An inline lane whose card's rows left the top of the chat stayed visible (no card to find it under), for minutes in a quiet channel, and no E2E state reached it (major, addon) | fixed: the Helper remembers each chat lane with its ink and follows it at the chat's top line (orphan lanes, HELPER.md deviation 49); a last row cut by the top is measured from its bottom; the `scroll` scenario now pushes every card out of the top (61 orphan checks, all found) and the truth lists a lane whose tagged row is above the chat |
+| `ADDON_BUILD` 3 on both sides: a Helper 0.3.x left every new hint visible with no toast (major, both reviews) | fixed: build 4 on both sides (2 to 4 served), and lanes searched only where the addon's build draws them (deviation 46) |
+| A window lane was accepted under a bubble whose last row is hidden (over the reply card's draft line) or on a tooltip's body (major, helper) | fixed: the request's last row must be the card's last visible row and the fill the card's own (deviation 47) |
+| A textured world or a feature neither sample sees behind a transparent chat left the gold hint visible under a painted card (major, helper) | fixed: local ground and texture per column for the columns failing the gradient (deviation 48); pixel tests up to +-30 texture and 20 to 45-level features; +-40 leaves some columns (documented), in-game check G19 step 4 |
+| `/tpr test rows`: the addon's own print under the test rows was painted over (major, helper) | fixed: no lane search for slot 127, and the indent left of the tag column must be free of ink (the print's prefix starts there) |
+| Window hints stayed shown during a drag, a resize or a scroll, so they flashed while the Helper ran (minor, addon) | fixed: hidden while dragged or resized, and the reveal waits 1.5 s again after any move (ADDON.md decision 62); G19 step 4 lists the inherent inline flash |
+| The window lane's 2-unit margin is 1.6 px at 0.8 px per unit (minor, both) | fixed: 2 units and 2 px at least, the font a point under its box, and the Helper accepts the hint's glyph edges in a window lane's edge rows (decision 61, deviation 47); the E2E window draws its hint 2 px clear |
+| [Download] in a bubble swallowed right-clicks and the hover (minor, addon) | fixed: forwarded to the bubble (decision 55) |
+| A tooltip edge in a chat lane's middle rows over a dark chat was painted over (minor, helper) | fixed: straight horizontal cover edges inside the lane fail their columns (deviation 48) |
+| The French "older than the addon" toast was 1,106 px on one line (minor, helper) | fixed: shortened; every toast at most 800 px, tested (deviation 51) |
+| [Download] stays clickable under the paint (minor, helper) | kept and documented (decision 55): a left click opens the dialog, the rest goes to the bubble |
+| Stale names and docs (DESIGN, BRIDGE, a Bridge.lua comment, the exe size, the dialog's anchor) (minor, both) | fixed |
+| A revealed inline hint moves one capture before the overlay on a scroll or a new line (minor, helper) | kept, inherent (as the tags); G19 step 4 reworded |
+
+### L.3 Integration results (2026-10-19)
+
+Same PC, the WoW client running the whole time and the user playing: every window-level test used
+fakewow off screen or a small window at the bottom of the z-order, the E2E Helper ran with
+`--no-overlay --no-clipboard` and `--instance-name=e2e`, and GDI E2E was deferred (it reads the
+screen). The user's Helper 0.3.0 (`TranslateProbeHelper.exe`) was stopped with `taskkill` without
+/F (it exited in 0.7 s; no llama-server was running), the release built, the stale
+`TranslateProbeHelper.exe` (and its `.pdb` and `.d`) removed from `helper\app\target\release`, the
+addon deployed with `scripts\dev.ps1`, and Translate Companion 0.4.0 restarted detached (its log:
+Start 0.4.0, settings loaded, tray icon, WowFound, WGC capture started).
+
+**Offline suites**
+
+| Command | Result |
+|---|---|
+| `npm test` (enUS, frFR, bridge) | enUS 663/663, frFR 663/663; bridge byte identity: 30 traces, 16,892 ticks, 1,066 frames, 1,024 tags, 46 builder vectors + 6 parser-only, 29 API checks, all passed |
+| `node tests\run.js enUS --stub-bridge` / `frFR --stub-bridge` | 663/663 each |
+| `luacheck addon` | 0 warnings, 0 errors in 23 files |
+| `python -I tools\bridge\make_vectors.py <dir>` | 30 traces, 1,066 frames, 387 messages, 1,024 tags, 52 message vectors, 36 strips; the 33 files byte-identical to `tests\vectors` (no message changed) |
+| `cargo test --offline`, `helper\bridge` | 62 passed, 2 ignored; `--release -- --ignored`: 2 passed (200,000 corrupted captures, 0 undetected; at 1080p strip decode 11.3 us, view scan 283.5 us, cards 246.5 us) |
+| `cargo test --offline`, `helper\engine` | 99 + 5 passed, 3 ignored (the ignored real-server smoke tests were not run: they load 4 CPU threads while the user plays, and the engine changed only in a doc comment) |
+| `cargo test --offline`, `helper\app` | lib 160, clipprobe 4, graceful_exit 2, hint_lane 5, native_look 5, sentinel 2, tagscan_equiv 5 passed (5 ignored); `window_pipeline --ignored`: 2 passed; lane search (release, a 401 px lane): chat 152 us, chat over a busy world 240 to 270 us, window 19 to 24 us |
+| `cargo test --offline`, `helper\testkit` | 19 passed |
+| `cargo clippy --all-targets` (app, testkit) | no warning in the changed files |
+| `scripts\helper.ps1 -Build` | `WoWTranslateCompanion.exe` 1,340,416 bytes; `--version` "Translate Companion 0.4.0" |
+| `python -I tests\e2e\check.py --selftest` (basic, cover, late_start, conv, scroll truths) | all pass: the perfect diag passes (scroll: 63 orphan checks), the shifted one fails bands and lanes, no lane and a lane a row too low fail lanes, the broken window fails window_fill |
+
+**End to end, echo translator, WGC, `--no-overlay --no-clipboard`**
+
+| Scenario | TRANSLATE P99 ms | band failures / checks | lanes found / checks | orphan lanes | false lanes | revealed | CPU whole run % | CPU after 2 s % |
+|---|---|---|---|---|---|---|---|---|
+| basic | 141.9 | 0 / 3518 | 1216 / 1216 | - | 0 | 3 | 3.87 | 2.10 |
+| scroll | 135.3 | 0 / 3051 | 1923 / 1923 | 61 / 61 | 0 | 3 | 1.55 | 1.13 |
+| fade | 88.4 | 0 / 1462 | 974 / 974 | - | 0 | 2 | 3.44 | 2.31 |
+| cover | 94.5 | 0 / 3958 | 1025 / 1025 | - | 0 | 2 | 3.31 | 2.01 |
+| tabs | 93.0 | 0 / 2001 | 1345 / 1345 | - | 0 | 4 | 3.56 | 2.22 |
+| altz | 95.2 | 0 / 2754 | 801 / 801 | - | 0 | 2 | 3.08 | 1.71 |
+| dropped | 167.6 | 0 / 1360 | 925 / 925 | - | 0 | 2 | 3.31 | 1.83 |
+| late_start | 64.4 | 0 / 1662 | 831 / 831 | - | 0 | 3 | 3.74 | 1.72 |
+| gamma22 | 103.9 | 0 / 3520 | 1217 / 1217 | - | 0 | 3 | 2.86 | 1.64 |
+| conv | 131.5 | 0 / 3004 | 1457 / 1457 | - | 0 | 4 | 4.91 | 2.96 |
+
+- Every functional check passes in all 10 scenarios (latency, bands, hidden, masks, missing, done,
+  lanes; conv: window_fill, reply_status, partial_rows, no_duplicate). The CPU rule (3% of one core
+  over the whole run) fails in 8 of 10, as it did for the helper package's build (7 of 10, 2.80 to
+  4.64%) on this machine with the game running; conv also fails `cpu_vs_i2`. Two more conv runs
+  gave 3.95% (2.37% after 2 s) and 4.21% (2.52%): the spread between identical runs is larger than
+  any difference from the review fixes. `scroll` is 45 s long now, so its start-up weighs less.
+- A first `scroll` run of the integration build (before the orphan search required the lane's own
+  ink) passed every orphan check but painted a 4 px sliver for one more line where the truth had no
+  lane any more (the line under it): `false_lanes` 82, then 20 once the truth listed cut lanes,
+  then 0.
+- Log sentinel grep (the scenarios' chat words and sender names, the hint's text,
+  "ZZSENTINELZZ") over the 65 diag, truth, report, fakewow and log files of these runs: 0 hits.
+- No llama-server ran during the suites; run.py reported no leftover process; every cargo, node,
+  python and fakewow process started here has exited.
