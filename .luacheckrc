@@ -32,6 +32,10 @@ read_globals = {
     "C_ChatInfo", "C_BattleNet", "ChatFrameUtil", "EventRegistry", "DEFAULT_CHAT_FRAME", "ChatTypeInfo",
     "GetChannelName", "GetChannelList", "C_RestrictedActions",
 
+    -- Links of a message (Links.lua): what a chat frame does with a click, item quality colours
+    "SetItemRef", "IsModifiedClick", "GetFixedLink", "ChatEdit_InsertLink", "ColorManager", "C_ColorOverrides",
+    "C_Item", "ITEM_QUALITY_COLORS",
+
     -- Templates' global functions
     "PanelTemplates_SetNumTabs", "PanelTemplates_SetTab", "PanelTemplates_GetSelectedTab",
     "PanelTemplates_UpdateTabs", "PanelTemplates_TabResize", "PanelTemplates_ResizeTabsToFit",

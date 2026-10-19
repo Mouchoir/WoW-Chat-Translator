@@ -16,7 +16,8 @@ the Translate Companion dialog"). Modules, in TOC order:
 | `ConvLocales.lua` | the conversation window's strings (en, frFR) and the key binding names |
 | `ReplyLocales.lua` | the reply composer's strings (en, frFR) |
 | `Core.lua` | saved variables (whitelist purge, schema 4), session id, print helpers, inits under `pcall` |
-| `Bridge.lua` | pixel strip encoder, message builders, tag and plate markup (bridge package) |
+| `Bridge.lua` | pixel strip encoder, message builders, tag and plate markup, marked spans (`MarkSpan`) (bridge package) |
+| `Links.lua` | the 12.x chat markup (every colour escape, hyperlinks), link colours for the marks, a message's links (`Parse`), clicks and hovers as in the chat, hyperlinks in a frame |
 | `Glossary.lua` | abbreviations: glossary row (`Describe`), prompt pairs (`Extract`), marked text (`PromptText`) |
 | `Lang.lua` | targets, default target, script of a line |
 | `LangData.lua` | character trigram profiles of en, de, fr, es, it, pt (restored from 8b7750e, `tools\make_langid.py`) |
@@ -237,6 +238,9 @@ bubble ("typed"), unless it is the echo of a reply sent from the window in the l
 - **Hint lane** (incoming bubbles, U1): one more row of fill under the K rows, with "No
   translation above? Start Translate Companion." and [Download] (see "Hint lanes and the
   Translate Companion dialog"); an untranslated bubble has none.
+- **Links bar** (L2): under the lane (under the Translate button of an untranslated bubble), the
+  message's hyperlinks as buttons in their own colours, clickable as in the chat; the Original
+  text's hyperlinks work the same way (see "Links of a message").
 - **The reply card** (`Bubble.AcquireReply`, laid out by the composer): "Your text: ..." with
   `card.EditButton` and `card.CancelButton`, the reply's rows (row 0 the Helper's status), and the
   lane: one row of fill right under the last row with the hint "No status above? Start Translate
@@ -251,7 +255,7 @@ bubble ("typed"), unless it is the echo of a reply sent from the window in the l
   defaults, Blizzard's ChatBubble text inset). The bubble column starts 6 units into the thread's
   content, `bubbleWidth = contentWidth - 36`, `plateWidth = bubbleWidth - 2 border - 2 pad - 8 W`.
   A translated bubble's box is `2 inset + (K + 1) rowH` high (the K rows, then the lane), snapped
-  to the pixel grid.
+  to the pixel grid; with links, `+ BarGap + lines * rowH` (the links bar under the lane).
   K = `min(6, max(1, ceil(textWidth / plateWidth * factor * 1.1 - 0.15)))` with the script factors
   of the inline rows (`Reserve.EstimateWindowRows`).
 
@@ -485,6 +489,101 @@ reaches `UISpecialFrames`, and while the dialog shows the conversation window le
 combat the box never takes the focus, and combat start takes it back. The rows and the lane stay.
 `/tpr app` prints the same URL after its four lines.
 
+## Links of a message (L1-L3, 2026-10-19)
+
+User requests of 2026-10-19 with in-game evidence: a WTS line came out in a bubble as
+"WTS |cnIQ3:[...]" (L1); links (items, map pins, professions, spells) should stay usable in the
+conversation window (L2); the painted translation should show link names in their colours (L3,
+the addon's half here, the painting in `docs\HELPER.md`).
+
+### The 12.x chat markup (L1)
+
+Read on 2026-10-19 in Gethe/wow-ui-source, branches `live` (12.1.5.70448) and `forever`
+(1.60.1.70450), identical for every file below:
+
+| Fact | Where |
+|---|---|
+| `\|cAARRGGBB` (alpha ignored), `\|r` pops the innermost colour (colours nest) | warcraft.wiki.gg "UI escape sequences" (9.0.1 nesting) |
+| `\|cn<name>:` named colour (10.0.0+), `<name>` a global colour: each `C_UIColor.GetColors()` baseTag becomes a global ColorMixin (`NORMAL_FONT_COLOR`...) | `Blizzard_SharedXMLBase\Color.lua` (end of file) |
+| `\|cnIQ<n>:` item quality n with the user's colour overrides (11.1.5+); `ColorManager.GetFormattedStringForItemQuality` writes `"\|cnIQ%d:%s\|r"`; `ITEM_QUALITY_COLORS[i]` and `ColorManager.GetColorDataForItemQuality(q)` = `{ r, g, b, hex, color }` from `C_ColorOverrides.GetColorForQuality(i)` | `Blizzard_Colors\Mainline\ColorManager.lua` |
+
+Every place that reads or measures text strips the three forms: `Glossary.PlainText` (the
+glossary, `HasWords`, the language detector, `Lang.Script`), `Glossary.VisibleText` (the row
+estimates, the reply composer's measure) and `Glossary.PromptText` (the TRANSLATE text), through
+`Links.StripColors` and `Links.Scan`. A typed pipe (`||`) is never read as an escape: PlainText
+drops it, VisibleText shows it as `|`. The mock's font strings count no `|cn` code and count an
+atlas at its width, like the client.
+
+### Link colours in the marks (L3, addon half)
+
+`Glossary.PromptText` walks the text with `Links.Scan` (a colour stack: `|c...` and `|cn...:`
+push, `|r` pops) and writes each link name as `Bridge.MarkSpan(name, rgb)`: 0x02, 0x04 and the
+colour as 6 uppercase hex digits, the name, 0x03 (`docs\BRIDGE.md` section 3a, the normative
+encoding; `{...}` groups get no colour). That is the addon's own form: on the wire the colours go
+in a COLOURS message sent right before the TRANSLATE (`Bridge.ColoursMessage`, `Request.lua`'s
+`SendTranslate`), and `Bridge.TranslateMessage` sends the spans without them (`docs\BRIDGE.md`
+section 3b, decision 71). The colour is the innermost one open at the link, or a
+colour escape at the start of the name; `|cnIQ<n>:` through `ColorManager.GetColorDataForItemQuality`,
+else `C_ColorOverrides.GetColorForQuality`, else `C_Item.GetItemQualityColor`, else
+`ITEM_QUALITY_COLORS`; another `|cn` name through its global colour; none or unresolved: `FFD100`
+(NORMAL_FONT_COLOR). The name is the reader's text (colours, textures, atlases and protected names
+inside it removed). Bytes 0x01-0x04 typed in a message are deleted first. `ns.ADDON_BUILD` is 5.
+
+### The links bar and the Original text (L2)
+
+- **Contents** (`Links.Parse(msg.text)`, once per message, memory only): every `|H...|h...|h` of
+  the message, any type (item, spell, trade, worldmap, quest, achievement, currency, mount,
+  battlepet, transmog, talentbuild, keystone, journal, dungeonScore, enchant, outfit...), in order,
+  each once (same data and name), nameless ones left out. Each button's label is the link's name
+  as drawn (its atlas included) in its own colour escape (`|cnIQ3:[...]|r`, so the client applies
+  the user's quality overrides), else gold; the window font (`TranslateProbeConvFont`).
+- **Place** (`Bubble.lua`, `PlaceBar`): inside the bubble's fill, from the tag's x0 (`inset`) to the
+  plate's end (`8 W + plateWidth` wide), `BarGap = max(4 units, 4 / ppu)` under the lane's bottom
+  (4 physical px at least: the Helper's lane search tries the lane +-2 px and reads its 2 outer px
+  rows, `docs\HELPER.md`), lines `rowH` apart, wrapped left to right with 6 units between links; a
+  name wider than the bar is cut to its width. The rows, tags, plates and the lane keep their
+  places; the box grows by `BarGap + lines * rowH`. An untranslated bubble has the bar 4 units under
+  its Translate button. No links: no bar, the bubble as before. VIEW 200 and the per-row clipping
+  need no change (the bar is inside the bubble column and is never a row).
+- **Click** (`Links.Click(link, text, button)`), what a chat frame does: `ChatFrameMixin:OnHyperlinkClick`
+  calls `SetItemRef(link, text, button, chatFrame)`. A left click with `IsModifiedClick("CHATLINK")`
+  (Shift by default) first puts the link in the active chat edit box with `ChatFrameUtil.InsertLink`
+  (the 12.x name of `ChatEdit_InsertLink`, after `GetFixedLink` as `HandleModifiedItemClick` does),
+  for every link type the client has no Shift handling of its own for (decision 65); with no edit
+  box open it goes on to `SetItemRef`. Every other click (left,
+  right, Ctrl) goes to `SetItemRef(link, text, button, DEFAULT_CHAT_FRAME)`: the link handlers
+  (a map pin sets the waypoint and opens the map, a talent build opens the loadout, a battle pet its
+  card...), then for a modified click `HandleModifiedItemClick` (Ctrl: `DressUpLink`), else the
+  ItemRefTooltip. A link click never reaches the bubble (no retranslation, no menu).
+- **Hover** (`Links.ShowTooltip`): `GameTooltip:SetHyperlink(link)` (a tooltip data accessor: false
+  when the client has no tooltip for that link), except for action links (player, BNplayer,
+  channel, urlIndex, addon, censored lines...); otherwise the link's name in its colour, "Click: open
+  it, as in the chat." and "Shift-click: put it in your chat message." (`CONV_LINK_TIP_CLICK`,
+  `CONV_LINK_TIP_SHIFT`, en and frFR).
+- **Original text**: its font string sits in a frame of its own with `SetHyperlinksEnabled(true)`,
+  the mouse enabled and `OnHyperlinkClick`, `OnHyperlinkEnter`, `OnHyperlinkLeave` going to the same
+  `Links.Click` and `Links.ShowTooltip`. `SetHyperlinksEnabled` is only called out of combat
+  (decision 67, a conservative choice): a bubble made during combat gets it when the combat ends
+  (`PLAYER_REGEN_ENABLED`); its bar works at once.
+- **My bubbles** (a whisper I wrote in the normal chat, `CHAT_MSG_WHISPER_INFORM`, keeps its real
+  links): the text sits in a frame of its own with the same hyperlink scripts (`Bubble.lua`,
+  `textFrame`); its mouse is on only while the text has links, and its hover forwards to the
+  bubble's (decision 72). No bar: the addon draws that text itself, links included.
+- **Inline mode** needs nothing: the chat line keeps its own links.
+
+APIs read in the UI source (both branches): `SetItemRef`, `GetFixedLink`
+(`Blizzard_UIPanels_Game\Mainline\ItemRef.lua`), `LinkUtil.ProcessLink`, `LinkTypes`
+(`Blizzard_SharedXML\LinkUtil.lua`), the link handlers (`Blizzard_UIPanels_Game\Mainline\ItemRefHandlers.lua`,
+`Shared\ItemRefHandlersShared.lua`), `HandleModifiedItemClick` (`Blizzard_ItemButton\Mainline\ItemButtonTemplate.lua`),
+`ChatFrameUtil.InsertLink` (`Blizzard_ChatFrameBase\Mainline\ChatFrameUtilOverrides.lua`; `ChatEdit_InsertLink`
+only in `Blizzard_DeprecatedChatInfo`), `ChatFrameMixin:OnHyperlinkClick` (`Blizzard_ChatFrameBase\Shared\ChatFrame.lua`),
+`DressUpLink` (`Blizzard_UIPanels_Game\Mainline\DressUpFrames.lua`), `GameTooltip:SetHyperlink`
+(`Blizzard_SharedXMLGame\Tooltip\TooltipDataHandler.lua`), `Frame:SetHyperlinksEnabled` (protected),
+`GetHyperlinksEnabled` (`Blizzard_APIDocumentationGenerated\SimpleFrameAPIDocumentation.lua`; used
+with the hyperlink scripts in `Blizzard_UIPanels_Game\Mainline\QuestInfo.lua`). Each is guarded
+(`type(...) == "function"`, `pcall`); without `IsModifiedClick` Shift and Ctrl are read directly.
+G20 in `docs\IN-GAME-CHECKS.md` checks them in game.
+
 ## Settings of the conversation window
 
 Validated in `Core.lua` (schema 4); the window reads them from `ns.db` at each layout.
@@ -562,6 +661,26 @@ chat rows.
   unit, with the hint's box clear of the lane's outer 2 px rows), [Download]'s right-click and hover
   going on to the bubble, the hint hidden during a drag, a move and a resize and shown 1.5 s after
   it, and addon build 4.
+- `tests\harness_links.lua` (L1-L3, 2026-10-19; synthetic lines with invented item names): every
+  colour escape stripped by PlainText, VisibleText and PromptText (`|cnIQ0:` to `|cnIQ8:`, named
+  colours, nesting, a typed `||`), the glossary never reading `cnIQ3`, the measure ignoring `|cn`;
+  `Bridge.MarkSpan` bytes, each quality's colour in the marks, spells, professions, map pins (their
+  atlas out of the name), named, unknown and missing colours (gold), the innermost colour, a colour
+  at the start of the name, a user override of a quality colour followed, the API fallbacks, a typed
+  0x04, the 1024 B cut before a coloured mark, the window and inline TRANSLATE bytes (no 0x04) and their COLOURS right before them (integration review: span indexes, a cut span, no coloured span); the links bar
+  (5 links of 6, in order, each label in its colour escape, the whole link held), its geometry (rows,
+  tags, plates and lane at the same places with and without the bar, the gap of 4 units and 4 px
+  under the lane, the plate's x-range, two lines, the box height, inside the fill), no bar without
+  links, the lane's reveal with a bar, clicks (left: `SetItemRef` with the chat frame; a map pin;
+  right; Shift with and without an open edit box; Ctrl: the dressing room; never the bubble), hovers
+  (an item's own tooltip, a map pin's name and clicks), a name cut to the bar's width, a reused
+  bubble without stale buttons; the Original text's hyperlinks (enabled, click, map pin, Shift, Ctrl,
+  hover, a player link and its Shift-click handled by the client, enabled after a combat and never blocked); my own bubble's links (a whisper typed in the chat: click, Shift-click, hover; no mouse without links); an untranslated bubble's bar; the
+  strings in both locales; counters only. The mock models `SetItemRef` (the link handlers that
+  matter and `HandleModifiedItemClick`), `IsModifiedClick`, `ChatFrameUtil.InsertLink`,
+  `DressUpLink`, `GameTooltip:SetHyperlink`, the quality colour APIs (with a user override) and
+  `Frame:SetHyperlinksEnabled` (blocked in combat), and fires hyperlink scripts on a frame's font
+  strings (`Mock.ClickHyperlink`, `Mock.HoverHyperlink`).
 - `tests\vectors\lang_corpus.json`: the shared language corpus (158 synthetic lines, `[code, line]`).
   `tests\run.js` gives the harness `READ_TEST_FILE(name)` to read it (fengari has no `io.open`).
 
@@ -827,3 +946,59 @@ also a module: `require('./run.js')` gives `BIT_SHIM`, `newState`, `runLua`, `to
     inline lane cannot (the chat moves it, and the addon rewrites a line only once): when the chat
     scrolls or a new line arrives it moves one capture before the Helper's paint follows, a flash of
     about 30 ms, as the tags and plates already do.
+63. **Every colour form of the 12.x client (L1, 2026-10-19, in-game fact).** The addon stripped only
+    `|cAARRGGBB` and `|r`; the 12.x client writes item links with the named quality colour
+    `|cnIQ3:` (11.1.5+), which reached the Helper's text and the bubble as "|cnIQ3:[...]". `|cn<name>:`
+    is now stripped everywhere text is read or measured (`Links.StripColors`), and a typed `||` is
+    no longer taken for an escape by PlainText and VisibleText.
+64. **The links bar is under every bubble with links, untranslated ones too** (L2 asked for "under
+    each bubble"): a plain bubble (follow mode add) shows it under its Translate button. A link that
+    appears twice in a message is shown once; a link without a visible name is left out.
+65. **Shift-click inserts first, except where the client has its own Shift handling** (L2:
+    "Shift-click = insert the link into the active chat edit box"). The chat runs `SetItemRef` first,
+    whose map pin handler opens the map even on Shift; the bar and the Original text insert a map
+    pin, a profession, a talent build... when an edit box is open, and only without one go on to
+    `SetItemRef` as the chat does. Integration review (Gethe/wow-ui-source live, 2026-10-19): the
+    client treats some types differently on Shift, and those go straight to `SetItemRef`
+    (`Links.lua` `CLIENT_CHATLINK`): player, playerCommunity and playerGM (the plain name, or an open
+    add-friend, ignore, guild or channel-invite popup, else /who), BNplayer and BNplayerCommunity
+    (disabled: no encoded account id in a message), channel (the channel list), transmogappearance
+    (its source item link), clubFinder, api, instancelock (another player's lock refused). Right and
+    Ctrl clicks are the chat's (`SetItemRef`): a right-click on a link is not the bubble's menu (unlike
+    [Download], decision 55, which has no meaning of its own on the right button).
+66. **Hover tooltips** use `GameTooltip:SetHyperlink` for every link type but the action links
+    (player, Battle.net player, channel, URL, addon, censored lines); the client decides the rest (the
+    12.x accessor returns false without a tooltip), and the fallback shows the name and the clicks.
+67. **`SetHyperlinksEnabled` out of combat only, a conservative choice.** `SimpleFrameAPIDocumentation`
+    marks it `IsProtectedFunction`, the flag `Show`, `Hide`, `SetFrameLevel` and `SetScale` also carry,
+    which addons call on their own unprotected frames in combat: most likely it is restricted on
+    protected frames only (integration review). Until G20 step 7 settles it in game, it is never
+    called during combat; a bubble made during one gets its Original hyperlinks (and my bubble its
+    text's) when the combat ends. The mock blocks it in combat to keep that path tested; if G20 shows
+    no ADDON_ACTION_BLOCKED, call it at once and drop the `PLAYER_REGEN_ENABLED` path. The links bar
+    uses plain buttons and works in combat (G20 checks `SetItemRef` from a button in combat: a map pin
+    opens the world map).
+68. **Mark names are the reader's text**: textures and atlases inside a link's name are removed from
+    the mark (a map pin's "[ Map Pin Location]"), where the marked name used to keep them as codes. A
+    link whose colour is unknown gets gold (`FFD100`) rather than no colour, so every link name reads
+    as a link in the painted translation.
+69. **`ADDON_BUILD` 5, addon version 0.6.0** (integration). The build is the protocol contract
+    (sections 3a and 3b of `docs\BRIDGE.md`); the version moved with the links release.
+70. **The mock's font strings** count an atlas (`|A...|a`) at its width, as they did for textures; they
+    used to count its code as text, which made a map pin label 30 characters too wide.
+71. **The colours travel in COLOURS, not in the TRANSLATE text** (integration review, fact). With the
+    colour in the text, a Translate Companion of build 4 painted "WTS  0070DD[Necromancer Leggings]"
+    (its engine makes a space of every control character but 0x02 and 0x03), and its toast came on top
+    of the codes: L3 asked for the toast instead of the codes. `PromptText` keeps the coloured form;
+    `Bridge.TranslateMessage` takes every colour out (no 0x04 ever on the wire) and
+    `Bridge.ColoursMessage` sends them as (span index, RGB) right before the TRANSLATE, a message type
+    an older Companion only counts as a parse error. `ADDON_BUILD` stays 5, so it still shows its
+    toast. `docs\BRIDGE.md` section 3b.
+72. **My bubbles' links work too** (integration review: L2 says "under each bubble"). A whisper I
+    wrote in the normal chat with an item or a spell becomes my bubble with its real links; the text
+    is in a frame with the same hyperlink scripts as the Original text, mouse on only while it has
+    links (the bubble's hover is forwarded). No bar: the addon draws that text itself. The "You
+    wrote" line is the draft typed in the window, whose pipes are escaped: no links.
+73. **`/tpr test` samples use `|cnIQ1:`** (integration review): the item link is written as the 12.x
+    client writes it, so the self-test goes through the named quality colour (L1) and its COLOURS
+    gives the quality-1 colour from the client's API (white).

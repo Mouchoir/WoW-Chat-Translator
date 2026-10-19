@@ -133,7 +133,7 @@ do
     end
     check(not piped, "the inline lane's strings hold no pipe (they sit inside chat links)")
     check(ns.COMPANION_URL == URL, "one download URL on the addon side: " .. URL)
-    check(ns.VERSION == "0.5.0", "addon version 0.5.0")
+    check(ns.VERSION == "0.6.0", "addon version 0.6.0")
     local printed = #M.Printed()
     H.slash("app")
     local lines = {}

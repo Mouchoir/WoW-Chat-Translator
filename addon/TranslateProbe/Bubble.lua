@@ -15,6 +15,10 @@
 -- Incoming bubbles have the same lane under their rows (user request U1): "No translation above?
 -- Start Translate Companion." and a [Download] button that opens the Translate Companion dialog,
 -- shown 1.5 s after the lane became visible for the card's request (see "the hint lane" below).
+-- A message with hyperlinks (items, spells, professions, map pins...) gets a links bar inside its
+-- bubble, under the lane (under the Translate button of an untranslated bubble): its links in their
+-- own colours, clickable as in the chat (Links.lua), since the Helper's painted text is not; and
+-- its Original text has its hyperlinks enabled the same way (user request L2, 2026-10-19).
 --
 -- Art (Bubble.Art, once): the ChatBubble layout and tail atlas of the 12.x UI (checked on the
 -- Forever branch, NineSliceLayouts.lua), else the old Interface\Tooltips\ChatBubble-* backdrop,
@@ -41,8 +45,11 @@ local LANE_EDGE, LANE_GAP = 2, 4        -- the lane's text: clear of its top and
 local LANE_EDGE_PX = 2                  -- ...and 2 physical px at least (the Helper reads the outer 2 px rows)
 local LANE_DELAY = 1.5                  -- seconds before a lane's hint shows (Reserve.LANE_DELAY)
 local LINK_COLOR = "|cff66bbff"         -- our links' light blue ([T], [Show them], [Download])
+local BAR_GAP, BAR_GAP_PX = 4, 4        -- the links bar: 4 units and 4 physical px under the lane at least
+local BAR_SPACE = 6                     -- between two links of the bar
 Bubble.META_H, Bubble.GAP, Bubble.TAIL_SPACE = META_H, GAP, TAIL_SPACE
 Bubble.LANE_DELAY, Bubble.LANE_EDGE, Bubble.LANE_GAP = LANE_DELAY, LANE_EDGE, LANE_GAP
+Bubble.BAR_SPACE = BAR_SPACE
 
 local pools = { ["in"] = {}, out = {}, reply = {} }
 local live = {}                         -- cards in use that have a lane (incoming bubbles, the reply card)
@@ -483,6 +490,90 @@ function Fire(self, name, ...)
     end
 end
 
+---------------------------------------------------------------------------- the links bar
+-- The message's hyperlinks (Links.Parse: each once, in order), one button each, labelled with the
+-- link's name in the colour the chat draws it in, in the window font. A click and the hover do what
+-- they do in the chat (Links.Click, Links.ShowTooltip). The bar lies inside the bubble's fill from
+-- the tag's x0 to the plate's end, BarGap under the lane (the Helper reads the lane and 2 px around
+-- it: the bar never reaches them), its lines rowH apart; a name wider than the bar is cut.
+local function BarGap(m)
+    return max(BAR_GAP, BAR_GAP_PX / (m.ppu or 1))
+end
+Bubble.BarGap = BarGap
+
+local function BarButton(self, i)
+    local b = self.linkButtons[i]
+    if not b then
+        b = LinkButton(self.rowFrame, Bubble.Font())
+        b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        b:GetFontString():SetWordWrap(false)
+        b:SetScript("OnClick", function(btn, which)
+            local entry = btn.entry
+            if entry then
+                ns.Links.Click(entry.link, entry.text, which)
+            end
+        end)
+        b:SetScript("OnEnter", function(btn)
+            local entry = btn.entry
+            if entry then
+                ns.Links.ShowTooltip(btn, entry.link, entry.text)
+            end
+        end)
+        b:SetScript("OnLeave", GameTooltip_Hide)
+        self.linkButtons[i] = b
+    end
+    return b
+end
+
+local function HideBar(self)
+    for _, b in ipairs(self.linkButtons) do
+        b.entry = nil
+        b:Hide()
+    end
+    self.barTop, self.barH = nil, 0
+end
+
+-- Places the bar top units under the box's top, from x, within width; returns its height (0 and
+-- nothing shown without links).
+local function PlaceBar(self, m, x, top, width)
+    local list = self.links
+    if type(list) ~= "table" or #list == 0 then
+        HideBar(self)
+        return 0
+    end
+    local fontObj = Bubble.Font()
+    local lineH = m.rowH
+    local cx, line = 0, 0
+    for i, entry in ipairs(list) do
+        local b = BarButton(self, i)
+        b.entry = entry
+        local fs = b:GetFontString()
+        fs:SetFontObject(fontObj)
+        fs:SetWidth(0)
+        b:SetLabel(entry.label)
+        local w = b:GetWidth()
+        if w > width then
+            w = width
+            fs:SetWidth(max(1, width - 2))
+        end
+        b:SetWidth(w)
+        b:SetHeight(lineH)
+        if cx > 0 and cx + w > width then
+            line, cx = line + 1, 0
+        end
+        b:ClearAllPoints()
+        b:SetPoint("TOPLEFT", self.box, "TOPLEFT", x + cx, -(top + line * lineH))
+        b:Show()
+        cx = cx + w + BAR_SPACE
+    end
+    for i = #list + 1, #self.linkButtons do
+        self.linkButtons[i].entry = nil
+        self.linkButtons[i]:Hide()
+    end
+    self.barTop, self.barH = top, (line + 1) * lineH
+    return self.barH
+end
+
 -- The common block of incoming and outgoing messages: meta line, box with border and fill.
 local function NewBlock(parent, kind)
     local self = CreateFrame("Frame", nil, parent)
@@ -588,9 +679,14 @@ local function NewIn(parent)
     self.originalLink:SetScript("OnClick", function()
         Fire(self, "original")
     end)
-    self.original = Text(self, "ARTWORK", ChatFontSmall)
+    -- the original in a frame of its own whose hyperlinks work as in the chat (Links.lua)
+    self.originalFrame = CreateFrame("Frame", nil, self)
+    self.original = Text(self.originalFrame, "ARTWORK", ChatFontSmall)
     self.original:SetTextColor(GRAY_FONT_COLOR:GetRGB())
     self.original:SetMaxLines(ORIGINAL_LINES)
+    self.original:SetPoint("TOPLEFT", self.originalFrame, "TOPLEFT", 0, 0)
+    ns.Links.EnableHyperlinks(self.originalFrame)
+    self.linkButtons = {}
     self.gloss = Text(self, "ARTWORK", GameFontDisableSmall)
     self.plain = Text(self.rowFrame, "OVERLAY", Bubble.Font())
     self.plain:SetTextColor(0.85, 0.85, 0.85)
@@ -610,6 +706,11 @@ end
 
 function Methods:SetGloss(text)
     self.glossText = text
+end
+
+-- The message's hyperlinks for the links bar (Links.Parse; nil or empty: no bar).
+function Methods:SetLinks(list)
+    self.links = list
 end
 
 -- Untranslated: the original drawn inside the bubble with a Translate button (text = nil: the
@@ -663,6 +764,11 @@ local function LayoutIn(self, width, m)
         self.translateBtn:SetPoint("TOPLEFT", self.plain, "BOTTOMLEFT", 0, -4)
         self.translateBtn:Show()
         boxH = 2 * m.inset + textH + 4 + META_H
+        -- the links bar under the Translate button
+        local barH = PlaceBar(self, m, m.inset, m.inset + textH + 4 + META_H + BAR_GAP, textW)
+        if barH > 0 then
+            boxH = boxH + BAR_GAP + barH
+        end
         ClearLane(self)
     else
         self.plain:Hide()
@@ -672,6 +778,13 @@ local function LayoutIn(self, width, m)
         -- the hint lane: one more row of fill under the rows (shown by ClipRows' UpdateLane)
         PlaceLane(self, m, rowTop0 + rowsH, L.CONV_LANE_IN)
         boxH = 2 * rowTop0 + rowsH + m.rowH
+        -- the links bar: under the lane, from the tag's x0 to the plate's end; the rows, the tags,
+        -- the plates and the lane keep their places
+        local gap = BarGap(m)
+        local barH = PlaceBar(self, m, m.inset, rowTop0 + rowsH + m.rowH + gap, 8 * m.W + m.plateWidth)
+        if barH > 0 then
+            boxH = boxH + gap + barH
+        end
     end
     self.metrics = m
     boxH = Snap(boxH, self)
@@ -683,13 +796,19 @@ local function LayoutIn(self, width, m)
     y = y + TAIL_SPACE
     -- original and glossary lines
     if hasOriginal and self.originalShown then
-        self.original:ClearAllPoints()
-        self.original:SetPoint("TOPLEFT", self, "TOPLEFT", m.margin + 8, -y)
+        local frame = self.originalFrame
+        frame:ClearAllPoints()
+        frame:SetPoint("TOPLEFT", self, "TOPLEFT", m.margin + 8, -y)
+        frame:SetWidth(bw - 16)
         self.original:SetWidth(bw - 16)
         self.original:SetText(self.originalText)
+        local h = self.original:GetStringHeight()
+        frame:SetHeight(max(1, h))
+        frame:Show()
         self.original:Show()
-        y = y + self.original:GetStringHeight() + 2
+        y = y + h + 2
     else
+        self.originalFrame:Hide()
         self.original:Hide()
     end
     if self.glossText then
@@ -711,8 +830,20 @@ end
 local function NewOut(parent)
     local self = Mixin2(NewBlock(parent, "out"))
     self.tail = MakeTail(self.border, true)
-    self.text = Text(self.rowFrame, "OVERLAY", Bubble.Font())
+    -- the text in a frame of its own whose hyperlinks work as in the chat (Links.lua): a whisper I
+    -- wrote in the normal chat with an item or a spell keeps usable links (L2). Its mouse is on only
+    -- while the text has links, so the box's hover works as before on the others.
+    self.textFrame = CreateFrame("Frame", nil, self.rowFrame)
+    self.text = Text(self.textFrame, "OVERLAY", Bubble.Font())
+    self.text:SetPoint("TOPLEFT", self.textFrame, "TOPLEFT", 0, 0)
     self.text:SetTextColor(1, 1, 1)
+    ns.Links.EnableHyperlinks(self.textFrame)
+    self.textFrame:SetScript("OnEnter", function()
+        Fire(self, "enter")
+    end)
+    self.textFrame:SetScript("OnLeave", function()
+        Fire(self, "leave")
+    end)
     self.wrote = Text(self, "ARTWORK", ChatFontSmall)
     self.wrote:SetTextColor(GRAY_FONT_COLOR:GetRGB())
     self.wrote:SetMaxLines(ORIGINAL_LINES)
@@ -725,6 +856,7 @@ end
 -- wrote: ..." when it differs).
 function Methods:SetOut(text, draft)
     self.outText, self.draftText = text or "", draft
+    self.outLinks = #ns.Links.Parse(self.outText) > 0
 end
 
 local function LayoutOut(self, width, m)
@@ -752,8 +884,11 @@ local function LayoutOut(self, width, m)
     box:SetWidth(boxW)
     local boxH = Snap(textH + 2 * OUT_PAD_Y, self)
     box:SetHeight(boxH)
-    self.text:ClearAllPoints()
-    self.text:SetPoint("TOPLEFT", box, "TOPLEFT", OUT_PAD_X, -OUT_PAD_Y)
+    local frame = self.textFrame
+    frame:ClearAllPoints()
+    frame:SetPoint("TOPLEFT", box, "TOPLEFT", OUT_PAD_X, -OUT_PAD_Y)
+    frame:SetSize(textW, max(1, textH))
+    frame:EnableMouse(self.outLinks and true or false)
     y = y + boxH
     self.tail:ClearAllPoints()
     self.tail:SetPoint("TOPRIGHT", box, "BOTTOMRIGHT", -16, 4)
@@ -878,6 +1013,7 @@ function Bubble.AcquireIn(parent)
     local b = Acquire("in", parent, NewIn)
     b.Layout = LayoutIn
     b.handlers, b.plainText, b.originalText, b.glossText, b.originalShown = nil, nil, nil, nil, false
+    b.links = nil
     b.slot, b.K = nil, 1
     b.laneReq = nil
     live[b] = true
@@ -887,7 +1023,7 @@ end
 function Bubble.AcquireOut(parent)
     local b = Acquire("out", parent, NewOut)
     b.Layout = LayoutOut
-    b.handlers, b.outText, b.draftText = nil, nil, nil
+    b.handlers, b.outText, b.draftText, b.outLinks = nil, nil, nil, false
     return b
 end
 
@@ -925,6 +1061,10 @@ function Bubble.Release(b)
     for _, row in ipairs(b.rowsList) do
         row.visible, row.clipped = false, false
         ShowRow(row, false)
+    end
+    if b.linkButtons then
+        b.links = nil
+        HideBar(b)
     end
     if b.flash then
         b.flash:Hide()

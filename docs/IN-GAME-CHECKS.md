@@ -1,4 +1,4 @@
-# In-game checks (G1-G19)
+# In-game checks (G1-G20)
 
 The automated suites (`docs\DESIGN.md`, section E) run without the game: the addon on a mock
 client, the bridge against reference vectors, and the Helper against a stand-in game window. What
@@ -10,6 +10,7 @@ Helper" below.
 
 G1-G10 cover the rows under a chat line (inline mode). G11-G18 cover the conversation window and
 replies (2026-10-19). G19 covers the hint lanes and the Translate Companion dialog (2026-10-19).
+G20 covers the links of a message: colour codes, the links bar, link colours (2026-10-19).
 The window design numbered its checks G9-G16; they follow the existing ones here, so code comments
 that say "G9" to "G16" for the window mean:
 
@@ -90,7 +91,7 @@ that say "G9" to "G16" for the window mean:
    in `helper\app\target\release` (or wherever the release package puts it). It reads the
    translator runtime folder from `runtimeDir` in `%APPDATA%\TranslateProbe\settings.json` (set it
    once by hand; a `--runtime` argument wins over it), else the Ollama install; its icon appears in
-   the notification area, and its tooltip shows "Translate Companion 0.4.0".
+   the notification area, and its tooltip shows "Translate Companion 0.5.0" (0.4.0 before the links release).
 
 ## G1 Bridge and capture
 
@@ -434,6 +435,82 @@ card. `docs\ADDON.md`, "Hint lanes and the Translate Companion dialog", has the 
    the chat line at 1.5 s, any hint that wraps or is cut with "...", and any moment a hint shows
    while the Helper runs (when, for how long, what was behind the chat), the top-of-chat case and
    the transparent chat over a busy world.
+
+## G20 Links of a message (2026-10-19)
+
+The addon strips every colour form of the 12.x client, shows a message's links in a bar under its
+bubble (and makes its Original text's links work), and marks each link name with its colour for
+Translate Companion. `docs\ADDON.md`, "Links of a message", has the details. Use lines from the
+Trade channel or a friend: an item link of each quality you can find (grey to legendary), a spell
+(shift-click it from the spellbook), a profession (the "Link" button of a profession window), a map
+pin (Ctrl-click the map, then the pin's chat link), an achievement, a quest.
+
+1. **Client fact:** `/dump (select(2, C_Item.GetItemInfo(2589)) or ""):gsub("|", "||")` (Linen
+   Cloth; run it twice if the first answer is empty: the item loads on the first call). **Report**
+   the text: whether the link starts with `|cnIQ1:` (the named quality colour the user's evidence
+   shows for a rare item) or `|cff...`. Do the same for a spell with
+   `/dump (C_Spell.GetSpellLink(133) or ""):gsub("|", "||")`.
+2. Click [T] on a WTS line with an item link (window mode). **Expect:** no `|cn` text anywhere (the
+   bubble, its tooltip, the Original text, the glossary line); with Translate Companion the item's
+   name is painted in its quality colour (a rare item in blue), the rest in the translation's light
+   blue.
+3. **The links bar.** Under the bubble's rows and hint lane: one button per link, in the colours the
+   chat uses, in the order of the message. Without Translate Companion the gold hint shows above the
+   bar, not over it; with it, the bar stays visible and nothing is painted over it or left of the
+   lane. A message without links has no bar. A follow-mode-add (untranslated) bubble shows the bar
+   under its Translate button.
+4. **Clicks on the bar**, each compared with the same click on the link in the chat:
+   - left click on an item: its tooltip (the floating item card); on a spell: its tooltip; on a
+     profession: the recipe list opens; on a map pin: the world map opens with the waypoint set; on
+     an achievement and a quest: their windows or tooltips as in the chat;
+   - Ctrl-click on an armour or a weapon: the dressing room shows it;
+   - Shift-click with the chat edit box open (press Enter first): the link goes into the message,
+     coloured, for every type (a map pin too); send it to yourself in a whisper: it arrives as a
+     working link. Shift-click with the edit box closed: as in the chat;
+   - right-click: as in the chat (the bubble's menu does not open);
+   - none of these clicks retranslates the bubble.
+5. **Hover the bar:** an item or a spell shows its normal tooltip next to the button; a map pin or a
+   profession shows its name with "Click: open it, as in the chat." and "Shift-click: put it in your
+   chat message.". The tooltip goes when the cursor leaves.
+6. **The Original text** (the bubble's "Original" link): its item and map pin links work like the
+   bar's (click, Shift-click, Ctrl-click, hover).
+7. **Combat** (a training dummy): open a bubble whose message has links during the fight, click a
+   map pin in its bar (**report** whether the world map opens or a "blocked" message appears), then
+   its Original text's links after the fight. No "Interface action blocked" message from
+   TranslateProbe at any time. Then settle decision 67 of `docs\ADDON.md`: during a fight, type
+   `/run local f = CreateFrame("Frame") f:SetHyperlinksEnabled(true) print(f:GetHyperlinksEnabled())`.
+   **Report** whether it prints `true` with no "Interface action failed" or "blocked" message (then
+   the addon can enable hyperlinks at once in combat), or anything else.
+8. **Colour overrides** (if the client has them: Options > Accessibility > Colors, item quality
+   colours): change the rare colour, then translate a line with a rare item again (Shift-click the
+   bubble): the painted name and the bar's button follow the new colour. **Report** whether the
+   setting exists on Forever.
+9. **Report:** screenshots of a bubble with a bar (with and without Translate Companion), any link
+   type that does nothing or something else than in the chat, any `|c` code seen anywhere, and the
+   answers of step 1.
+10. **Legibility of a spell's colour** (integration review): with the default translation colour
+    (light blue, A8D8FF), translate a line with a spell link (spells are drawn in 71D5FF, close to
+    it). **Report** whether the spell's name can be told from the words around it (a screenshot).
+    If not, an underline under coloured names is the planned fix.
+11. **My own whispers** (integration review): reply to a whisperer in the normal chat with an item
+    link (Shift-click an item into your whisper). **Expect:** your bubble in the window shows the
+    item as a link; hover shows its tooltip, a click opens it, Shift-click (edit box open) puts it in
+    the message. Hovering the rest of your bubble shows its usual tooltip.
+12. **Shift-click on a player name link** in a bubble's Original text (a line that holds a player
+    link, such as a "joins the party" style line or a link a player pasted): with the edit box open,
+    the plain name goes into the message (not a link), as in the chat; with the add-friend popup
+    open, the name goes into the popup.
+13. **IDs and URLs (L4):** translate a line (window or inline) that ends with an ID of letters and
+    digits (a friend's battletag, a guild's Discord link `discord.gg/...`, a web address): the
+    translation holds it exactly as written, case included; a long Chinese yell ending with
+    "加V <ID>" keeps the ID at its end. Levels and prices written as `niv60`, `60лвл`, `5g50` or
+    `20heures` are translated (not kept as written).
+14. **`/tpr test`**: the sample's item (Linen Cloth, now written as the 12.x client does, with
+    `|cnIQ1:`) is painted in white in the translation, no `|cn` code anywhere.
+15. **Optional, if a copy of Translate Companion 0.4.0 is at hand:** run it with this addon (build
+    5). **Expect:** its "older than the addon" toast once, and the translations with plain link
+    names: no "0070DD" or other colour digits before a name (the colours travel in COLOURS, which it
+    ignores, `docs\BRIDGE.md` section 3b). Then start the current one again.
 
 ## What to send back
 

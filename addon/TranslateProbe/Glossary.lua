@@ -274,10 +274,11 @@ local function Find(key, allowPlural, target, forPrompt)
     end
 end
 
--- The words typed by the player: colors, links (quests, items...), textures, atlases,
--- protected Battle.net names and raid icons are removed.
+-- The words typed by the player: colors (every form of the 12.x client: "|cAARRGGBB",
+-- "|cn<name>:" and "|r", Links.lua), links (quests, items...), textures, atlases, protected
+-- Battle.net names, raid icons and typed pipes ("||") are removed.
 local function PlainText(text)
-    text = text:gsub("|c%x%x%x%x%x%x%x%x", " "):gsub("|r", " ")
+    text = ns.Links.StripColors(text:gsub("||", " "), " ")
     text = text:gsub("|H.-|h.-|h", " "):gsub("|T.-|t", " "):gsub("|A.-|a", " ")
     text = text:gsub("|K.-|k", " "):gsub("{.-}", " ")
     return text
@@ -300,13 +301,13 @@ function Glossary.Romanize(text)
     end
 end
 
--- The text a reader sees: link brackets kept ("[Linen Cloth]"), codes, icons and protected
--- Battle.net names removed. Used to measure the line.
+-- The text a reader sees: link brackets kept ("[Linen Cloth]"), codes (every colour form), icons
+-- and protected Battle.net names removed, a typed "||" shown as "|". Used to measure the line.
 function Glossary.VisibleText(text)
-    text = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    text = ns.Links.StripColors(text:gsub("[\1]", ""):gsub("||", "\1"), "")
     text = text:gsub("|H.-|h(.-)|h", "%1"):gsub("|T.-|t", ""):gsub("|A.-|a", "")
     text = text:gsub("|K.-|k", ""):gsub("{.-}", "")
-    return text
+    return (text:gsub("\1", "|"))
 end
 
 -- False for a line made only of links or icons, such as a shared quest.
@@ -401,20 +402,24 @@ local function MarkBraces(s)
 end
 
 -- Text sent to the helper: codes removed, link names ("[Linen Cloth]") and "{...}" groups
--- wrapped in 0x02/0x03 marks so the model keeps them, brackets a player typed left plain.
--- At most 1024 bytes, cut on a UTF-8 boundary and never inside a mark.
+-- wrapped in 0x02/0x03 marks so the model keeps them, brackets a player typed left plain. A link
+-- name's mark carries the colour the client draws it in (0x04 RRGGBB right after the 0x02, addon
+-- build 5, docs\BRIDGE.md "Marked spans"; Links.lua resolves "|cAARRGGBB" and "|cn<name>:", gold
+-- when unknown); a "{...}" group has none. At most 1024 bytes, cut on a UTF-8 boundary and never
+-- inside a mark.
 function Glossary.PromptText(raw)
-    local s = raw:gsub("[\1\2\3]", "")    -- a typed control byte must never pass for a mark
+    local s = raw:gsub("[\1-\4]", "")     -- a typed control byte must never pass for a mark
     s = s:gsub("||", "\1")                -- escaped pipe, restored at the end
-    s = s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
-    s = s:gsub("|H.-|h(.-)|h", function(name)
-        if name == "" then
-            return ""
+    local out = {}
+    local markSpan = ns.Bridge.MarkSpan
+    ns.Links.Scan(s, function(kind, piece)
+        if kind == "text" then
+            out[#out + 1] = piece
+        else
+            out[#out + 1] = markSpan(piece.plain, piece.rgb or ns.Links.DEFAULT_RGB)
         end
-        return "\2" .. name .. "\3"
     end)
-    s = s:gsub("|T.-|t", ""):gsub("|A.-|a", ""):gsub("|K.-|k", "")
-    s = MarkBraces(s)
+    s = MarkBraces(table.concat(out))
     s = s:gsub("\1", "|")
     s = ns.Bridge.Utf8Cut(s, MAX_PROMPT)
     local open, close = s:match(".*()\2"), s:match(".*()\3")

@@ -192,6 +192,21 @@ local function Parse(b)
                 fontPx = b:byte(o + 9), rowPx = b:byte(o + 10) }
         end
         return m
+    elseif t == 0x15 then
+        -- COLOURS (docs\BRIDGE.md 3b): spans = { "index:RRGGBB", ... }, strictly increasing
+        local n = b:byte(4) or 0
+        local m = { kind = "colours", reqId = U16(b, 2), spans = {}, ok = n >= 1 and #b == 4 + 4 * n }
+        for k = 1, n do
+            local o = 5 + (k - 1) * 4
+            if o + 3 <= #b then
+                m.spans[k] = string.format("%d:%02X%02X%02X", b:byte(o), b:byte(o + 1), b:byte(o + 2), b:byte(o + 3))
+                if k > 1 and b:byte(o) <= b:byte(o - 4) then
+                    m.ok = false
+                end
+            end
+        end
+        m.list = table.concat(m.spans, ",")
+        return m
     end
     return { kind = "unknown", ok = false }
 end
@@ -303,7 +318,7 @@ check(not fr or L.LOADED:find("Tape", 1, true), "French strings on frFR")
 check(SLASH_TRANSLATEPROBE1 == "/tprobe" and SLASH_TRANSLATEPROBE2 == "/tpr" and slashFn ~= nil, "slash command registered")
 check(type(ns.sessionId) == "number" and ns.sessionId >= 1 and ns.sessionId <= 65535 and ns.session == tostring(ns.sessionId),
     "session id is a u16 and its string form is used in links")
-check(ns.ADDON_BUILD == 4 and Bridge.VERSION == 2 and Bridge.TEST_SLOT == 127, "addon build 4, bridge v2")
+check(ns.ADDON_BUILD == 5 and Bridge.VERSION == 2 and Bridge.TEST_SLOT == 127, "addon build 5, bridge v2")
 check(CountPrinted((L.INIT_FAILED:gsub("%%s", ""))) == 0, "no init failure printed")
 
 section("bridge builders")
@@ -338,6 +353,9 @@ if stubBridge and REAL_BRIDGE_SOURCE then
         { Bridge.CancelMessage(9, 5), R.CancelMessage(9, 5) }, { Bridge.ClearMessage(), R.ClearMessage() },
         { Bridge.TestMessage(4242), R.TestMessage(4242) }, { Bridge.ViewMessage(views), R.ViewMessage(views) },
         { Bridge.PlateMarkup(290, 14), R.PlateMarkup(290, 14) }, { Bridge.Utf8Cut("aé", 2), R.Utf8Cut("aé", 2) },
+        { Bridge.MarkSpan("[Linen Cloth]", "0070dd"), R.MarkSpan("[Linen Cloth]", "0070dd") },
+        { Bridge.MarkSpan("{skull}"), R.MarkSpan("{skull}") }, { Bridge.MarkSpan("a\4b", "xyz"), R.MarkSpan("a\4b", "xyz") },
+        { Bridge.MarkSpan(""), R.MarkSpan("") },
     }
     for flags = 0, 255 do
         messages[#messages + 1] = { Bridge.TranslateMessage(258, 126, 3, flags, "de", "x", {}),
@@ -513,16 +531,18 @@ local n0 = #sent
 M.Click(ButtonOf(clicked))
 local clickFrame = math.floor(M.Now() * 60 + 0.5)
 local msgs = Since(n0)
-check(#msgs == 2 and msgs[1].kind == "view" and msgs[2].kind == "translate" and AllOk(msgs),
-    "first click: VIEW, then TRANSLATE, both well formed")
+check(#msgs == 3 and msgs[1].kind == "view" and msgs[2].kind == "colours" and msgs[3].kind == "translate" and AllOk(msgs),
+    "first click: VIEW, then COLOURS (the line has a link), then TRANSLATE, all well formed")
 local view = msgs[1].views and msgs[1].views[1]
 check(msgs[1].views and #msgs[1].views == 1 and view.id == 1 and view.x == 28 and view.y == 686 and view.w == 563
     and view.h == 253 and view.fontPx == 20 and view.rowPx == 20, "VIEW: the shown chat frame in physical px")
-local tr = msgs[2]
+local tr = msgs[3]
 local K = ExpectedK(clickText, 290, 14, 1.35)
 check(tr.slot == 0 and tr.rows == K and tr.reqId == 1 and tr.flags == 2, "TRANSLATE: slot 0, K rows, plate flag, no noCache")
 check(tr.target == db.target, "TRANSLATE: target is the saved target")
-check(tr.text:find("\2[Linen Cloth]\3", 1, true) and tr.text:find("\2{skull}\3", 1, true), "real item link and {skull} are marked")
+check(tr.text:find("\2[Linen Cloth]\3", 1, true) and tr.text:find("\2{skull}\3", 1, true) and not tr.text:find("\4", 1, true),
+    "real item link and {skull} are marked, no colour code in the TRANSLATE (docs\\BRIDGE.md 3b)")
+check(msgs[2].reqId == tr.reqId and msgs[2].list == "0:FFFFFF", "COLOURS: the item (span 0) in its white, not {skull}")
 check(tr.text:find(" [x]", 1, true) and not tr.text:find("\2[x]", 1, true), "a typed [x] stays plain")
 check(not tr.text:find("|", 1, true), "no escape code left in the text")
 local instant = ChatButton.InstantLines(clicked, clickText)
@@ -615,8 +635,8 @@ msgs = Since(n0, "translate")
 check(#msgs == 1 and msgs[1].reqId == tr1.reqId and msgs[1].slot == tr1.slot and msgs[1].flags == 2,
     "a plain re-click sends the same request again")
 local resent = Since(n0)
-check(#resent == 2 and resent[1].kind == "view" and resent[2].kind == "translate",
-    "every TRANSLATE follows a VIEW, unchanged or not (a restarted helper leaves discovery at once)")
+check(#resent == 3 and resent[1].kind == "view" and resent[2].kind == "colours" and resent[3].kind == "translate",
+    "every TRANSLATE follows a VIEW, unchanged or not (a restarted helper leaves discovery at once), and its COLOURS")
 check(EntryFor(ChatFrame1, clicked).message == e1c, "rows unchanged by a re-click")
 M.Tick(61)
 n0 = #sent
@@ -774,8 +794,8 @@ check(#leftCancels == 1 and leftCancels[1].reqId == leavingReq and leftCancels[1
 
 ---------------------------------------------------------------------------------------------
 section("prompt text")
-check(G.PromptText("WTS " .. ITEM .. " x20 {skull} [x] a||b") == "WTS \2[Linen Cloth]\3 x20 \2{skull}\3 [x] a|b",
-    "links and {...} marked, codes removed, typed brackets plain, || unescaped")
+check(G.PromptText("WTS " .. ITEM .. " x20 {skull} [x] a||b") == "WTS \2\4FFFFFF[Linen Cloth]\3 x20 \2{skull}\3 [x] a|b",
+    "links (with their colour, the addon's form) and {...} marked, codes removed, typed brackets plain, || unescaped")
 check(G.PromptText("a\2b\3c\1d") == "abcd", "control bytes typed in a message never pass for marks")
 check(G.PromptText("{} {" .. string.rep("z", 33) .. "} {rt8}") == "{} {" .. string.rep("z", 33) .. "} \2{rt8}\3",
     "only {...} of 1-32 characters are marked")
@@ -783,7 +803,7 @@ local hangul12 = "{" .. string.rep("한", 12) .. "}"
 check(G.PromptText(hangul12 .. " {" .. string.rep("é", 33) .. "}") == "\2" .. hangul12 .. "\3 {" .. string.rep("é", 33) .. "}",
     "{...} length counted in UTF-8 characters, not bytes")
 check(G.PromptText("|cff00ff00|Hplayer:Bob|h[Bob]|h|r: |TInterface\\Icons\\x:0|t |A:atlas:12:12|a hi |Kq1|k")
-    == "\2[Bob]\3:   hi ", "textures, atlases and protected names removed")
+    == "\2\4" .. "00FF00[Bob]\3:   hi ", "textures, atlases and protected names removed")
 local long = string.rep("a", 1010) .. " " .. ITEM .. " tail"
 local cutLong = G.PromptText(long)
 check(cutLong == string.rep("a", 1010) .. " ", "1024 B cut never inside a mark")
@@ -1298,8 +1318,11 @@ msgs = Since(n0)
 local testTr = Since(n0, "translate")[1]
 check(msgs[1] and msgs[1].kind == "test" and Printed(L.TEST_SENT:format(msgs[1].nonce)), "test: TEST message first")
 local sampleItem = db.target == "en" and "\2[Étoffe de lin]\3" or "\2[Linen Cloth]\3"
+local testColours = Since(n0, "colours")[1]
 check(testTr and testTr.flags == 3 and testTr.text:find(sampleItem, 1, true) and testTr.text:find("lf2m", 1, true),
     "test: a sample request with noCache, a real item link and lf2m")
+check(testColours and testColours.reqId == testTr.reqId and testColours.list == "0:FFFFFF",
+    "test: the sample's item is written as the 12.x client does (|cnIQ1:), its colour from the quality API")
 local sampleLine = EntryWith(ChatFrame1, ButtonOf(900000001))
 check(sampleLine and Lines(sampleLine.message) >= testTr.rows, "test: the sample line gets its rows")
 local trCount = #Since(0, "translate")
@@ -1329,7 +1352,7 @@ check(#Reserve.View() == 0, "a secret chat rectangle is left out of VIEW")
 M.SetLockdown(false)
 M.SetRectSecret(ChatFrame1, false)
 slash("info")
-check(Printed("1.60.1") and Printed(L.INFO_VERSION:format("0.5.0", ns.ADDON_BUILD, ns.sessionId))
+check(Printed("1.60.1") and Printed(L.INFO_VERSION:format("0.6.0", ns.ADDON_BUILD, ns.sessionId))
     and Printed(L.INFO_FRAME:format("ChatFrame1", L.YES, L.YES)), "info prints version, client and chat frames")
 check(Printed(L.INFO_REQUESTS:format(Request.Count(), Reserve.SlotsInUse())), "info prints requests and slots")
 slash("debug")

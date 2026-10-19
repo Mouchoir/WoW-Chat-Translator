@@ -40,6 +40,10 @@
 --   Mock.SetCombat(on); Mock.SetGroup(t); Mock.SetChannels(t); Mock.SetPlayerInfo(guid, info)
 --   Mock.SetBNAccount(id, info); Mock.SetChatColor(chatType, r, g, b); Mock.SetAtlas(name, info)
 --   Mock.SetLayoutMissing(name, missing); Mock.SetTemplateMissing(name, missing); Mock.Player()
+-- Links of a message (see the section of that name): SetItemRef, IsModifiedClick, ChatFrameUtil.InsertLink,
+--   DressUpLink, GameTooltip:SetHyperlink, the item quality colour APIs, Frame:SetHyperlinksEnabled;
+--   Mock.LinkCalls(), Mock.ClearLinkCalls(), Mock.SetChatEditActive(on), Mock.SetQualityColor(q, r, g, b),
+--   Mock.ClickHyperlink(frame, link, button, mods), Mock.HoverHyperlink(frame, link), Mock.LeaveHyperlink(frame)
 -- Settings API (12.x Blizzard_Settings.lua): categories, proxy settings, dropdowns, checkboxes,
 --   stock sliders (CreateSliderOptions, CreateSlider, MinimalSliderWithSteppersMixin.Label),
 --   RegisterInitializer with CreateSettingsButtonInitializer and
@@ -505,8 +509,8 @@ function Methods:SetDrawLayer(layer)
     self.layer = layer
 end
 
--- Font strings: width = 0.5 x font height per UTF-8 character; inline textures count their
--- own width; codes (|c, |r, |H, |h) count nothing.
+-- Font strings: width = 0.5 x font height per UTF-8 character; inline textures and atlases count
+-- their own width; codes (|cAARRGGBB, |cn<name>:, |r, |H, |h) count nothing.
 local function Utf8Len(s)
     local n = 0
     for _ in s:gmatch("[^\128-\191]") do
@@ -520,7 +524,12 @@ local function SegmentWidth(s, size)
         tex = tex + tonumber(w)
         return ""
     end)
-    s = s:gsub("|T.-|t", ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|H.-|h", ""):gsub("|h", "")
+    s = s:gsub("|A[^|]-:(%d+):(%d+)[^|]-|a", function(_, w)
+        tex = tex + tonumber(w)
+        return ""
+    end)
+    s = s:gsub("|T.-|t", ""):gsub("|A.-|a", ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|cn[^:|]*:", ""):gsub("|r", "")
+    s = s:gsub("|H.-|h", ""):gsub("|h", "")
     return 0.5 * size * Utf8Len(s) + tex
 end
 local function Segments(text)
@@ -3920,6 +3929,211 @@ function M.Resize(frame, w, h)
         frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", l, bottom + height)
     end
     WithInput(nil, true, frame.SetSize, frame, w, h)
+end
+
+---------------------------------------------------------------------------- links of a message
+-- What a chat frame does with a hyperlink, item quality colours and hyperlinks in a frame's font
+-- strings, modelled on the 12.x UI source (live 12.1.5 and forever 1.60.1; docs\ADDON.md, "Links of
+-- a message"). Colour values are the client's defaults (mock values: nothing should depend on them
+-- but the tests that set them).
+--   SetItemRef(link, text, button, frame): recorded (Mock.LinkCalls().refs, with the modifiers
+--     held), then as ItemRef.lua: an "addon" link goes to EventRegistry "SetItemRef"; "worldmap"
+--     opens the map (result "map"); an item Shift+Left click inserts the link first (the Item
+--     handler); then a modified click runs HandleModifiedItemClick (CHATLINK: InsertLink, else
+--     DRESSUP: DressUpLink; result "insert", "dressup" or "none"), else the ItemRefTooltip
+--     ("itemref").
+--   IsModifiedClick(action): CHATLINK = Shift, DRESSUP = Ctrl, none = any modifier.
+--   ChatFrameUtil.InsertLink(text): recorded (Mock.LinkCalls().inserts); true only while a chat
+--     edit box is active (Mock.SetChatEditActive(on)).
+--   DressUpLink(link): recorded (Mock.LinkCalls().dressUps), true.
+--   GameTooltip:SetHyperlink(link): recorded (Mock.LinkCalls().tooltips); a tooltip for the types
+--     in Mock.TOOLTIP_TYPES (shown, true), else hidden and false, as the 12.x tooltip data accessor.
+--   ITEM_QUALITY_COLORS, ColorManager.GetColorDataForItemQuality, C_ColorOverrides.GetColorForQuality,
+--     C_Item.GetItemQualityColor: the default quality colours; Mock.SetQualityColor(q, r, g, b) is a
+--     user override (ColorManager and C_ColorOverrides follow it, as on the client).
+--   Frame:SetHyperlinksEnabled(on) (protected: during combat it does nothing and fires
+--     ADDON_ACTION_BLOCKED, the conservative reading), Frame:GetHyperlinksEnabled().
+--   Mock.ClickHyperlink(frame, link, button, mods) / Mock.HoverHyperlink(frame, link) /
+--     Mock.LeaveHyperlink(frame): a click or the cursor on a hyperlink of one of frame's font strings
+--     (OnHyperlinkClick(frame, link, text, button), OnHyperlinkEnter(frame, link, text, fontString),
+--     OnHyperlinkLeave(frame)) when the frame is visible, mouse enabled and its hyperlinks enabled,
+--     and the link is in one of its shown font strings; text is the whole link with the colour
+--     escape right before it and the |r right after it (assumption: as a chat frame passes it).
+--     Returns true when the script ran.
+--   Mock.LinkCalls() -> { refs, inserts, dressUps, tooltips }; Mock.ClearLinkCalls()
+W.linkCalls = { refs = {}, inserts = {}, dressUps = {}, tooltips = {} }
+W.chatEditActive = false
+M.TOOLTIP_TYPES = { item = true, spell = true, enchant = true, quest = true, achievement = true, currency = true,
+    talent = true, mount = true, keystone = true }
+W.qualityDefault = { [0] = { 0.616, 0.616, 0.616 }, { 1, 1, 1 }, { 0.118, 1, 0 }, { 0, 0.439, 0.867 },
+    { 0.639, 0.208, 0.933 }, { 1, 0.502, 0 }, { 0.902, 0.8, 0.502 }, { 0, 0.8, 1 }, { 0, 0.8, 1 } }
+W.qualityOverride = {}
+local function QualityColor(q, default)
+    local c = (not default and W.qualityOverride[q]) or W.qualityDefault[q]
+    if not c then
+        return nil
+    end
+    return CreateColor(c[1], c[2], c[3])
+end
+local function UpdateQualityColors()
+    ITEM_QUALITY_COLORS = {}
+    for q = 0, 8 do
+        local color = QualityColor(q)
+        ITEM_QUALITY_COLORS[q] = { r = color.r, g = color.g, b = color.b, hex = color:GenerateHexColorMarkup(), color = color }
+    end
+end
+UpdateQualityColors()
+C_ColorOverrides = {
+    GetColorForQuality = function(q)
+        return QualityColor(q)
+    end,
+    GetDefaultColorForQuality = function(q)
+        return QualityColor(q, true)
+    end,
+}
+ColorManager = {
+    GetColorDataForItemQuality = function(q)
+        return ITEM_QUALITY_COLORS[q]
+    end,
+}
+C_Item = C_Item or {}
+C_Item.GetItemQualityColor = function(q)
+    local c = QualityColor(q)
+    if c then
+        return c.r, c.g, c.b, c:GenerateHexColor()
+    end
+end
+function M.SetQualityColor(q, r, g, b)
+    W.qualityOverride[q] = r and { r, g, b } or nil
+    UpdateQualityColors()
+end
+
+IsModifiedClick = function(action)
+    if action == "CHATLINK" then
+        return state.shift
+    elseif action == "DRESSUP" then
+        return state.ctrl
+    elseif action == nil then
+        return state.shift or state.ctrl or state.alt
+    end
+    return false
+end
+ChatFrameUtil.InsertLink = function(text)
+    W.linkCalls.inserts[#W.linkCalls.inserts + 1] = { text = text, inserted = W.chatEditActive }
+    return W.chatEditActive
+end
+DressUpLink = function(link)
+    W.linkCalls.dressUps[#W.linkCalls.dressUps + 1] = link
+    return true
+end
+SetItemRef = function(link, text, button, frame)
+    local rec = { link = link, text = text, button = button, frame = frame, shift = state.shift, ctrl = state.ctrl }
+    W.linkCalls.refs[#W.linkCalls.refs + 1] = rec
+    local kind = tostring(link):match("^([^:]*)")
+    if kind == "addon" then
+        rec.result = "addon"
+        EventRegistry:TriggerEvent("SetItemRef", link, text, button, frame)
+    elseif kind == "worldmap" then
+        rec.result = "map"
+    elseif (kind == "player" or kind == "playerCommunity" or kind == "playerGM") and IsModifiedClick("CHATLINK") then
+        -- HandlePlayerLink (ItemRefHandlers.lua): the plain name into the edit box (else popups, /who)
+        rec.result = ChatFrameUtil.InsertLink(tostring(link):match("^[^:]*:([^:]*)") or "") and "name" or "who"
+    elseif (kind == "BNplayer" or kind == "BNplayerCommunity") and IsModifiedClick("CHATLINK") then
+        rec.result = "none"     -- disabled by the client: no encoded account id in a message
+    elseif kind == "item" and IsModifiedClick("CHATLINK") and button == "LeftButton" and ChatFrameUtil.InsertLink(text) then
+        rec.result = "insert"
+    elseif IsModifiedClick() then
+        if IsModifiedClick("CHATLINK") and ChatFrameUtil.InsertLink(text) then
+            rec.result = "insert"
+        elseif IsModifiedClick("DRESSUP") and DressUpLink(text) then
+            rec.result = "dressup"
+        else
+            rec.result = "none"
+        end
+    else
+        rec.result = "itemref"
+    end
+end
+function GameTooltip:SetHyperlink(link)
+    local kind = tostring(link):match("^([^:]*)")
+    W.linkCalls.tooltips[#W.linkCalls.tooltips + 1] = link
+    if M.TOOLTIP_TYPES[kind] then
+        self.lines, self.colors = { "hyperlink " .. tostring(link) }, {}
+        self:Show()
+        return true
+    end
+    self:Hide()
+    return false
+end
+function M.SetChatEditActive(on)
+    W.chatEditActive = on and true or false
+end
+function M.LinkCalls()
+    return W.linkCalls
+end
+function M.ClearLinkCalls()
+    W.linkCalls = { refs = {}, inserts = {}, dressUps = {}, tooltips = {} }
+end
+
+function Methods:SetHyperlinksEnabled(on)
+    if state.combat then
+        Fire("ADDON_ACTION_BLOCKED", "TranslateProbe", "SetHyperlinksEnabled()")
+        return
+    end
+    self.hyperlinks = on and true or false
+end
+function Methods:GetHyperlinksEnabled()
+    return self.hyperlinks == true
+end
+
+-- The whole link (with the colour escape right before it and the |r right after it) and the font
+-- string that shows it, or nil.
+local function FindHyperlink(frame, link)
+    for _, r in ipairs(frame.regions or {}) do
+        if r.kind == "fontstring" and r.shown and type(r.text) == "string" then
+            local a, b = r.text:find("|H" .. link .. "|h", 1, true)
+            if a then
+                local c = r.text:find("|h", b + 1, true)
+                if c then
+                    local s, e = a, c + 1
+                    local before = r.text:sub(1, a - 1)
+                    local esc = before:match("(|c%x%x%x%x%x%x%x%x)$") or before:match("(|cn[^:|]*:)$")
+                    if esc then
+                        s = a - #esc
+                        if r.text:sub(e + 1, e + 2) == "|r" then
+                            e = e + 2
+                        end
+                    end
+                    return r.text:sub(s, e), r
+                end
+            end
+        end
+    end
+end
+local function HyperlinkTarget(frame, link)
+    if not (frame and frame:IsVisible() and frame.hyperlinks and frame.mouse) then
+        return nil
+    end
+    return FindHyperlink(frame, link)
+end
+function M.ClickHyperlink(frame, link, button, mods)
+    local text = HyperlinkTarget(frame, link)
+    if not text then
+        return false
+    end
+    WithInput(mods, true, Script, frame, "OnHyperlinkClick", link, text, button or "LeftButton")
+    return true
+end
+function M.HoverHyperlink(frame, link)
+    local text, fs = HyperlinkTarget(frame, link)
+    if not text then
+        return false
+    end
+    WithInput(nil, true, Script, frame, "OnHyperlinkEnter", link, text, fs)
+    return true
+end
+function M.LeaveHyperlink(frame)
+    WithInput(nil, true, Script, frame, "OnHyperlinkLeave")
 end
 
 function M.Load(files, getSource)

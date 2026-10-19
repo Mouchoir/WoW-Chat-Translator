@@ -114,9 +114,11 @@ local L = {
     TEST_LOCKDOWN_LINE = "chat line position secret: %s",
     TEST_NA = "n/a",
     -- Sample chat lines for /tpr test, picked by the translation target (data, not UI text):
-    -- each has a real item link, "lf2m", and the English one has "cheap".
-    TEST_SAMPLE_EN = "WTS |cffffffff|Hitem:2589::::::::::::::|h[Linen Cloth]|h|r x20, cheap! Also lf2m for DM, pst",
-    TEST_SAMPLE_FR = "Vends |cffffffff|Hitem:2589::::::::::::::|h[Étoffe de lin]|h|r x20 pas cher, et lf2m pour les Mortemines, chuchotez-moi",
+    -- each has a real item link, written as the 12.x client writes it (the named quality colour
+    -- |cnIQ1:, so the test goes through the colour path of user request L1), "lf2m", and the
+    -- English one has "cheap".
+    TEST_SAMPLE_EN = "WTS |cnIQ1:|Hitem:2589::::::::::::::|h[Linen Cloth]|h|r x20, cheap! Also lf2m for DM, pst",
+    TEST_SAMPLE_FR = "Vends |cnIQ1:|Hitem:2589::::::::::::::|h[Étoffe de lin]|h|r x20 pas cher, et lf2m pour les Mortemines, chuchotez-moi",
 
     MODE_SET = "bridge mode: %s (in use: %s)",
     SHOW_ON = "glossary row on: a [T] click also explains the abbreviations of the line.",

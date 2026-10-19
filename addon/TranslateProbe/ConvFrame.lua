@@ -19,6 +19,9 @@
 --   paints over; it shows 1.5 s after the lane became visible for the bubble's request, and again
 --   1.5 s after it moved (a scroll, a drag or a resize of the window: hidden while dragged).
 -- * VIEW 200: the bubble column's fill, from the thread's top to the reply card's fill bottom.
+-- * Links (user request L2, Links.lua): a message's hyperlinks are parsed once (msg.links, memory
+--   only) for the links bar its bubble shows under the lane; the bar is inside the bubble column,
+--   so VIEW 200 and the per-row visibility do not change.
 -- Stock templates and fonts, named colours and ChatTypeInfo; no hooks on Blizzard frames, no
 -- Blizzard menus, no animation. Everything is memory only; the saved variables get the window's
 -- position (convPos) and convTipShown.
@@ -510,6 +513,11 @@ local function ConfigureIn(b, conv, msg, m)
         b:SetPlain(msg.text)
         b:SetOriginal(nil, false)
     end
+    -- the links bar: the message's hyperlinks, parsed once (memory only, with the message)
+    if msg.links == nil then
+        msg.links = ns.Links.Parse(msg.text)
+    end
+    b:SetLinks(msg.links)
     local gloss = Settings().glossShow and msg.state == "translate" and ns.Glossary.Describe(msg.text, Settings().target)
     b:SetGloss(gloss or nil)
 end

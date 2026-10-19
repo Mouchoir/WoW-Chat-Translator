@@ -44,9 +44,14 @@ end
 
 -- Every TRANSLATE goes out with a VIEW just before it, changed or not: a helper started (or
 -- restarted) after the last VIEW knows the chat rectangles at the first click, instead of
--- staying in its discovery scan (about 15 more bytes on the strip).
+-- staying in its discovery scan (about 15 more bytes on the strip). A text with link colours
+-- also gets its COLOURS right before the TRANSLATE (docs\BRIDGE.md section 3b; 4 bytes a link).
 local function SendTranslate(a, marked, glossPairs)
     ns.Reserve.SyncView(true)
+    local colours = ns.Bridge.ColoursMessage(a.reqId, marked)
+    if colours then
+        ns.Bridge.Send(colours)
+    end
     ns.Bridge.Send(ns.Bridge.TranslateMessage(a.reqId, a.slot, a.K, a.flags, a.target, marked, glossPairs))
 end
 

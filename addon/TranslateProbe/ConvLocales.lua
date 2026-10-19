@@ -45,6 +45,10 @@ local en = {
     CONV_BUBBLE_HINT_SHIFT = "Shift-click: without the cache. Right-click: more.",
     CONV_BUBBLE_HINT_PLAIN = "Click Translate to translate this message.",
     CONV_HELPER_TIP = "Coloured blocks? Translate Companion is not running.",
+    -- the links of a message (the links bar under a bubble, its Original text): the tooltip of a
+    -- link the client has no tooltip for
+    CONV_LINK_TIP_CLICK = "Click: open it, as in the chat.",
+    CONV_LINK_TIP_SHIFT = "Shift-click: put it in your chat message.",
     CONV_MENU_RETRANSLATE = "Translate again",
     CONV_MENU_COPY = "Copy the original",
     CONV_MENU_REMOVE = "Remove",
@@ -112,6 +116,8 @@ local frFR = {
     CONV_BUBBLE_HINT_SHIFT = "Maj-clic : sans le cache. Clic droit : plus de choix.",
     CONV_BUBBLE_HINT_PLAIN = "Cliquez sur Traduire pour traduire ce message.",
     CONV_HELPER_TIP = "Des blocs de couleur ? Translate Companion n'est pas lancé.",
+    CONV_LINK_TIP_CLICK = "Clic : l'ouvrir, comme dans le chat.",
+    CONV_LINK_TIP_SHIFT = "Maj-clic : l'ajouter à votre message.",
     CONV_MENU_RETRANSLATE = "Retraduire",
     CONV_MENU_COPY = "Copier l'original",
     CONV_MENU_REMOVE = "Retirer",
