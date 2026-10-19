@@ -1,6 +1,6 @@
 [package]
 name = "translateprobe-helper"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 publish = false
 description = "TranslateProbe Helper: reads the addon's pixel bridge, translates locally and draws the translations over the WoW chat"
@@ -17,6 +17,11 @@ path = "src/main.rs"
 [[bin]]
 name = "capprobe"
 path = "src/bin/capprobe.rs"
+
+# The one live clipboard check (decision D9), run by hand; never by the tests.
+[[bin]]
+name = "clipprobe"
+path = "src/bin/clipprobe.rs"
 
 [dependencies]
 tp_bridge = { path = "../bridge" }
@@ -64,6 +69,9 @@ features = [
   "Win32_System_Console",
   "Win32_Storage_FileSystem",
   "Win32_Globalization",
+  # conversation window replies: the clipboard (design B.3 H3)
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
 ]
 
 [profile.release]

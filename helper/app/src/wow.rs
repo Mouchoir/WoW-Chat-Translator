@@ -177,6 +177,33 @@ pub fn rect_covered(target: isize, x: i32, y: i32, w: i32, h: i32) -> bool {
     false
 }
 
+/// Full covering test (decision D12, the game window in the background): true when every point
+/// of the same 3x3 grid that lies on a monitor resolves to another window than `target` (a card
+/// partly under another window is still drawn: the overlay then sits right above the game window,
+/// so that window hides the covered part itself). False when no point lies on a monitor.
+pub fn rect_fully_covered(target: isize, x: i32, y: i32, w: i32, h: i32) -> bool {
+    let mut on_monitor = 0;
+    for i in 0..3 {
+        for j in 0..3 {
+            let px = x + (w.max(1) - 1) * (1 + 2 * i) / 6;
+            let py = y + (h.max(1) - 1) * (1 + 2 * j) / 6;
+            if !point_on_monitor(px, py) {
+                continue;
+            }
+            on_monitor += 1;
+            if root_at(px, py) == target {
+                return false;
+            }
+        }
+    }
+    on_monitor > 0
+}
+
+/// True when the game window is iconic (minimized), for the UI thread's quick check.
+pub fn is_minimized(h: isize) -> bool {
+    unsafe { IsIconic(hwnd(h)) }.as_bool()
+}
+
 /// The virtual screen (every monitor) in screen coordinates: (x, y, w, h).
 pub fn virtual_screen() -> (i32, i32, i32, i32) {
     unsafe {

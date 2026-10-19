@@ -67,6 +67,9 @@ pub struct Job {
     /// Glossary pairs (term, meaning).
     pub pairs: Vec<(ChatText, ChatText)>,
     pub no_cache: bool,
+    /// A reply the user is waiting for (the conversation window's reply card): it goes ahead of
+    /// every waiting job that is not urgent (it never interrupts the job in flight).
+    pub urgent: bool,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -616,7 +616,7 @@ impl Worker {
         let n_pairs = job.pairs.len().min(255) as u8;
         let work = Work { target: job.target, text: job.text, pairs: job.pairs };
         let mut out = Emit::new();
-        match self.queue.push(Entry::new(key, work, ck, now), &mut out) {
+        match self.queue.push(Entry::new(key, work, ck, now).urgent(job.urgent), &mut out) {
             Pushed::Duplicate => {}
             Pushed::MergedInFlight => {
                 let st = self.flight_status.clone();
@@ -1209,6 +1209,7 @@ pub(crate) fn job(session: u16, req_id: u16, target: &str, text: &str, pairs: &[
         text: crate::ChatText::new(text.to_string()),
         pairs: pairs.iter().map(|(t, m)| (crate::ChatText::new(t.to_string()), crate::ChatText::new(m.to_string()))).collect(),
         no_cache,
+        urgent: false,
     }
 }
 

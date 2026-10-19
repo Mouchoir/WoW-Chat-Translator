@@ -62,12 +62,20 @@ pub struct Entry {
     pub work: Work,
     pub cache_key: u64,
     pub submitted: Instant,
+    /// A reply the user waits for: waits ahead of every entry that is not urgent.
+    pub urgent: bool,
     last_ahead: Option<u8>,
 }
 
 impl Entry {
     pub fn new(key: JobKey, work: Work, cache_key: u64, now: Instant) -> Entry {
-        Entry { keys: vec![key], work, cache_key, submitted: now, last_ahead: None }
+        Entry { keys: vec![key], work, cache_key, submitted: now, urgent: false, last_ahead: None }
+    }
+
+    /// Marks the entry urgent (a reply, `Job::urgent`).
+    pub fn urgent(mut self, urgent: bool) -> Entry {
+        self.urgent = urgent;
+        self
     }
 }
 
@@ -130,23 +138,46 @@ impl Queue {
                 return Pushed::MergedInFlight;
             }
         }
-        if let Some(w) = self.waiting.iter_mut().find(|w| w.cache_key == e.cache_key) {
+        if let Some(i) = self.waiting.iter().position(|w| w.cache_key == e.cache_key) {
+            let urgent = e.urgent;
+            let w = &mut self.waiting[i];
             w.keys.extend(e.keys);
             // Re-announce the position to every key (the new one has none yet).
             w.last_ahead = None;
+            // An urgent key makes the shared entry urgent: it moves ahead of the others.
+            if urgent && !w.urgent {
+                if let Some(mut w) = self.waiting.remove(i) {
+                    w.urgent = true;
+                    let at = self.urgent_end();
+                    self.waiting.insert(at, w);
+                }
+            }
             self.announce(out);
             return Pushed::Waiting;
         }
         if self.waiting.len() >= self.max_waiting {
-            if let Some(old) = self.waiting.pop_front() {
+            // The oldest job that is not urgent is dropped (a reply never makes room for a chat
+            // line's translation by being dropped itself).
+            let i = self.waiting.iter().position(|w| !w.urgent).unwrap_or(0);
+            if let Some(old) = self.waiting.remove(i) {
                 for k in old.keys {
                     out.push((k, St::Failed(FailKind::Overloaded)));
                 }
             }
         }
-        self.waiting.push_back(e);
+        if e.urgent {
+            let at = self.urgent_end();
+            self.waiting.insert(at, e);
+        } else {
+            self.waiting.push_back(e);
+        }
         self.announce(out);
         Pushed::Waiting
+    }
+
+    /// Index after the last waiting urgent entry (urgent entries wait at the front, in order).
+    fn urgent_end(&self) -> usize {
+        self.waiting.iter().take_while(|w| w.urgent).count()
     }
 
     /// Emits Queued{ahead} for every waiting entry whose position changed.
@@ -361,6 +392,74 @@ mod tests {
         assert_eq!(q.waiting_len(), 0);
         assert!(q.finish_flight(&mut out).is_some());
         assert!(q.is_idle());
+    }
+
+    fn urgent(k: JobKey, cache_key: u64, now: Instant) -> Entry {
+        entry(k, cache_key, now).urgent(true)
+    }
+
+    fn order(q: &Queue) -> Vec<JobKey> {
+        q.waiting.iter().flat_map(|e| e.keys.clone()).collect()
+    }
+
+    #[test]
+    fn urgent_jobs_wait_ahead_of_the_others() {
+        let now = Instant::now();
+        let mut q = Queue::default();
+        let mut out = Emit::new();
+        q.push(entry(key(1, 1), 1, now), &mut out);
+        q.start_next(now, &mut out);
+        q.push(entry(key(1, 2), 2, now), &mut out);
+        q.push(entry(key(1, 3), 3, now), &mut out);
+        out.clear();
+        // A reply goes ahead of the waiting chat lines, never ahead of the job in flight.
+        q.push(urgent(key(1, 4), 4, now), &mut out);
+        assert_eq!(order(&q), vec![key(1, 4), key(1, 2), key(1, 3)]);
+        assert_eq!(q.flight_keys(), vec![key(1, 1)]);
+        assert_eq!(queued(&out, key(1, 4)), Some(1));
+        assert_eq!(queued(&out, key(1, 2)), Some(2), "moved back one place");
+        assert_eq!(queued(&out, key(1, 3)), Some(3));
+        // A second urgent job waits after the first one (urgent jobs keep their order).
+        q.push(urgent(key(1, 5), 5, now), &mut out);
+        assert_eq!(order(&q), vec![key(1, 4), key(1, 5), key(1, 2), key(1, 3)]);
+        // A later chat line still goes to the back.
+        q.push(entry(key(1, 6), 6, now), &mut out);
+        assert_eq!(order(&q).last(), Some(&key(1, 6)));
+        q.finish_flight(&mut out);
+        assert_eq!(q.start_next(now, &mut out).map(|e| e.keys.clone()), Some(vec![key(1, 4)]));
+    }
+
+    #[test]
+    fn an_urgent_key_moves_a_shared_entry_forward() {
+        let now = Instant::now();
+        let mut q = Queue::default();
+        let mut out = Emit::new();
+        q.push(entry(key(1, 1), 1, now), &mut out);
+        q.start_next(now, &mut out);
+        q.push(entry(key(1, 2), 2, now), &mut out);
+        q.push(entry(key(1, 3), 3, now), &mut out);
+        // the reply's text is the same as a waiting chat line's (same cache key)
+        q.push(urgent(key(1, 9), 3, now), &mut out);
+        assert_eq!(order(&q), vec![key(1, 3), key(1, 9), key(1, 2)]);
+        assert!(q.waiting[0].urgent);
+    }
+
+    #[test]
+    fn overload_never_drops_an_urgent_job_first() {
+        let now = Instant::now();
+        let mut q = Queue::default();
+        let mut out = Emit::new();
+        q.push(entry(key(1, 100), 100, now), &mut out);
+        q.start_next(now, &mut out);
+        q.push(urgent(key(1, 50), 50, now), &mut out);
+        for i in 0..(MAX_WAITING as u16 - 1) {
+            q.push(entry(key(1, i), u64::from(i), now), &mut out);
+        }
+        out.clear();
+        q.push(entry(key(1, 60), 60, now), &mut out);
+        assert!(q.contains(key(1, 50)), "the reply stays");
+        assert!(out.iter().any(|(k, s)| *k == key(1, 0) && matches!(s, St::Failed(FailKind::Overloaded))), "the oldest chat line goes");
+        assert_eq!(q.waiting_len(), MAX_WAITING);
     }
 
     #[test]

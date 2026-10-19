@@ -4,8 +4,8 @@
 //! TranslateProbeHelper.exe [--runtime DIR] [--model FILE] [--backend auto|cpu|vulkan|cuda] [--capture auto|wgc|gdi]
 //!   [--translator llama|echo] [--wow-class CLASS] [--diag] [--diag-json FILE] [--log-dir DIR] [--no-tray]
 //!   [--exit-after SECS] [--selftest]
-//! test flags: [--no-overlay] [--assume-foreground] [--overlay-probe]
-//! hidden test flag: [--instance-name NAME] (not in --help)
+//! test flags: [--no-overlay] [--assume-foreground] [--overlay-probe] [--no-clipboard]
+//! hidden test flags: [--instance-name NAME] [--assume-background] (not in --help)
 //! ```
 //! Values are given as `--flag VALUE` or `--flag=VALUE`.
 
@@ -117,9 +117,17 @@ pub struct Cli {
     /// Test flag: show one synthetic card (small, bottom-right of the primary monitor) instead of
     /// capturing, and check click-through and focus. Use with --exit-after 5 (at most 5 s).
     pub overlay_probe: bool,
+    /// Test flag: never touch the clipboard (a reply is "not copied - off", as with the tray switch
+    /// off). Implied by --no-overlay, so no automated run ever touches the user's clipboard.
+    pub no_clipboard: bool,
     /// Hidden test flag: the single-instance mutex becomes `Local\TranslateProbeHelper.NAME`, so a
     /// test Helper can run next to the user's own (1-32 ASCII letters, digits, '-' or '_').
     pub instance_name: Option<String>,
+    /// Hidden test flag: the capture thread treats the game window as not in front whatever
+    /// Windows says (background capture rate, background covering rule). Wins over
+    /// --assume-foreground and the one implied by --no-overlay, so an E2E run can check that the
+    /// strip is decoded while the game is in the background.
+    pub assume_background: bool,
     pub help: bool,
     pub version: bool,
 }
@@ -142,7 +150,9 @@ impl Default for Cli {
             no_overlay: false,
             assume_foreground: false,
             overlay_probe: false,
+            no_clipboard: false,
             instance_name: None,
+            assume_background: false,
             help: false,
             version: false,
         }
@@ -152,7 +162,12 @@ impl Default for Cli {
 impl Cli {
     /// True when the game window is treated as foreground whatever Windows says.
     pub fn foreground_assumed(&self) -> bool {
-        self.assume_foreground || self.no_overlay
+        (self.assume_foreground || self.no_overlay) && !self.assume_background
+    }
+
+    /// True when the clipboard must never be touched (`--no-clipboard`, implied by `--no-overlay`).
+    pub fn clipboard_off(&self) -> bool {
+        self.no_clipboard || self.no_overlay
     }
 }
 
@@ -177,8 +192,9 @@ pub const USAGE: &str = "TranslateProbeHelper.exe [--runtime DIR] [--model FILE]
   [--capture auto|wgc|gdi] [--translator llama|echo] [--wow-class CLASS] [--diag] [--diag-json FILE]
   [--log-dir DIR] [--no-tray] [--exit-after SECS] [--selftest]
 Test flags: [--no-overlay] (never show a window, render into memory only; implies --assume-foreground
-  and skips the covering test)
+  and --no-clipboard, and skips the covering test)
   [--assume-foreground] [--overlay-probe] (synthetic card, use with --exit-after 5)
+  [--no-clipboard] (never touch the clipboard: replies show \"not copied\")
 ";
 
 const VALUE_FLAGS: &[&str] = &[
@@ -221,6 +237,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, CliError> {
                     "--no-overlay" => cli.no_overlay = true,
                     "--assume-foreground" => cli.assume_foreground = true,
                     "--overlay-probe" => cli.overlay_probe = true,
+                    "--no-clipboard" => cli.no_clipboard = true,
+                    "--assume-background" => cli.assume_background = true,
                     "--help" | "-h" | "/?" => cli.help = true,
                     "--version" => cli.version = true,
                     _ => return Err(CliError::Unknown(arg)),
@@ -290,7 +308,7 @@ mod tests {
         let c = p(&[
             "--runtime", "C:\\rt", "--model=m.gguf", "--backend", "cpu", "--capture=gdi", "--translator", "echo",
             "--wow-class", "TPFakeWow", "--diag", "--diag-json", "d.jsonl", "--log-dir", "logs", "--no-tray",
-            "--exit-after", "2.5", "--selftest", "--no-overlay", "--overlay-probe",
+            "--exit-after", "2.5", "--selftest", "--no-overlay", "--overlay-probe", "--no-clipboard",
         ])
         .unwrap();
         assert_eq!(c.runtime, Some(PathBuf::from("C:\\rt")));
@@ -304,6 +322,17 @@ mod tests {
         assert_eq!(c.log_dir, Some(PathBuf::from("logs")));
         assert_eq!(c.exit_after, Some(2.5));
         assert!(c.foreground_assumed(), "--no-overlay implies the foreground assumption");
+        assert!(c.no_clipboard && c.clipboard_off());
+    }
+
+    #[test]
+    fn no_clipboard_alone_and_implied() {
+        let c = p(&["--no-clipboard"]).unwrap();
+        assert!(c.no_clipboard && c.clipboard_off() && !c.no_overlay);
+        let o = p(&["--no-overlay"]).unwrap();
+        assert!(!o.no_clipboard && o.clipboard_off(), "--no-overlay implies --no-clipboard");
+        assert!(!Cli::default().clipboard_off());
+        assert!(USAGE.contains("--no-clipboard"));
     }
 
     #[test]
@@ -342,6 +371,14 @@ mod tests {
         }
         assert!(!USAGE.contains("--instance-name"), "hidden from --help");
         assert_eq!(Cli::default().instance_name, None);
+    }
+
+    #[test]
+    fn assume_background_is_hidden_and_wins() {
+        let c = p(&["--no-overlay", "--assume-background"]).unwrap();
+        assert!(c.assume_background && c.no_overlay && !c.foreground_assumed() && c.clipboard_off());
+        assert!(!USAGE.contains("--assume-background"), "hidden from --help");
+        assert!(!Cli::default().assume_background);
     }
 
     #[test]

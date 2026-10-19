@@ -71,6 +71,15 @@ pub enum AppEvent {
     Balloon { kind: &'static str },
     Engine { state: EngineState },
     OverlayAffinity { exclude: bool, ok: bool },
+    /// The overlay's z-order mode (D12): topmost with the game window in front, else right
+    /// above it; `moved` when a window was moved.
+    ZOrder { topmost: bool, moved: bool },
+    /// One clipboard step of a reply: what (begin, finish, release), its outcome, the request
+    /// id, whether the text was cut to 255 bytes and kept out of the clipboard history. Never
+    /// any text.
+    Clipboard { what: &'static str, outcome: &'static str, req: u16, cut: bool, excluded: bool },
+    /// The tray's reply switches (or `--no-clipboard`, logged as copy off).
+    ReplySwitches { copy: bool, sound: bool },
     TrayIcon { ok: bool },
     Exit { code: i32, uptime_s: u64 },
     Panic { line: u32 },

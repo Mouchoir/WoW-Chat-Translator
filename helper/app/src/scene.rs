@@ -10,17 +10,28 @@
 //! - Each known slot's row count (TRANSLATE rows, 1..6) goes to `cards::build_with_rows`
 //!   ([`SceneMachine::rows_expected`]): a tag carries its row modulo 4, and the cards are
 //!   numbered with it.
+//! - A reply request (the conversation window's reply card, reply bit) starts a reply on the UI
+//!   thread ([`Action::ReplyStart`], which empties the clipboard when the copy bit allows it) and
+//!   ends it on CANCEL, on a new request on the same slot, on CLEAR and on a session change
+//!   ([`Action::ReplyEnd`]). Replies are urgent in the engine's queue and never set the language
+//!   of the "Not received" and test strings (the reply's target is the other player's language).
+//! - The game window in the background (decision D12): the cards stay while the window is visible.
+//!   The UI thread then places the overlay windows right above the game window instead of
+//!   topmost, so another window over the game hides them pixel for pixel; a card is dropped only
+//!   when it is fully covered (in front, any cover drops it, as the overlay is topmost there).
+//!   Nothing is shown while the game is minimized or gone.
 
 use std::collections::{HashMap, VecDeque};
 
 use tp_bridge::cards::{Card, TAG_ROWS};
 use tp_bridge::image::Rect;
-use tp_bridge::msg::{Message, View};
+use tp_bridge::msg::{ChatText, Message, View};
 use tp_bridge::strip::Mode;
 use tp_bridge::tags::{TagHit, TEST_SLOT};
 use tp_engine::{Job, JobKey};
 
 use crate::backdrop::CardBg;
+use crate::lane::Lane;
 
 pub const MISSING_AFTER_MS: u64 = 1500;
 pub const STALE_AFTER_MS: u64 = 500;
@@ -28,8 +39,17 @@ pub const STALE_AFTER_MS: u64 = 500;
 pub const MIN_ALPHA: f32 = 0.3;
 /// The overlay never covers client rows 0..15 (the strip lives there).
 pub const OVERLAY_TOP: i32 = 16;
-/// `STATUS.addonBuild` this helper speaks (2: TRANSLATE rows 1..6, 2026-10-18).
-pub const ADDON_BUILD: u16 = 2;
+/// `STATUS.addonBuild` this helper speaks (3: TRANSLATE reply and copy bits, the conversation
+/// window, 2026-10-19; 2: rows 1..6, 2026-10-18).
+pub const ADDON_BUILD: u16 = 3;
+/// The oldest addon build served without the "addon is older" toast: build 2 sends no reply bit,
+/// and everything else it sends is unchanged.
+pub const ADDON_BUILD_MIN: u16 = 2;
+/// The addon's reply slot (the conversation window's reply card). Only the "Not received"
+/// wording of an unknown slot uses it; a known request says by its reply bit what it is.
+pub const REPLY_SLOT: u8 = 126;
+/// VIEW ids from 200 are addon windows (200 = the conversation window); 1..199 are chat frames.
+pub const WINDOW_VIEW_MIN: u8 = 200;
 /// Weak bridge signal: average calibration gap under this for 10 s.
 pub const WEAK_GAP: f32 = 16.0;
 pub const WEAK_FOR_MS: u64 = 10_000;
@@ -39,7 +59,38 @@ pub struct SlotReq {
     pub key: JobKey,
     pub rows: u8,
     pub plate: bool,
+    /// The conversation window's reply card: row 0 is the Helper's status, rows 1.. the text.
+    pub reply: bool,
+    /// The player allowed the final translation to be copied to the clipboard.
+    pub copy: bool,
     pub target: String,
+}
+
+/// What a VIEW rectangle shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewKind {
+    /// A chat frame (VIEW ids 1..199; 0 is the discovery area).
+    Chat,
+    /// An addon window (VIEW ids 200..255): bubbles over an opaque fill, whose tags the overlay
+    /// paints over, so the text starts at the tag (design A.4).
+    Window,
+}
+
+impl ViewKind {
+    pub fn of(id: u8) -> ViewKind {
+        if id >= WINDOW_VIEW_MIN {
+            ViewKind::Window
+        } else {
+            ViewKind::Chat
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewKind::Chat => "chat",
+            ViewKind::Window => "window",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,11 +138,17 @@ pub enum Action {
     ClearSession(u16),
     Toast(ToastKind),
     Balloon(BalloonKind),
+    /// A reply request was accepted (emitted before its `Submit`): the UI thread starts its
+    /// clipboard flow. `text` is the request's own text, copied as it is when the engine finds it
+    /// already in the target language.
+    ReplyStart { key: JobKey, copy: bool, text: ChatText },
+    /// The reply ended (CANCEL, replaced on its slot, CLEAR, session change).
+    ReplyEnd { key: JobKey },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CardKind {
-    Request { key: JobKey, rows: u8, target: String },
+    Request { key: JobKey, rows: u8, target: String, reply: bool },
     /// Slot 127 (`/tpr test rows`): "Overlay OK (row N, block P px)".
     Test,
     /// Unknown slot whose plate has been seen for 1.5 s: "Not received - click [T] again".
@@ -121,11 +178,14 @@ pub struct SceneCard {
     /// The chat background around each band, sampled in the same capture (native look); empty
     /// when unknown (the overlay then covers the tags with the plate colour).
     pub bg: CardBg,
+    /// A reply card's hint lane, found in the same capture (None: not found, or not a reply).
+    pub lane: Option<Lane>,
 }
 
 #[derive(Clone, Debug)]
 pub struct SceneView {
     pub id: u8,
+    pub kind: ViewKind,
     /// Overlay area in client coordinates (never above row 16).
     pub rect: Rect,
     /// Chat font size from VIEW (0 when no VIEW is known).
@@ -168,11 +228,14 @@ pub struct Scene {
     pub lang_target: Option<String>,
     /// Capture runs through GDI (the overlay must then be excluded from capture).
     pub gdi: bool,
+    /// The game window is the foreground window (or assumed to be): the overlay is topmost.
+    /// Otherwise it sits right above the game window in the z-order (decision D12).
+    pub foreground: bool,
 }
 
 impl Scene {
     pub fn empty(hidden: Option<Hidden>) -> Scene {
-        Scene { wow: None, views: Vec::new(), hidden, lang_target: None, gdi: false }
+        Scene { wow: None, views: Vec::new(), hidden, lang_target: None, gdi: false, foreground: false }
     }
 
     pub fn card_count(&self) -> usize {
@@ -189,6 +252,7 @@ impl Scene {
         let mut h = Fnv::new();
         h.i(self.hidden.map(|x| x as i64).unwrap_or(-1));
         h.i(i64::from(self.gdi));
+        h.i(i64::from(self.foreground));
         if let Some(w) = self.wow {
             h.i(w.hwnd as i64);
             h.i(w.origin_x.into());
@@ -204,11 +268,12 @@ impl Scene {
             for sc in &v.cards {
                 h.i(i64::from(sc.covered));
                 match &sc.kind {
-                    CardKind::Request { key, rows, .. } => {
+                    CardKind::Request { key, rows, reply, .. } => {
                         h.i(1);
                         h.i(key.session.into());
                         h.i(key.req_id.into());
                         h.i((*rows).into());
+                        h.i(i64::from(*reply));
                     }
                     k => h.i(match k {
                         CardKind::Test => 2,
@@ -219,6 +284,14 @@ impl Scene {
                 h.i((sc.block_px * 4.0) as i64);
                 for w in sc.bg.hash_words() {
                     h.i(w);
+                }
+                match &sc.lane {
+                    Some(l) => {
+                        for w in l.hash_words() {
+                            h.i(w);
+                        }
+                    }
+                    None => h.i(-1),
                 }
                 let c = &sc.card;
                 h.i(c.slot.into());
@@ -406,7 +479,7 @@ impl SceneMachine {
         self.last_mode = f.mode;
         self.last_margin = f.min_gap.max(0.0).round() as u32;
         self.white_black = Some((f.white, f.black));
-        if f.addon_build != ADDON_BUILD && self.build_warned != Some(f.session) {
+        if !build_served(f.addon_build) && self.build_warned != Some(f.session) {
             self.build_warned = Some(f.session);
             out.push(Action::Toast(if f.addon_build < ADDON_BUILD { ToastKind::AddonOld } else { ToastKind::HelperOld }));
         }
@@ -427,15 +500,25 @@ impl SceneMachine {
         out
     }
 
+    /// ReplyEnd for every reply of the slot map (CLEAR, session change), in slot order.
+    fn end_replies(&self, out: &mut Vec<Action>) {
+        let mut keys: Vec<(u8, JobKey)> = self.slots.iter().filter(|(_, s)| s.reply).map(|(slot, s)| (*slot, s.key)).collect();
+        keys.sort_unstable_by_key(|(slot, _)| *slot);
+        out.extend(keys.into_iter().map(|(_, key)| Action::ReplyEnd { key }));
+    }
+
     /// The addon session changed (from `Reassembler::take_session_change`): forget its requests
-    /// and VIEW, and cancel its jobs.
+    /// and VIEW, end its replies and cancel its jobs.
     pub fn on_session_change(&mut self, old: u16, new: u16) -> Vec<Action> {
+        let mut out = Vec::new();
+        self.end_replies(&mut out);
         self.session = Some(new);
         self.slots.clear();
         self.views.clear();
         self.unknown_seen.clear();
         self.last_target = None;
-        vec![Action::ClearSession(old)]
+        out.push(Action::ClearSession(old));
+        out
     }
 
     pub fn on_message(&mut self, session: u16, m: Message) -> Vec<Action> {
@@ -444,23 +527,42 @@ impl SceneMachine {
         match m {
             Message::Translate(t) => {
                 let key = JobKey { session, req_id: t.req_id };
+                let mut repeat = false;
                 if let Some(old) = self.slots.get(&t.slot) {
                     if old.key != key {
                         out.push(Action::Cancel(old.key));
+                        if old.reply {
+                            out.push(Action::ReplyEnd { key: old.key });
+                        }
+                    } else {
+                        repeat = old.reply && t.reply;
                     }
                 }
-                self.slots.insert(t.slot, SlotReq { key, rows: t.rows, plate: t.plate, target: t.target.clone() });
+                self.slots.insert(t.slot, SlotReq { key, rows: t.rows, plate: t.plate, reply: t.reply, copy: t.copy, target: t.target.clone() });
                 self.unknown_seen.retain(|(_, s), _| *s != t.slot);
-                self.last_target = Some(t.target.clone());
-                out.push(Action::Submit(Job { key, target: t.target, text: t.text, pairs: t.pairs, no_cache: t.no_cache }));
+                if t.reply {
+                    // the same reply received again (same reqId) keeps its clipboard state
+                    if !repeat {
+                        out.push(Action::ReplyStart { key, copy: t.copy, text: ChatText::new(t.text.as_str().to_string()) });
+                    }
+                } else {
+                    // the player's own language (a reply's target is the other player's)
+                    self.last_target = Some(t.target.clone());
+                }
+                out.push(Action::Submit(Job { key, target: t.target, text: t.text, pairs: t.pairs, no_cache: t.no_cache, urgent: t.reply }));
             }
             Message::Cancel { req_id, slot } => {
                 if self.slots.get(&slot).map(|s| s.key.req_id) == Some(req_id) {
-                    self.slots.remove(&slot);
+                    if let Some(s) = self.slots.remove(&slot) {
+                        if s.reply {
+                            out.push(Action::ReplyEnd { key: s.key });
+                        }
+                    }
                 }
                 out.push(Action::Cancel(JobKey { session, req_id }));
             }
             Message::Clear => {
+                self.end_replies(&mut out);
                 self.slots.clear();
                 out.push(Action::ClearSession(session));
             }
@@ -475,6 +577,11 @@ impl SceneMachine {
             }
         }
         out
+    }
+
+    /// From the TRANSLATE flags: Some(reply) for a known slot, None otherwise.
+    pub fn reply_expected(&self, slot: u8) -> Option<bool> {
+        self.slots.get(&slot).map(|s| s.reply)
     }
 
     /// Overlay areas: one per VIEW, or id 0 = the whole client below row 16 when none is known.
@@ -498,12 +605,19 @@ impl SceneMachine {
     /// Builds the scene for one tick from the cards found in this capture (without background
     /// samples).
     pub fn update(&mut self, input: &TickInput, cards: Vec<Card>, hits: &[TagHit], covered: &mut dyn FnMut(&Card) -> bool) -> Scene {
-        self.update_with_bg(input, cards.into_iter().map(|c| (c, CardBg::default())).collect(), hits, covered)
+        self.update_found(input, cards.into_iter().map(FoundCard::bare).collect(), hits, covered)
     }
 
     /// Builds the scene for one tick from the cards found in this capture, each with the chat
     /// background sampled around its rows.
     pub fn update_with_bg(&mut self, input: &TickInput, cards: Vec<(Card, CardBg)>, hits: &[TagHit], covered: &mut dyn FnMut(&Card) -> bool) -> Scene {
+        self.update_found(input, cards.into_iter().map(|(card, bg)| FoundCard { card, bg, lane: None }).collect(), hits, covered)
+    }
+
+    /// Builds the scene for one tick from the cards found in this capture, with their background
+    /// samples and reply lanes. `covered(card)`: the card is covered by another window (the app
+    /// asks for any cover with the game in front, a full cover otherwise).
+    pub fn update_found(&mut self, input: &TickInput, cards: Vec<FoundCard>, hits: &[TagHit], covered: &mut dyn FnMut(&Card) -> bool) -> Scene {
         if input.fresh {
             self.last_fresh_ms = Some(input.now_ms);
         }
@@ -514,22 +628,22 @@ impl SceneMachine {
         };
         if w.minimized {
             self.unknown_seen.clear();
-            return Scene { wow: Some(w.geom), lang_target, ..Scene::empty(Some(Hidden::Minimized)) };
+            return Scene { wow: Some(w.geom), lang_target, foreground: w.foreground, ..Scene::empty(Some(Hidden::Minimized)) };
         }
         let stale = match self.last_fresh_ms {
             Some(t) => input.now_ms.saturating_sub(t) > STALE_AFTER_MS,
             None => true,
         };
         if w.foreground && stale {
-            return Scene { wow: Some(w.geom), lang_target, ..Scene::empty(Some(Hidden::Stale)) };
+            return Scene { wow: Some(w.geom), lang_target, foreground: true, ..Scene::empty(Some(Hidden::Stale)) };
         }
         let mut views: Vec<SceneView> = self
             .view_areas(w.geom.client_w, w.geom.client_h)
             .into_iter()
-            .map(|(id, rect, font_px)| SceneView { id, rect, font_px, cards: Vec::new() })
+            .map(|(id, rect, font_px)| SceneView { id, kind: ViewKind::of(id), rect, font_px, cards: Vec::new() })
             .collect();
         let mut seen_unknown: Vec<(u8, u8)> = Vec::new();
-        for (card, bg) in cards {
+        for FoundCard { card, bg, lane } in cards {
             if card.alpha < MIN_ALPHA || card.bands.is_empty() {
                 continue;
             }
@@ -537,7 +651,7 @@ impl SceneMachine {
             let kind = if card.slot == TEST_SLOT {
                 CardKind::Test
             } else if let Some(s) = self.slots.get(&card.slot) {
-                CardKind::Request { key: s.key, rows: s.rows, target: s.target.clone() }
+                CardKind::Request { key: s.key, rows: s.rows, target: s.target.clone(), reply: s.reply }
             } else {
                 let k = (card.view_id, card.slot);
                 seen_unknown.push(k);
@@ -555,10 +669,30 @@ impl SceneMachine {
                 .map(|h| h.block_px)
                 .unwrap_or(0.0);
             let is_covered = covered(&card);
-            view.cards.push(SceneCard { card, kind, covered: is_covered, block_px, bg });
+            // a lane belongs to a reply card only
+            let lane = lane.filter(|_| matches!(kind, CardKind::Request { reply: true, .. }));
+            view.cards.push(SceneCard { card, kind, covered: is_covered, block_px, bg, lane });
         }
         self.unknown_seen.retain(|k, _| seen_unknown.contains(k));
-        Scene { wow: Some(w.geom), views, hidden: None, lang_target, gdi: false }
+        Scene { wow: Some(w.geom), views, hidden: None, lang_target, gdi: false, foreground: w.foreground }
+    }
+}
+
+/// True when this Helper serves an addon of build `b` without a toast.
+pub fn build_served(b: u16) -> bool {
+    (ADDON_BUILD_MIN..=ADDON_BUILD).contains(&b)
+}
+
+/// One card found in a capture, with what was sampled around it.
+pub struct FoundCard {
+    pub card: Card,
+    pub bg: CardBg,
+    pub lane: Option<Lane>,
+}
+
+impl FoundCard {
+    pub fn bare(card: Card) -> FoundCard {
+        FoundCard { card, bg: CardBg::default(), lane: None }
     }
 }
 
@@ -602,6 +736,8 @@ pub(crate) mod tests {
             rows: 2,
             no_cache: false,
             plate: true,
+            reply: false,
+            copy: false,
             target: target.into(),
             text: ChatText::new("synthetic".into()),
             pairs: Vec::new(),
@@ -659,8 +795,132 @@ pub(crate) mod tests {
         assert_eq!(m.plate_expected(5), Some(true));
         assert_eq!(m.plate_expected(6), None);
         let s = m.update(&tick(10, true, true), vec![card(5, 0, 900, 2, 1.0)], &[], &mut no_cover);
-        assert_eq!(kinds(&s), vec![CardKind::Request { key: JobKey { session: 42, req_id: 7 }, rows: 2, target: "fr".into() }]);
+        assert_eq!(kinds(&s), vec![CardKind::Request { key: JobKey { session: 42, req_id: 7 }, rows: 2, target: "fr".into(), reply: false }]);
         assert_eq!(s.lang_target.as_deref(), Some("fr"));
+    }
+
+    fn reply(req_id: u16, copy: bool, target: &str) -> Message {
+        Message::Translate(Translate {
+            req_id,
+            slot: REPLY_SLOT,
+            rows: 3,
+            no_cache: false,
+            plate: true,
+            reply: true,
+            copy,
+            target: target.into(),
+            text: ChatText::new("on part dans 5 min ?".into()),
+            pairs: Vec::new(),
+        })
+    }
+
+    /// The actions as comparable names (Submit carries its urgency).
+    fn names(acts: &[Action]) -> Vec<String> {
+        acts.iter()
+            .map(|a| match a {
+                Action::Submit(j) => format!("submit {} urgent={}", j.key.req_id, j.urgent),
+                Action::Cancel(k) => format!("cancel {}", k.req_id),
+                Action::ClearSession(s) => format!("clear {s}"),
+                Action::Toast(_) => "toast".into(),
+                Action::Balloon(_) => "balloon".into(),
+                Action::ReplyStart { key, copy, text } => format!("start {} copy={} bytes={}", key.req_id, copy, text.len()),
+                Action::ReplyEnd { key } => format!("end {}", key.req_id),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reply_start_replace_and_end() {
+        let mut m = SceneMachine::new();
+        m.on_message(42, translate(7, 5, "fr"));
+        // the reply goes ahead in the queue, starts the clipboard flow first, and keeps the
+        // player's language for the Missing strings
+        let acts = m.on_message(42, reply(20, true, "de"));
+        assert_eq!(names(&acts), vec!["start 20 copy=true bytes=20", "submit 20 urgent=true"]);
+        assert_eq!(m.reply_expected(REPLY_SLOT), Some(true));
+        assert_eq!(m.reply_expected(5), Some(false));
+        let s = m.update(&tick(10, true, true), vec![], &[], &mut no_cover);
+        assert_eq!(s.lang_target.as_deref(), Some("fr"), "replies never set the language");
+        // the same reqId again (a repeated message): no second start
+        assert_eq!(names(&m.on_message(42, reply(20, true, "de"))), vec!["submit 20 urgent=true"]);
+        // a new reply replaces it on the same slot
+        let acts = m.on_message(42, reply(21, false, "de"));
+        assert_eq!(names(&acts), vec!["cancel 20", "end 20", "start 21 copy=false bytes=20", "submit 21 urgent=true"]);
+        // CANCEL of another reqId leaves it; its own CANCEL ends it
+        assert_eq!(names(&m.on_message(42, Message::Cancel { req_id: 20, slot: REPLY_SLOT })), vec!["cancel 20"]);
+        assert_eq!(names(&m.on_message(42, Message::Cancel { req_id: 21, slot: REPLY_SLOT })), vec!["end 21", "cancel 21"]);
+        assert_eq!(m.reply_expected(REPLY_SLOT), None);
+        // CLEAR and a session change end the open reply
+        m.on_message(42, reply(22, true, "de"));
+        assert_eq!(names(&m.on_message(42, Message::Clear)), vec!["end 22", "clear 42"]);
+        m.on_message(42, reply(23, true, "de"));
+        assert_eq!(names(&m.on_session_change(42, 43)), vec!["end 23", "clear 42"]);
+        // a chat request on the slot of a reply ends the reply too
+        m.on_message(43, reply(1, true, "de"));
+        assert_eq!(names(&m.on_message(43, translate(2, REPLY_SLOT, "fr"))), vec!["cancel 1", "end 1", "submit 2 urgent=false"]);
+    }
+
+    #[test]
+    fn reply_cards_and_their_lanes() {
+        use crate::lane::Lane;
+        let mut m = SceneMachine::new();
+        m.on_message(42, Message::View(vec![View { id: 200, x: 20, y: 400, w: 400, h: 500, font_px: 14, row_px: 16 }, view(1)]));
+        m.on_message(42, reply(20, true, "de"));
+        m.on_message(42, translate(7, 5, "fr"));
+        let lane = Lane { rect: rect(10, 948, 250, 16), rgb: [36, 30, 24], cols: vec![true; 250] };
+        let found = vec![
+            FoundCard { card: card(REPLY_SLOT, 200, 900, 3, 1.0), bg: CardBg::default(), lane: Some(lane.clone()) },
+            FoundCard { card: card(5, 200, 600, 2, 1.0), bg: CardBg::default(), lane: Some(lane.clone()) },
+        ];
+        let s = m.update_found(&tick(10, true, true), found, &[], &mut no_cover);
+        assert_eq!(s.views[0].kind, ViewKind::Window);
+        assert_eq!(s.views[1].kind, ViewKind::Chat);
+        let cards = &s.views[0].cards;
+        assert!(matches!(cards[0].kind, CardKind::Request { reply: true, rows: 3, .. }));
+        assert_eq!(cards[0].lane.as_ref(), Some(&lane));
+        assert!(cards[1].lane.is_none(), "a lane belongs to a reply card only");
+        // the lane is part of what the overlay draws from
+        let mut moved = lane.clone();
+        moved.cols[100] = false;
+        let s2 = m.update_found(
+            &tick(20, true, true),
+            vec![FoundCard { card: card(REPLY_SLOT, 200, 900, 3, 1.0), bg: CardBg::default(), lane: Some(moved) }, FoundCard::bare(card(5, 200, 600, 2, 1.0))],
+            &[],
+            &mut no_cover,
+        );
+        assert_ne!(s.fingerprint(), s2.fingerprint());
+        assert_eq!(ViewKind::of(199), ViewKind::Chat);
+        assert_eq!(ViewKind::of(255), ViewKind::Window);
+    }
+
+    #[test]
+    fn background_keeps_cards_while_the_game_is_visible() {
+        // D12: an Alt-Tab to another window must not drop the cards (the raw tags and the plate
+        // would show); only a full cover, a minimized or a vanished window hides them
+        let mut m = SceneMachine::new();
+        m.on_message(1, translate(1, 2, "en"));
+        let s = m.update(&tick(1000, true, true), vec![card(2, 0, 500, 2, 1.0)], &[], &mut no_cover);
+        assert!(s.any_visible() && s.foreground);
+        let unfocused = m.update(&tick(1100, true, false), vec![card(2, 0, 500, 2, 1.0)], &[], &mut no_cover);
+        assert!(unfocused.any_visible(), "unfocused but visible: the cards stay");
+        assert!(!unfocused.foreground, "the overlay leaves the topmost band");
+        assert_ne!(s.fingerprint(), unfocused.fingerprint(), "a focus change republishes the scene");
+        // no fresh frame for seconds in the background (the game draws less): still shown
+        let still = m.update(&tick(9000, false, false), vec![card(2, 0, 500, 2, 1.0)], &[], &mut no_cover);
+        assert!(still.any_visible() && still.hidden.is_none());
+        // fully covered by another window: hidden
+        let covered = m.update(&tick(9100, true, false), vec![card(2, 0, 500, 2, 1.0)], &[], &mut |_| true);
+        assert!(!covered.any_visible());
+        assert_eq!(covered.card_count(), 1, "kept but flagged covered");
+        // minimized: nothing
+        let mut t = tick(9200, true, false);
+        t.wow.as_mut().unwrap().minimized = true;
+        let min = m.update(&t, vec![card(2, 0, 500, 2, 1.0)], &[], &mut no_cover);
+        assert_eq!(min.hidden, Some(Hidden::Minimized));
+        assert!(!min.any_visible());
+        // back in front with fresh frames: shown and topmost again
+        let back = m.update(&tick(9300, true, true), vec![card(2, 0, 500, 2, 1.0)], &[], &mut no_cover);
+        assert!(back.any_visible() && back.foreground);
     }
 
     #[test]
@@ -703,7 +963,7 @@ pub(crate) mod tests {
         m.on_message(42, translate(7, 5, "fr"));
         m.on_message(42, Message::View(vec![view(1)]));
         let acts = m.on_session_change(42, 43);
-        assert!(matches!(acts.as_slice(), [Action::ClearSession(42)]));
+        assert!(matches!(acts.as_slice(), [Action::ClearSession(42)]), "no reply open: nothing to end");
         assert_eq!(m.slot_count(), 0);
         assert!(m.discovery());
         assert_eq!(m.sess_bit(), Some(1));
@@ -770,7 +1030,11 @@ pub(crate) mod tests {
     fn addon_build_mismatch_toasts_once_per_session() {
         let mut m = SceneMachine::new();
         let f = |session, build| FrameInfo { session, mode: Mode::Dense, addon_build: build, min_gap: 40.0, white: [255.0; 3], black: [0.0; 3] };
+        assert_eq!(ADDON_BUILD, 3);
         assert!(m.on_frame(&f(5, ADDON_BUILD), 0).is_empty());
+        // build 2 (rows 1..6, no reply bit) is served without a toast
+        assert!(m.on_frame(&f(5, 2), 0).is_empty());
+        assert!(build_served(2) && build_served(3) && !build_served(1) && !build_served(4));
         assert!(matches!(m.on_frame(&f(5, ADDON_BUILD + 1), 0).as_slice(), [Action::Toast(ToastKind::HelperOld)]));
         assert!(m.on_frame(&f(5, ADDON_BUILD + 1), 0).is_empty());
         // the build before rows 1..6 (b8a3e23) is told to update
@@ -803,7 +1067,7 @@ pub(crate) mod tests {
     #[test]
     fn rows_expected_follow_translate() {
         let mut m = SceneMachine::new();
-        let t = Translate { req_id: 7, slot: 5, rows: 6, no_cache: false, plate: true, target: "fr".into(), text: ChatText::new("x".into()), pairs: Vec::new() };
+        let t = Translate { req_id: 7, slot: 5, rows: 6, no_cache: false, plate: true, reply: false, copy: false, target: "fr".into(), text: ChatText::new("x".into()), pairs: Vec::new() };
         m.on_message(42, Message::Translate(t));
         assert_eq!(m.rows_expected(5), Some(6));
         assert_eq!(m.rows_expected(6), None);

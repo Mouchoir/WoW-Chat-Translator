@@ -1,5 +1,7 @@
-//! Notification-area icon: state tooltip, balloons and a small menu (unload, log folder, exit).
-//! The icon is drawn at runtime (`CreateIconIndirect`), so the exe carries no resource file.
+//! Notification-area icon: state tooltip, balloons and a small menu (unload, log folder, the two
+//! reply switches "Copy translated replies to the clipboard" and "Sound when a reply is copied",
+//! exit). The icon is drawn at runtime (`CreateIconIndirect`), so the exe carries no resource
+//! file.
 //!
 //! The menu follows the documented notification-icon pattern: `SetForegroundWindow` on the hidden
 //! main window right before `TrackPopupMenuEx`, and a `WM_NULL` after it. Without it the menu does
@@ -20,6 +22,31 @@ pub enum MenuCmd {
     Unload = 1,
     OpenLogs = 2,
     Exit = 3,
+    /// Toggles `replyClipboard`.
+    CopyReplies = 4,
+    /// Toggles `replySound`.
+    ReplySound = 5,
+}
+
+impl MenuCmd {
+    fn from_id(id: i32) -> Option<MenuCmd> {
+        Some(match id {
+            1 => MenuCmd::Unload,
+            2 => MenuCmd::OpenLogs,
+            3 => MenuCmd::Exit,
+            4 => MenuCmd::CopyReplies,
+            5 => MenuCmd::ReplySound,
+            _ => return None,
+        })
+    }
+}
+
+/// One menu entry: command, label, check state (None: not a check item), separator before it.
+pub struct MenuItem<'a> {
+    pub cmd: MenuCmd,
+    pub label: &'a str,
+    pub checked: Option<bool>,
+    pub separator_before: bool,
 }
 
 pub struct Tray {
@@ -137,16 +164,19 @@ impl Tray {
     }
 
     /// Shows the menu at the cursor; returns the chosen command.
-    pub fn menu(&self, labels: [&str; 3]) -> Option<MenuCmd> {
+    pub fn menu(&self, items: &[MenuItem]) -> Option<MenuCmd> {
         unsafe {
             let m = CreatePopupMenu().ok()?;
-            let items = [(MenuCmd::Unload, labels[0]), (MenuCmd::OpenLogs, labels[1]), (MenuCmd::Exit, labels[2])];
-            for (i, (cmd, label)) in items.iter().enumerate() {
-                if i == 2 {
+            for it in items {
+                if it.separator_before {
                     let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
                 }
-                let w: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
-                let _ = AppendMenuW(m, MF_STRING, *cmd as usize, PCWSTR(w.as_ptr()));
+                let w: Vec<u16> = it.label.encode_utf16().chain(std::iter::once(0)).collect();
+                let flags = match it.checked {
+                    Some(true) => MF_STRING | MF_CHECKED,
+                    _ => MF_STRING,
+                };
+                let _ = AppendMenuW(m, flags, it.cmd as usize, PCWSTR(w.as_ptr()));
             }
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
@@ -154,12 +184,7 @@ impl Tray {
             let r = TrackPopupMenuEx(m, (TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON).0, pt.x, pt.y, self.hwnd, None);
             let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(m);
-            match r.0 {
-                1 => Some(MenuCmd::Unload),
-                2 => Some(MenuCmd::OpenLogs),
-                3 => Some(MenuCmd::Exit),
-                _ => None,
-            }
+            MenuCmd::from_id(r.0)
         }
     }
 }
@@ -186,6 +211,14 @@ mod tests {
         unsafe {
             let _ = DestroyIcon(icon);
         }
+    }
+
+    #[test]
+    fn menu_ids_round_trip() {
+        for c in [MenuCmd::Unload, MenuCmd::OpenLogs, MenuCmd::Exit, MenuCmd::CopyReplies, MenuCmd::ReplySound] {
+            assert_eq!(MenuCmd::from_id(c as i32), Some(c));
+        }
+        assert_eq!(MenuCmd::from_id(0), None, "menu dismissed");
     }
 
     #[test]

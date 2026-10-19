@@ -1,9 +1,16 @@
-//! Layered, topmost, click-through windows that never activate (overlay and toast), and the
-//! in-memory DIBs they are drawn from.
+//! Layered, click-through windows that never activate (overlay and toast), and the in-memory DIBs
+//! they are drawn from.
 //!
 //! Styles: `WS_EX_LAYERED|TRANSPARENT|TOPMOST|NOACTIVATE|TOOLWINDOW`; `WM_MOUSEACTIVATE` returns
-//! `MA_NOACTIVATE`, `WM_NCHITTEST` returns `HTTRANSPARENT`; shown with `SW_SHOWNOACTIVATE` and
-//! `SWP_NOACTIVATE` only; hidden with `SW_HIDE` when empty.
+//! `MA_NOACTIVATE`, `WM_NCHITTEST` returns `HTTRANSPARENT`; shown with `SetWindowPos(..,
+//! SWP_NOACTIVATE | SWP_SHOWWINDOW)` only; hidden with `SW_HIDE` when empty.
+//!
+//! Z-order (decision D12, [`ZMode`]): topmost while the game window is in front; otherwise right
+//! above the game window (`SetWindowPos` after the first window above it that is not ours,
+//! `SWP_NOACTIVATE`), which also takes the topmost status away. The windows above the game, the
+//! one in front among them, then hide the overlay pixel for pixel: a card is never drawn over
+//! another application. The z-order is set in the same call that shows a window, so a window
+//! never appears topmost first.
 
 use std::sync::Once;
 
@@ -157,6 +164,79 @@ impl Drop for Dib {
     }
 }
 
+/// Where the overlay windows sit in the z-order (decision D12).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZMode {
+    /// The game window is in front: above everything that is not topmost.
+    Topmost,
+    /// Another window is in front: right above the game window (its handle).
+    Above(isize),
+}
+
+/// True when `h` belongs to this process (the overlay, the toast, the main window).
+fn ours(h: HWND) -> bool {
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(h, Some(&mut pid as *mut u32));
+    }
+    pid == std::process::id()
+}
+
+fn is_topmost(h: HWND) -> bool {
+    (unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0) != 0
+}
+
+/// The window the overlay goes right after (below) in mode `z`: `HWND_TOPMOST`; or the first
+/// window above the game window that is not ours (`HWND_NOTOPMOST`, the top of the non-topmost
+/// band, when that window is topmost or there is none: the game window is then the highest window
+/// that is not topmost). None when the game window is gone.
+pub fn insert_after(z: ZMode) -> Option<HWND> {
+    insert_after_with(z, &ours)
+}
+
+fn insert_after_with(z: ZMode, is_ours: &dyn Fn(HWND) -> bool) -> Option<HWND> {
+    match z {
+        ZMode::Topmost => Some(HWND_TOPMOST),
+        ZMode::Above(wow) => {
+            let wow = HWND(wow as *mut core::ffi::c_void);
+            if !unsafe { IsWindow(Some(wow)) }.as_bool() {
+                return None;
+            }
+            let mut p = unsafe { GetWindow(wow, GW_HWNDPREV) }.unwrap_or_default();
+            let mut guard = 0;
+            while !p.0.is_null() && is_ours(p) && guard < 64 {
+                p = unsafe { GetWindow(p, GW_HWNDPREV) }.unwrap_or_default();
+                guard += 1;
+            }
+            if p.0.is_null() || is_topmost(p) {
+                Some(HWND_NOTOPMOST)
+            } else {
+                Some(p)
+            }
+        }
+    }
+}
+
+/// True when every window between the game window and the first window above it that is not
+/// ours is ours, and `h` is among them (the overlay sits right above the game window).
+pub fn right_above(h: HWND, wow: isize) -> bool {
+    right_above_with(h, wow, &ours)
+}
+
+fn right_above_with(h: HWND, wow: isize, is_ours: &dyn Fn(HWND) -> bool) -> bool {
+    let wow = HWND(wow as *mut core::ffi::c_void);
+    let mut p = unsafe { GetWindow(wow, GW_HWNDPREV) }.unwrap_or_default();
+    let mut guard = 0;
+    while !p.0.is_null() && is_ours(p) && guard < 64 {
+        if p == h {
+            return true;
+        }
+        p = unsafe { GetWindow(p, GW_HWNDPREV) }.unwrap_or_default();
+        guard += 1;
+    }
+    false
+}
+
 /// One layered window and its backing DIB.
 pub struct LayeredWindow {
     hwnd: HWND,
@@ -166,6 +246,8 @@ pub struct LayeredWindow {
     pos: (i32, i32, i32, i32),
     /// Dirty rectangle (canvas-local) of the last canvas presented.
     prev_dirty: Option<Rect>,
+    /// The z-order mode last applied.
+    z: ZMode,
 }
 
 impl LayeredWindow {
@@ -173,7 +255,22 @@ impl LayeredWindow {
         register_classes();
         let ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
         let hwnd = unsafe { CreateWindowExW(ex, class, w!("TranslateProbe Helper"), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinstance()), None) }.ok()?;
-        Some(LayeredWindow { hwnd, shown: false, exclude: None, dib: None, pos: (0, 0, 0, 0), prev_dirty: None })
+        Some(LayeredWindow { hwnd, shown: false, exclude: None, dib: None, pos: (0, 0, 0, 0), prev_dirty: None, z: ZMode::Topmost })
+    }
+
+    /// Puts a shown window where mode `z` wants it (nothing for a hidden one: `present_z` places
+    /// it when it shows it). Returns true when the window was moved in the z-order.
+    pub fn apply_z(&mut self, z: ZMode) -> bool {
+        let need = match z {
+            ZMode::Topmost => self.z != z || !is_topmost(self.hwnd),
+            ZMode::Above(wow) => self.z != z || is_topmost(self.hwnd) || !right_above(self.hwnd, wow),
+        };
+        self.z = z;
+        if !self.shown || !need {
+            return false;
+        }
+        let Some(after) = insert_after(z) else { return false };
+        unsafe { SetWindowPos(self.hwnd, Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) }.is_ok()
     }
 
     pub fn hwnd(&self) -> isize {
@@ -196,8 +293,19 @@ impl LayeredWindow {
         ok
     }
 
-    /// Draws `canvas` at screen `(x, y)` and shows the window without activating it.
+    /// Draws `canvas` at screen `(x, y)` and shows the window topmost without activating it.
     pub fn present(&mut self, x: i32, y: i32, canvas: &Canvas) -> bool {
+        self.present_z(x, y, canvas, ZMode::Topmost)
+    }
+
+    /// Draws `canvas` at screen `(x, y)` and shows the window without activating it, placed in
+    /// the z-order as `z` wants (in the same call that shows it).
+    pub fn present_z(&mut self, x: i32, y: i32, canvas: &Canvas, z: ZMode) -> bool {
+        if self.shown {
+            self.apply_z(z);
+        } else {
+            self.z = z;
+        }
         let (w, h) = (canvas.rect.w, canvas.rect.h);
         if w <= 0 || h <= 0 {
             self.hide();
@@ -250,9 +358,10 @@ impl LayeredWindow {
         };
         self.pos = (x, y, w, h);
         if ok && !self.shown {
+            // shown and placed in one call, so it never appears above a window it must stay under
+            let after = insert_after(self.z).unwrap_or(HWND_TOPMOST);
             unsafe {
-                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-                let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                let _ = SetWindowPos(self.hwnd, Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
             self.shown = true;
         }
@@ -305,6 +414,52 @@ mod tests {
             let mut msg = MSG::default();
             let got = PeekMessageW(&mut msg, None, WM_QUIT, WM_QUIT, PM_REMOVE).as_bool();
             assert!(got && msg.message == WM_QUIT && msg.wParam.0 == 0, "WM_QUIT with code 0 posted");
+        }
+    }
+
+    /// D12 z-order with three hidden windows of the test: `w` stands for the game window, `a` for
+    /// another application's window above it, `o` for an overlay window. Nothing is ever shown
+    /// and the focus never changes (amendment A1): only the z-order of hidden windows moves.
+    #[test]
+    fn z_order_right_above_the_game_window() {
+        register_classes();
+        let mk = || unsafe {
+            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, OVERLAY_CLASS, w!("z test"), WS_POPUP, -32000, -32000, 1, 1, None, None, Some(hinstance()), None)
+                .expect("hidden window")
+        };
+        let (w, a, o) = (mk(), mk(), mk());
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        unsafe {
+            for h in [w, a, o] {
+                assert!(!IsWindowVisible(h).as_bool());
+            }
+        }
+        // creation order puts the newest on top: o, a, w
+        let is_ours = |h: HWND| h == o;
+        let wid = w.0 as isize;
+        assert_eq!(insert_after_with(ZMode::Above(wid), &is_ours), Some(a));
+        assert!(!right_above_with(o, wid, &is_ours));
+        unsafe { SetWindowPos(o, Some(a), 0, 0, 0, 0, flags) }.unwrap();
+        // a, o, w: the overlay is right above the game window, and the anchor skips it
+        assert!(right_above_with(o, wid, &is_ours));
+        assert_eq!(insert_after_with(ZMode::Above(wid), &is_ours), Some(a));
+        // the game window is the highest window that is not topmost: the top of that band
+        unsafe { SetWindowPos(a, Some(HWND_TOPMOST), 0, 0, 0, 0, flags) }.unwrap();
+        assert!(is_topmost(a));
+        let anchor = insert_after_with(ZMode::Above(wid), &is_ours);
+        let above_o = unsafe { GetWindow(o, GW_HWNDPREV) }.unwrap_or_default();
+        if above_o.0.is_null() || is_topmost(above_o) {
+            assert_eq!(anchor, Some(HWND_NOTOPMOST));
+        }
+        assert_eq!(insert_after_with(ZMode::Topmost, &is_ours), Some(HWND_TOPMOST));
+        // the game window is gone
+        unsafe {
+            let _ = DestroyWindow(w);
+        }
+        assert_eq!(insert_after_with(ZMode::Above(wid), &is_ours), None);
+        unsafe {
+            let _ = DestroyWindow(a);
+            let _ = DestroyWindow(o);
         }
     }
 

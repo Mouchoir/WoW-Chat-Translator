@@ -78,6 +78,7 @@ fn real_server_cpu_smoke() {
         text: ChatText::new("wts \u{2}[Linen Cloth]\u{3} x20, anyone know where the bank is?".into()),
         pairs: vec![(ChatText::new("wts".into()), ChatText::new("vend".into()))],
         no_cache: false,
+        urgent: false,
     };
     let t0 = Instant::now();
     h.submit(job(1));

@@ -29,6 +29,11 @@ pub struct Settings {
     pub model: String,
     /// error | warn | info | debug
     pub log_level: String,
+    /// Tray item "Copy translated replies to the clipboard" (on by default, decision D6): the
+    /// Helper copies a reply only when the player allowed it in the game AND this is on.
+    pub reply_clipboard: bool,
+    /// Tray item "Sound when a reply is copied" (`MessageBeep(MB_OK)`, off by default).
+    pub reply_sound: bool,
 }
 
 /// Default translation text colour (native look, 2026-10-18).
@@ -54,6 +59,8 @@ impl Default for Settings {
             runtime_dir: String::new(),
             model: String::new(),
             log_level: "info".into(),
+            reply_clipboard: true,
+            reply_sound: false,
         }
     }
 }
@@ -196,8 +203,23 @@ mod tests {
         let v = serde_json::to_value(Settings::default()).unwrap();
         let expected = serde_json::json!({"version":1,"backend":"auto","gpuMarginMb":1500,"cpuThreads":0,
             "idleUnloadMinutes":10,"keepLoaded":false,"capture":"auto","captureHzActive":30,"hideFromRecordings":false,
-            "textColor":"A8D8FF","fontScale":1.0,"runtimeDir":"","model":"","logLevel":"info"});
+            "textColor":"A8D8FF","fontScale":1.0,"runtimeDir":"","model":"","logLevel":"info",
+            "replyClipboard":true,"replySound":false});
         assert_eq!(v, expected);
+    }
+
+    #[test]
+    fn reply_switches_default_and_round_trip() {
+        // a settings file from before the conversation window gets the defaults (D6: copy on)
+        let old: Settings = serde_json::from_str(r#"{"backend":"cpu"}"#).unwrap();
+        assert!(old.reply_clipboard && !old.reply_sound);
+        let path = temp_file("reply");
+        let s = Settings { reply_clipboard: false, reply_sound: true, ..Settings::default() };
+        s.save(&path).unwrap();
+        let (back, _, fixed) = Settings::load(&path);
+        assert!(fixed.is_empty());
+        assert!(!back.reply_clipboard && back.reply_sound);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

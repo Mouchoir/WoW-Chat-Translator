@@ -125,6 +125,61 @@ fn several_areas_and_an_offset_image() {
     }
 }
 
+/// A crop of `img` to `r` (client coordinates, inside the image): what a capture region of that
+/// rectangle holds.
+fn crop<'a>(img: &tp_bridge::image::Bgra<'a>, r: Rect) -> tp_bridge::image::Bgra<'a> {
+    let (lx, ly) = ((r.x - img.origin_x) as usize, (r.y - img.origin_y) as usize);
+    let start = ly * img.stride as usize + lx * 4;
+    let len = (r.h as usize - 1) * img.stride as usize + r.w as usize * 4;
+    tp_bridge::image::Bgra { px: &img.px[start..start + len], width: r.w as u32, height: r.h as u32, stride: img.stride, origin_x: r.x, origin_y: r.y }
+}
+
+/// Design B.3 H7 and H8: the conversation window's view over a chat frame's view. Each view is
+/// its own capture region with its own tag search; the tags both regions read are kept once, with
+/// the window's reading (scanned first), and that is exactly what a full scan of the window finds.
+#[test]
+fn overlapping_views_keep_each_tag_once() {
+    use std::collections::HashSet;
+    use tp_helper::app::dedup_hits;
+    let mut rng = Rng::new(0xD0D0);
+    let (mut dropped, mut kept_own, mut window_tags) = (0usize, 0usize, 0usize);
+    for i in 0..120 {
+        let opts = PanelOpts { covers: (i % 2) as usize, ..PanelOpts::default() };
+        let p = synth::chat_panel(&mut rng, 40, 60, &opts);
+        let mut cv = Canvas::new(opts.w + 120, opts.h + 140, [10.0, 10.0, 10.0]);
+        cv.blit(&p.canvas);
+        let cap = cv.capture();
+        let img = cap.bgra();
+        let window = p.view;
+        // the chat frame under it is larger on every side
+        let chat = Rect { x: window.x - 30, y: window.y - 40, w: window.w + 60, h: window.h + 80 };
+        let mut full = Vec::new();
+        tags::scan(&img, window, None, &mut full);
+        let (img_w, img_c) = (crop(&img, window), crop(&img, chat));
+        let mut seen = HashSet::new();
+        let mut from_window = Vec::new();
+        TagScanner::new().scan(&img_w, &[window], None, &mut from_window);
+        dedup_hits(&mut from_window, &mut seen);
+        let mut from_chat = Vec::new();
+        TagScanner::new().scan(&img_c, &[chat], None, &mut from_chat);
+        let before = from_chat.len();
+        dedup_hits(&mut from_chat, &mut seen);
+        assert_eq!(sorted(&from_window), sorted(&full), "panel {i}: the window region reads what a full scan reads");
+        let mut all = from_window.clone();
+        all.extend(from_chat.iter().cloned());
+        let keys: Vec<_> = all.iter().map(|h| (h.slot, h.row, h.x0, h.y_top)).collect();
+        let unique: HashSet<_> = keys.iter().copied().collect();
+        assert_eq!(keys.len(), unique.len(), "panel {i}: no tag twice");
+        assert!(from_chat.iter().all(|h| !from_window.iter().any(|w| (w.slot, w.row, w.x0, w.y_top) == (h.slot, h.row, h.x0, h.y_top))));
+        dropped += before - from_chat.len();
+        kept_own += from_chat.len();
+        window_tags += from_window.len();
+    }
+    assert!(window_tags > 100, "the panels hold tags: {window_tags}");
+    assert!(dropped * 10 >= window_tags * 9, "the chat region read the window's tags again: {dropped} of {window_tags} dropped");
+    eprintln!("{window_tags} window tags, {dropped} duplicate readings dropped, {kept_own} kept from the chat region");
+}
+
 type CardKey = (u8, u8, u32, bool, [u8; 3], i32, Vec<(u8, [i32; 4], [i32; 4], Option<([i32; 4], Vec<u8>)>)>, Vec<[i32; 4]>);
 
 fn r4(r: &Rect) -> [i32; 4] {

@@ -26,6 +26,20 @@ pub const USED_KEYS: &[&str] = &[
     "status.lowmem",
     "status.notinstalled",
     "status.overlay_ok",
+    "reply.ready",
+    "reply.ready_cut",
+    "reply.same",
+    "reply.same_not_copied",
+    "reply.nothing",
+    "reply.nothing_not_copied",
+    "reply.not_copied",
+    "reply.off",
+    "reply.changed",
+    "reply.busy",
+    "reply.failed",
+    "reply.missing",
+    "window.missing",
+    "window.failed",
     "toast.bridge_ok",
     "toast.addon_old",
     "toast.helper_old",
@@ -45,6 +59,8 @@ pub const USED_KEYS: &[&str] = &[
     "tray.state.error",
     "tray.unload",
     "tray.open_logs",
+    "tray.copy_replies",
+    "tray.reply_sound",
     "tray.exit",
 ];
 
@@ -158,6 +174,20 @@ mod tests {
             tr_fmt(Lang::En, "toast.bridge_ok", &[("mode", "dense"), ("m", "42"), ("capture", "WGC"), ("hz", "20")]),
             "TranslateProbe Helper: bridge OK (dense, margin 42, WGC 20 Hz)"
         );
+        // the reply card's row 0 (design A.6.4) and the window wording (A.7)
+        assert_eq!(tr(Lang::En, "reply.ready"), "Ready - Ctrl+V to paste");
+        assert_eq!(tr(Lang::En, "reply.ready_cut"), "Ready - Ctrl+V to paste (shortened to 255 bytes)");
+        assert_eq!(tr_fmt(Lang::En, "reply.same", &[("language", language_name(Lang::En, "de"))]), "Already in German - Ctrl+V to paste");
+        assert_eq!(tr(Lang::En, "reply.not_copied"), "Ready (not copied)");
+        assert_eq!(tr(Lang::En, "reply.off"), "Ready (not copied - off in the Helper menu)");
+        assert_eq!(tr(Lang::En, "reply.changed"), "Not copied - you copied something else. Click Translate again");
+        assert_eq!(tr(Lang::En, "reply.busy"), "Not copied - clipboard busy. Click Translate again");
+        assert_eq!(tr(Lang::En, "reply.failed"), "Translation failed - click Translate again");
+        assert_eq!(tr(Lang::En, "reply.missing"), "Not received - click Translate again");
+        assert_eq!(tr(Lang::En, "window.missing"), "Not received - click the bubble");
+        assert_eq!(tr(Lang::En, "window.failed"), "Translation failed - Shift-click the bubble");
+        assert_eq!(tr(Lang::Fr, "reply.ready"), "Prêt - Ctrl+V pour coller");
+        assert_eq!(tr(Lang::En, "tray.copy_replies"), "Copy translated replies to the clipboard");
     }
 
     #[test]
