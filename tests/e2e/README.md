@@ -1,13 +1,13 @@
 # End-to-end rig (no WoW needed)
 
 The rig runs the real addon on the mock client, replays what it draws in a stand-in game window,
-and checks what TranslateProbe Helper finds and draws. Nothing is downloaded, and every chat line
-is synthetic.
+and checks what Translate Companion (`WoWTranslateCompanion.exe`, the Helper; TranslateProbe Helper
+until 2026-10-19) finds and draws. Nothing is downloaded, and every chat line is synthetic.
 
 ```
 scenarios\<name>.lua --make_scenario.js--> out\<name>.json --fakewow--> window + out\*.truth.jsonl
                                                                           |
-                                     TranslateProbeHelper --diag-json --> out\*.diag.jsonl
+                                    WoWTranslateCompanion --diag-json --> out\*.diag.jsonl
                                                                           |
                                                          check.py --> out\*.report.json
 ```
@@ -36,14 +36,17 @@ python -I tests\e2e\run.py --scenario basic --translator llama --helper-arg=--ba
 `tests\e2e\out\` is scratch output and is not committed.
 
 `run.py` starts the Helper as
-`TranslateProbeHelper.exe --wow-class TPFakeWow --translator echo --capture wgc|gdi --no-overlay --no-clipboard --no-tray --diag-json F --log-dir D --exit-after S`
+`WoWTranslateCompanion.exe --wow-class TPFakeWow --translator echo --capture wgc|gdi --no-overlay --no-clipboard --no-tray --diag-json F --log-dir D --exit-after S`
 (`--no-clipboard`: the Helper never touches the clipboard; `--no-overlay` implies it, it is given
-anyway). With a Helper of the user's running, add `--helper-arg=--instance-name=e2e` (the test
-Helper then takes its own single-instance mutex).
+anyway). `--helper EXE` and `--fakewow EXE` take builds from another target folder (for example a
+`CARGO_TARGET_DIR` of one's own while the user's Helper locks `helper\app\target`). With a Helper of
+the user's running (either exe name: they share the mutex), add `--helper-arg=--instance-name=e2e`
+(the test Helper then takes its own single-instance mutex).
 It gives fakewow and the Helper no console window, measures the Helper's CPU time from its process
 handle, and kills anything still running at the end. A final `tasklist` check reports any process
-left over. Exit codes: 0 all passed, 1 a check failed, 2 a run could not start, 3 everything
-deferred.
+it started that is still alive, by process id (since 2026-10-19: it looked for the image names, so
+a Helper the user was running counted as a leftover). Exit codes: 0 all passed, 1 a check failed,
+2 a run could not start, 3 everything deferred.
 
 ## Not disturbing the game (amendment A1)
 
@@ -79,13 +82,23 @@ deferred.
   no strip, no tooltip).
 - **Layers:** an addon window over the chat frames and under the covers (the conversation window
   of the `conv` scenario): opaque rectangles in client px; its visible tag rows join the truth's
-  `plates` (VIEW 200), and its meta data (view rectangle, hidden rows, reply card, lane) goes to a
-  `layers` truth record.
+  `plates` (VIEW 200), and its meta data (view rectangle, hidden rows, reply card, the reply's
+  `lane` and every card's `lanes` as `{slot, rect, revealed}`) goes to a `layers` truth record.
+- **Hint lanes (2026-10-19):** the real addon writes a lane row right after the tagged rows of a
+  clicked line (`|cffffd100` gold, blank until its hint shows 1.5 s after the click, then the hint
+  and a `[Download]` link). fakewow lays it out like any row and writes `lanes` truth records:
+  `{view, slot, rect, inside, revealed, visible, alpha}`, the rect from the tag's x0 to the plate's
+  end over the lane row (`truth::lanes`: the row right after a message's last tagged row whose text
+  starts in the lane's gold). Since the integration review that tagged row may lie above the chat's
+  top (`FrameLayout::above`, never drawn): a lane whose card's rows left the top is still listed,
+  whole (`inside`) or cut by the top. The synthetic window draws its hint 2 px clear of the lane's
+  edges (the addon's smallest margin), so the Helper's 2-row edge test is exercised.
 - **Display curve:** applied last, `out = 255 * clamp((in/255 - 0.5) * contrast + 0.5) ^ (1/gamma)`.
   `--gamma 2.2` brightens, like a higher WoW Gamma setting. Values under 1 darken.
 - **Truth:** JSON Lines, `t` = Unix epoch ms when the frame was painted. The events are `header`,
   `ui`, `strip`, `covers`, `plates`, `sent`, `dropped`, `mark`, `selfcheck`, `end` and `gone`.
   - `plates` items are `{view, slot, row, sess, tag:[x,y,w,h], plate:[x,y,w,h], visible, alpha, covered:[[x,y,w,h]...]}`.
+  - `lanes` items are `{view, slot, rect:[x,y,w,h], inside, revealed, visible, alpha}` (inline cards).
   - Rectangles are the parts visible inside the chat clip rectangle, in client px.
 - **Self-checks** run about once a second while the picture has been stable for 150 ms:
   - `--selfcheck` reads the window back with GDI: BitBlt from the window DC, or PrintWindow
@@ -100,7 +113,7 @@ deferred.
 | Name | What happens |
 |---|---|
 | `basic` | 3 clicks (2, 2 and 5 reserved rows since the 1.35 row factor) |
-| `scroll` | 3 cards, 8 new lines push them up and out, scroll up 4 and 12 messages, back down |
+| `scroll` | 3 cards, 8 new lines push them up and out, scroll up 4 and 12 messages, back down, then 26 new lines push every card out of the top: for a while each card's hint lane is the chat's top line with no row of its card above it (orphan lanes, 2026-10-19) |
 | `fade` | fade shortened to 5 s + 3 s; cards fade and hide; a scroll resets the fade and they come back |
 | `cover` | a tooltip over the right half of a plate, then one over the middle of two rows |
 | `tabs` | a second chat window shows the same lines, then tab switches |
@@ -108,7 +121,7 @@ deferred.
 | `dropped` | the strip is not painted during one request; "Not received" must show; a re-click repairs it |
 | `late_start` | 3 clicks, then the Helper starts at 7 s (no VIEW, no TRANSLATE); "Not received", re-click |
 | `gamma22` | `basic` through Gamma 2.2 (the Helper measures the curve on the strip and undoes it before the tag scan) |
-| `conv` | the conversation window (`E2E.Window`, a synthetic layer with the real tag colours; VIEW 200 first, then the chat frame it overlaps): 3 bubbles over the opaque fill, a reply card with flags 14 and its hint lane, then a scroll that leaves the first bubble half out |
+| `conv` | the conversation window (`E2E.Window`, a synthetic layer with the real tag colours; VIEW 200 first, then the chat frame it overlaps): 3 bubbles over the opaque fill, each with its hint lane (gold hint and blue `[Download]` 1.5 s after the bubble, clear of the lane's edges), a reply card with flags 14 and its hint lane, then a scroll that leaves the first bubble half out |
 
 ## check.py
 
@@ -132,22 +145,35 @@ See the docstring for details.
   the D3D11 device), which is 1-2% of a 15-30 s run, and process times are sampled by the clock
   interrupt, so two identical runs can differ by more than 1%.
 - **fakewow:** fakewow never had the focus.
+- **lanes** (every scenario whose truth has hint lanes, since 2026-10-19: the inline cards' and
+  the window's): at settled captures, every lane that is visible, entirely inside its view, not
+  under a cover and right under a card row that must be shown has its card's lane in the diag
+  within +-2 px with at least 60% of its columns passing; an inline lane with no row of its slot
+  shown right above it (its card's rows left the top of the chat, or only a sliver under 8 px
+  shows) must be among the diag's orphan lanes (the `lanes` list of the `cards` record), counted
+  as `orphan_checks` (the integration review dropped the skip that let such lanes go unchecked);
+  no diag lane, a card's or an orphan, is where the truth has none (a lane painted over the next
+  chat line; an orphan cut by the top lies over the truth lane's visible rows); lane pixels were
+  painted (`lanePx`); every lane revealed after its card was shown had been found before its
+  reveal (the hint never flashes). The hint itself is in fakewow's picture (`revealed`): what a
+  player sees with no Helper.
 - **conv only** (the truth has a window layer): `window_fill` (every background sample of a window
   card within 6 levels of `BUBBLE_RGB`, every window card with at least one sample, since a card
   with none is painted with the navy plate colour; tags painted), `reply_status` (final, clipboard outcome
-  "off", never copied), `lane` (found where the truth has it, at least 60% of its columns passing,
-  painted), `partial_rows` (a half-out bubble's hidden rows never get a band, its visible rows do),
+  "off", never copied), `partial_rows` (a half-out bubble's hidden rows never get a band, its visible rows do),
   `no_duplicate` (one card per slot; a window slot in a chat view only within the strip delay of the
   VIEW that covers it, reported as `strip_delay`), `cpu_vs_i2` (within 10% of the highest CPU
   figures of DESIGN.md I.2).
 
-`--selftest --truth T` builds a perfect diag for a truth file and a copy shifted by 5 px: the
-first must pass and the second must fail. For a truth with a window layer (`conv`) the perfect
-diag also carries what the window checks read (background samples in `BUBBLE_RGB`, the reply bit
-and the outcome "off" on slot 126, the truth's lane, `overlay` and `clip` records), and a third,
-broken diag (window samples in the plate colour or missing) must fail `window_fill` (integration
-review fix: the window checks had never been shown to fail). `--synth-diag OUT [--shift-px N]`
-writes such a diag.
+`--selftest --truth T` builds a perfect diag for a truth file (with the orphan lanes where the
+truth has them) and a copy shifted by 5 px: the first must pass and the second must fail. For a
+truth with a window layer (`conv`) the perfect diag also carries what the window checks read
+(background samples in `BUBBLE_RGB`, the reply bit and the outcome "off" on slot 126, `overlay`
+and `clip` records), and a third, broken diag (window samples in the plate colour or missing) must
+fail `window_fill` (integration review fix: the window checks had never been shown to fail).
+Every card of the perfect diag carries the truth's
+lane; for a truth with lanes, a diag with no lane and one with each lane a row too low (over the
+next chat line) must both fail `lanes`. `--synth-diag OUT [--shift-px N]` writes such a diag.
 
 ## Deviations from the design (amendment A9) and why
 
@@ -193,6 +219,22 @@ writes such a diag.
    a plate on the slot, the row modulo 4 and the y position. With the 1.35 row factor the `basic`
    scenario's long line reserves 5 rows, and its fifth row (tag row 0) first failed `bands` and
    `hidden` in basic, cover, altz and gamma22.
+
+8. **A window plate is expected only once the VIEW rectangle holds it (2026-10-19).** check.py
+   expected a plate as soon as a VIEW with its id was known, but the window's VIEW 200 grows when
+   its reply card shows (the card lies below the previous rectangle), and both come with the same
+   strip: in one `conv` run the strip was decoded 72 ms after fakewow painted the card, so the
+   capture in between, which still scanned with the old rectangle, failed `bands` (3 rows) and
+   `lanes`. `Diag.window_view_since` now also requires the rectangle the Helper scanned with
+   (decoded in an earlier capture) to hold the tag or lane; the same diag then passes.
+
+9. **Lanes at the top of the chat (integration review, 2026-10-19).** check.py skipped every lane
+   without a shown row right above it, and no scenario reached that state, so a hint left visible
+   at the chat's top line went unseen. The `scroll` scenario now pushes every card out of the top,
+   the truth lists a lane whose tagged row is above the chat, and check.py requires the orphan lane
+   in the diag; a first run of the new Helper also showed a 4 px sliver painted for one more line
+   where the truth had no lane any more (the line under the lane): the orphan search now requires
+   the lane's remembered ink, and the truth lists cut lanes, so the false-lane check sees them.
 
 ## What the rig found in the Helper build of 2026-10-16 21:22 (echo, WGC)
 

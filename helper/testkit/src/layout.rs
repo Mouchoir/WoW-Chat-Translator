@@ -183,13 +183,17 @@ pub struct FrameLayout {
     pub frame_id: u8,
     pub clip: IRect,
     pub rows: Vec<PlacedRow>,
+    /// The rows of the topmost message that lie entirely above the clip rectangle (never drawn):
+    /// the truth finds there the tagged row of a hint lane cut by the top of the chat.
+    pub above: Vec<PlacedRow>,
 }
 
 /// Bottom-up layout of a frame's history (oldest first in `entries`), honouring the scroll offset.
-/// `alpha(i)` is the fade of entry i. Only rows that touch the clip rectangle are returned.
+/// `alpha(i)` is the fade of entry i. Only rows that touch the clip rectangle are returned (and,
+/// apart, the rows of the topmost message above it).
 pub fn layout_frame(frame: &FrameState, entries: &[Entry], alpha: &dyn Fn(usize) -> f64, measure: &mut dyn Measure) -> FrameLayout {
     let clip = IRect::new(frame.clip[0], frame.clip[1], frame.clip[2], frame.clip[3]);
-    let mut out = FrameLayout { frame_id: frame.id, clip, rows: Vec::new() };
+    let mut out = FrameLayout { frame_id: frame.id, clip, rows: Vec::new(), above: Vec::new() };
     let scroll = frame.scroll.max(0) as usize;
     if entries.len() <= scroll {
         return out;
@@ -210,6 +214,8 @@ pub fn layout_frame(frame: &FrameState, entries: &[Entry], alpha: &dyn Fn(usize)
         for r in rows {
             if y + r.height > clip.y && y < clip.bottom() {
                 out.rows.push(PlacedRow { y, height: r.height, items: r.items, alpha: a, entry: i });
+            } else if y + r.height <= clip.y {
+                out.above.push(PlacedRow { y, height: r.height, items: r.items, alpha: a, entry: i });
             }
             y += r.height;
         }

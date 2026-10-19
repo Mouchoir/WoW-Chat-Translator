@@ -233,9 +233,14 @@ local function Snapshot()
     end
 end
 
+local RevealDue    -- the synthetic window: a hint lane's 1.5 s are over (defined with the window)
+
 local function Step(frames)
     for _ = 1, frames do
         M.Tick(1)
+        if RevealDue then
+            RevealDue()
+        end
         Snapshot()
     end
 end
@@ -404,18 +409,24 @@ end
 -- A synthetic conversation window (design A.1, A.4 and A.6.4; docs\BRIDGE.md section 8c) drawn by
 -- fakewow as a layer over the chat frames: opaque rectangles in physical px. Its rows are real
 -- protocol tags (Bridge.TagColors) and plates on the opaque bubble fill (Bridge.BUBBLE_RGB), rows
--- touching at the row pitch, a reply card with its hint lane, and per-row visibility (a row not
--- entirely inside the thread is not drawn: the fill shows there). The VIEW (window first, then
--- the chat frame it overlaps) and the TRANSLATE messages go through the addon's own Bridge.Send.
--- The addon's window modules are not used: the rig checks the Helper against the protocol.
+-- touching at the row pitch, a reply card, and per-row visibility (a row not entirely inside the
+-- thread is not drawn: the fill shows there). Every bubble and the reply card have a hint lane
+-- (user request U1, 2026-10-19; the addon's Bubble.lua): one more row of fill under the last row,
+-- the hint in gold from the plate's x and a [Download] in the links' blue, clear of the lane's top
+-- and bottom 2 px, drawn LANE_DELAY seconds after the card appeared and only while the lane and the
+-- card's last row are entirely inside the thread. The VIEW (window first, then the chat frame it
+-- overlaps) and the TRANSLATE messages go through the addon's own Bridge.Send. The addon's window
+-- modules are not used: the rig checks the Helper against the protocol.
 local WIN = {
     x = 126, y = 214, w = 620, h = 640,                -- the frame (px)
     threadTop = 320, threadBottom = 700,
     colX = 150, bw = 540, pad = 6, rowPx = 23, fontPx = 20, block = 6,
     cardGap = 8,
     border = { 150, 120, 70 }, frameBg = { 22, 20, 18 }, header = { 34, 30, 26 }, threadBg = { 12, 12, 12 },
-    composer = { 40, 36, 30 }, hint = { 150, 150, 150 },
+    composer = { 40, 36, 30 },
+    hint = { 255, 209, 0 }, link = { 102, 187, 255 },  -- NORMAL_FONT_COLOR's gold, the links' 66bbff
 }
+local LANE_DELAY = 1.5    -- seconds before a lane's hint shows (the addon's Bubble.LANE_DELAY)
 local win = nil       -- { bubbles, scroll, reply, reqs }
 local winReq = 900    -- reqIds of the synthetic window's requests (the addon's own start at 1)
 
@@ -453,27 +464,58 @@ local function ViewRect()
     return { WIN.colX, WIN.threadTop, WIN.bw, bottom - WIN.threadTop }
 end
 
-local function DrawWindow()
-    local rects, items, hidden = Array(), Array(), Array()
+-- The hint lane at (x0, ly) of a card whose plate ends at x1: the glyphs of the hint and of the
+-- [Download] link once revealed, 2 px clear of the lane's top and bottom (the addon's smallest
+-- margin: 2 units and 2 physical px at least), so the Helper's 2-row edge test is exercised.
+local function Lane(rects, x0, x1, ly, revealed)
+    if not revealed then
+        return
+    end
+    local lx0 = x0 + 8 * WIN.block
+    for gx = lx0 + 2, math.min(lx0 + 300, x1 - 90), 9 do
+        rects[#rects + 1] = Rect7(gx, ly + 2, 5, WIN.rowPx - 4, WIN.hint)
+    end
+    for gx = math.min(lx0 + 310, x1 - 80), x1 - 12, 8 do
+        rects[#rects + 1] = Rect7(gx, ly + 2, 4, WIN.rowPx - 4, WIN.link)
+    end
+end
+
+local function Revealed(at)
+    return at ~= nil and M.Now() >= at
+end
+
+local DrawWindow
+
+function DrawWindow()
+    local rects, items, hidden, lanes = Array(), Array(), Array(), Array()
     local B = ns.Bridge.BUBBLE_RGB
     rects[#rects + 1] = Rect7(WIN.x - 3, WIN.y - 3, WIN.w + 6, WIN.h + 6, WIN.border)
     rects[#rects + 1] = Rect7(WIN.x, WIN.y, WIN.w, WIN.h, WIN.frameBg)
     rects[#rects + 1] = Rect7(WIN.x, WIN.y, WIN.w, 90, WIN.header)
     rects[#rects + 1] = Rect7(WIN.x + 12, WIN.threadTop, WIN.w - 24, WIN.threadBottom - WIN.threadTop, WIN.threadBg)
     local y = WIN.threadTop + 10 - win.scroll
+    local x0, x1 = WIN.colX + WIN.pad, WIN.colX + WIN.bw - WIN.pad
     for _, b in ipairs(win.bubbles) do
-        local h = 2 * WIN.pad + b.rows * WIN.rowPx
+        local h = 2 * WIN.pad + (b.rows + 1) * WIN.rowPx    -- rows, the lane, the padding
         local top, bot = math.max(y, WIN.threadTop), math.min(y + h, WIN.threadBottom)
         if bot > top then
             rects[#rects + 1] = Rect7(WIN.colX, top, WIN.bw, bot - top, B)
         end
+        local lastShown = false
         for r = 0, b.rows - 1 do
             local ry = y + WIN.pad + r * WIN.rowPx
             if ry >= WIN.threadTop and ry + WIN.rowPx <= WIN.threadBottom then
-                Row(rects, items, WIN.colX + WIN.pad, ry, b.slot, r)
+                Row(rects, items, x0, ry, b.slot, r)
+                lastShown = r == b.rows - 1
             else
                 hidden[#hidden + 1] = Array({ b.slot, r })
             end
+        end
+        local ly = y + WIN.pad + b.rows * WIN.rowPx
+        if lastShown and ly + WIN.rowPx <= WIN.threadBottom then
+            local revealed = Revealed(b.revealAt)
+            Lane(rects, x0, x1, ly, revealed)
+            lanes[#lanes + 1] = { slot = b.slot, rect = Array({ x0, ly, x1 - x0, WIN.rowPx }), revealed = revealed }
         end
         y = y + h + 14
     end
@@ -483,21 +525,40 @@ local function DrawWindow()
         card = Array({ WIN.colX, top, WIN.bw, CardHeight(k) })
         rects[#rects + 1] = Rect7(WIN.colX, top, WIN.bw, CardHeight(k), B)
         for r = 0, k - 1 do
-            Row(rects, items, WIN.colX + WIN.pad, top + WIN.pad + r * WIN.rowPx, 126, r)
+            Row(rects, items, x0, top + WIN.pad + r * WIN.rowPx, 126, r)
         end
         -- the lane: one row of fill, the hint's glyphs from the plate's x, clear of its top and
         -- bottom 2 px
         local ly = top + WIN.pad + k * WIN.rowPx
-        local lx0 = WIN.colX + WIN.pad + 8 * WIN.block
-        lane = Array({ WIN.colX + WIN.pad, ly, WIN.bw - 2 * WIN.pad, WIN.rowPx })
-        for gx = lx0 + 2, lx0 + 300, 9 do
-            rects[#rects + 1] = Rect7(gx, ly + 4, 5, WIN.rowPx - 8, WIN.hint)
-        end
+        lane = Array({ x0, ly, x1 - x0, WIN.rowPx })
+        local revealed = Revealed(win.reply.revealAt)
+        Lane(rects, x0, x1, ly, revealed)
+        lanes[#lanes + 1] = { slot = 126, rect = lane, revealed = revealed }
         rects[#rects + 1] = Rect7(WIN.x + 12, top + CardHeight(k) + 8, WIN.w - 24, 30, WIN.composer)
     end
     Add({ layer = { id = 1, on = true, rects = rects, items = items, meta = { view = Array(ViewRect()), scroll = win.scroll,
-        hidden = hidden, card = card, lane = lane, replySlot = win.reply and 126 or nil,
+        hidden = hidden, card = card, lane = lane, lanes = lanes, replySlot = win.reply and 126 or nil,
         bubble = Array(ns.Bridge.BUBBLE_RGB) } } })
+end
+
+-- A lane whose LANE_DELAY is over gets its hint: the window is drawn again (once per reveal).
+function RevealDue()
+    if not win then
+        return
+    end
+    local due = false
+    for _, b in ipairs(win.bubbles) do
+        if b.revealAt and not b.revealDrawn and M.Now() >= b.revealAt then
+            b.revealDrawn, due = true, true
+        end
+    end
+    local r = win.reply
+    if r and r.revealAt and not r.revealDrawn and M.Now() >= r.revealAt then
+        r.revealDrawn, due = true, true
+    end
+    if due then
+        DrawWindow()
+    end
 end
 
 -- VIEW: the window first (VIEW id 200), then the chat frame it overlaps (the addon's Reserve.View
@@ -528,6 +589,9 @@ end
 -- o.bubbles = { { slot (100..125), rows (1..6), text }, ... }: the incoming bubbles, top first.
 function E.Window(o)
     win = { bubbles = o.bubbles or {}, scroll = o.scroll or 0, reply = nil }
+    for _, b in ipairs(win.bubbles) do
+        b.revealAt = M.Now() + LANE_DELAY
+    end
     SendView()
     -- each TRANSLATE is queued before the bubble's rows are shown (design A.3 step 4)
     for _, b in ipairs(win.bubbles) do
@@ -541,7 +605,7 @@ end
 -- The reply card: TRANSLATE slot 126, rows = 1 + text rows, flags plate|reply (+copy).
 function E.WindowReply(o)
     assert(win, "E2E.WindowReply needs E2E.Window first")
-    win.reply = { rows = o.rows or 3 }
+    win.reply = { rows = o.rows or 3, revealAt = M.Now() + LANE_DELAY }
     local flags = ns.Bridge.FLAG_PLATE + ns.Bridge.FLAG_REPLY + (o.copy == false and 0 or ns.Bridge.FLAG_COPY)
     SendView()
     local req = Translate(126, win.reply.rows, flags, o.target or "de", o.text)

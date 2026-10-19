@@ -1,5 +1,8 @@
 """Runs TranslateProbe E2E scenarios: make_scenario.js, fakewow, the Helper, then check.py.
 
+The Helper is Translate Companion, WoWTranslateCompanion.exe (TranslateProbeHelper.exe until
+2026-10-19); --helper takes any build of it, for example one from another CARGO_TARGET_DIR.
+
     python -I tests/e2e/run.py --scenario basic [--capture wgc|gdi] [--translator echo|llama]
     python -I tests/e2e/run.py --all [--capture wgc|gdi] [--translator echo]
   options: [--helper EXE] [--fakewow EXE] [--out DIR] [--fakewow-selfcheck] [--done-within-s 5]
@@ -13,8 +16,9 @@ so nothing covers the game. GDI mode reads the screen, so fakewow must be visibl
 when no WoW client is running and is reported as deferred otherwise (amendment A1).
 
 Every process started here is waited for or killed before the script returns, and a final
-tasklist check reports any fakewow or Helper process still alive. Exit code: 0 all passed,
-1 a check failed, 2 a run could not start, 3 deferred (nothing failed).
+tasklist check reports any of them still alive, by process id (a Translate Companion the user is
+running, under either exe name, is not ours and is never reported or touched). Exit code: 0 all
+passed, 1 a check failed, 2 a run could not start, 3 deferred (nothing failed).
 """
 import argparse
 import ctypes
@@ -29,10 +33,18 @@ REPO = HERE.parent.parent
 SCENARIOS = ["basic", "scroll", "fade", "cover", "tabs", "altz", "dropped", "late_start", "gamma22", "conv"]
 GAME_EXES = ["WowB.exe", "Wow.exe", "WowClassic.exe", "WowT.exe"]
 CREATE_NO_WINDOW = 0x08000000
+# (pid, image name) of every process this script started
+STARTED = []
 
 
 def running(image):
     out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {image}", "/NH", "/FO", "CSV"],
+                         capture_output=True, text=True, creationflags=CREATE_NO_WINDOW).stdout
+    return f'"{image.lower()}"' in out.lower()
+
+
+def pid_running(pid, image):
+    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
                          capture_output=True, text=True, creationflags=CREATE_NO_WINDOW).stdout
     return f'"{image.lower()}"' in out.lower()
 
@@ -105,6 +117,7 @@ def run_one(name, a, out):
     fw_out = open(out / f"{tag}.fakewow.json", "w", encoding="utf-8")
     try:
         fw = subprocess.Popen(fw_cmd, stdout=fw_out, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
+        STARTED.append((fw.pid, Path(a.fakewow).name))
         header = wait_header(truth, 15)
         if header is None:
             result.update(status="error", why="fakewow wrote no truth header", detail=fw.stderr.read().decode()[-400:]
@@ -122,6 +135,7 @@ def run_one(name, a, out):
         t_h = time.time()
         helper = subprocess.Popen(h_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   creationflags=CREATE_NO_WINDOW)
+        STARTED.append((helper.pid, Path(a.helper).name))
         try:
             helper.wait(exit_after + 20)
         except subprocess.TimeoutExpired:
@@ -166,7 +180,7 @@ def main():
     g.add_argument("--all", action="store_true")
     ap.add_argument("--capture", choices=["wgc", "gdi"], default="wgc")
     ap.add_argument("--translator", choices=["echo", "llama"], default="echo")
-    ap.add_argument("--helper", default=str(REPO / "helper" / "app" / "target" / "release" / "TranslateProbeHelper.exe"))
+    ap.add_argument("--helper", default=str(REPO / "helper" / "app" / "target" / "release" / "WoWTranslateCompanion.exe"))
     ap.add_argument("--fakewow", default=str(REPO / "helper" / "testkit" / "target" / "release" / "fakewow.exe"))
     ap.add_argument("--out", default=str(HERE / "out"))
     ap.add_argument("--fakewow-selfcheck", action="store_true")
@@ -183,7 +197,7 @@ def main():
     results = [run_one(n, a, out) for n in (SCENARIOS if a.all else [a.scenario])]
     for r in results:
         print(json.dumps(r))
-    leftovers = [x for x in ("fakewow.exe", "TranslateProbeHelper.exe") if running(x)]
+    leftovers = [f"{image} (pid {pid})" for pid, image in STARTED if pid_running(pid, image)]
     statuses = {r["status"] for r in results}
     print(json.dumps({"summary": {s: sum(1 for r in results if r["status"] == s) for s in sorted(statuses)},
                       "leftover_processes": leftovers}))
