@@ -118,7 +118,7 @@ end
 ---------------------------------------------------------------------------------------------
 section("links: the colour of each link name in the marks (L3, addon build 5)")
 do
-    check(ns.ADDON_BUILD == 5, "addon build 5 (an older Translate Companion says it is older than the addon)")
+    check(ns.ADDON_BUILD >= 5, "addon build 5 or later (an older Translate Companion says it is older than the addon)")
     check(Bridge.MarkSpan("[x]", "0070dd") == "\2\0040070DD[x]\3" and Bridge.MarkSpan("{skull}") == "\2{skull}\3"
         and Bridge.MarkSpan("[x]", "zzzzzz") == "\2[x]\3" and Bridge.MarkSpan("[x]", "0070D") == "\2[x]\3"
         and Bridge.MarkSpan("a\2b\3c\4d", "FFD100") == "\2\4FFD100abcd\3" and Bridge.MarkSpan("") == ""
@@ -251,8 +251,8 @@ do
     check(buttons[1].entry.text == ITEM and buttons[1].entry.link == ITEM_DATA and buttons[4].entry.link == PIN_DATA,
         "each button holds the whole link (colour, |H...|h...|h, |r) and its data")
     check(buttons[1]:GetFontString().fontObject == Bubble.Font(), "the window font")
-    -- geometry: the rows, the tags, the plates and the lane where they are without a bar; the bar
-    -- under the lane, from the tag's x0 to the plate's end, inside the fill
+    -- geometry: the rows, the tags and the plates where they are without a bar; the bar right under
+    -- the last row (no hint lane since build 6), from the tag's x0 to the plate's end, inside the fill
     local K = msg.K
     local eff = b.box:GetEffectiveScale()
     local bl, bb, _, bh = b.box:GetScaledRect()
@@ -262,10 +262,11 @@ do
     local rowTop0 = b.rowTop0
     check(math.abs(rowTop0 - m.inset) < 1 and math.abs((boxTop - (p1b + p1h)) / eff - rowTop0) < 1e-6
         and math.abs((tl - bl) / eff - m.inset) < 1e-6, "row 0 and its tag at the inset, as without links")
-    check(math.abs(b.laneTop - (rowTop0 + K * m.rowH)) < 1e-6, "the lane right under row K")
+    check(b.laneTop == nil and b.lane == nil, "no hint lane under the rows")
     local gap = Bubble.BarGap(m)
     check(gap == math.max(4, 4 / m.ppu) and gap * m.ppu >= 4 - 1e-9, "the bar's gap: 4 units, 4 px at least")
-    local laneBottomPx = (boxTop - (b.laneTop + m.rowH) * eff) * k
+    local _, pkb = b.rowsList[K].plate:GetScaledRect()
+    local lastRowBottomPx = pkb * k
     local barTopPx = -math.huge
     local left, right, bottom = math.huge, -math.huge, math.huge
     for _, btn in ipairs(buttons) do
@@ -273,8 +274,8 @@ do
         barTopPx = math.max(barTopPx, (bt + h) * k)
         left, right, bottom = math.min(left, l), math.max(right, l + w), math.min(bottom, bt)
     end
-    check(laneBottomPx - barTopPx >= 4 - 1e-6 and math.abs((laneBottomPx - barTopPx) / k / eff - gap) < 1e-6,
-        "the bar starts its gap under the lane's bottom (the Helper's lane search, +-2 px, never reaches it)")
+    check(lastRowBottomPx - barTopPx >= 4 - 1e-6 and math.abs((lastRowBottomPx - barTopPx) / k / eff - gap) < 1e-6,
+        "the bar starts its gap right under the last row's bottom (the Helper's 3 px of fill, and one more)")
     local plateEnd = bl + (m.inset + 8 * m.W + m.plateWidth) * eff
     check(math.abs(left - (bl + m.inset * eff)) < 1e-6 and right <= plateEnd + 1e-6,
         "the bar runs from the tag's x0 to the plate's end")
@@ -282,10 +283,10 @@ do
     local _, b4, _, h4 = buttons[4]:GetScaledRect()
     local _, b1, _, h1 = buttons[1]:GetScaledRect()
     check(math.abs(((b1 + h1) - (b4 + h4)) / eff - m.rowH) < 1e-6, "lines rowH apart")
-    check(math.abs(bh / eff - (2 * m.inset + (K + 1) * m.rowH + gap + b.barH)) < 1,
-        "the bubble: inset, K rows, the lane, the gap, the bar, inset")
+    check(math.abs(bh / eff - (2 * m.inset + K * m.rowH + gap + b.barH)) < 1,
+        "the bubble: inset, K rows, the gap, the bar, inset (compact)")
     check(bottom - bb >= (m.inset - 1) * eff, "the bar inside the fill, clear of the border art")
-    -- the same bubble without its bar: every tag, plate and the lane's hint at the same place
+    -- the same bubble without its bar: every tag and plate at the same place
     local function Places(x)
         local _, xb, _, xh = x.box:GetScaledRect()
         local top, out = xb + xh, {}
@@ -298,8 +299,6 @@ do
             local pl0, pb0, pw0 = row.plate:GetScaledRect()
             out[#out + 1] = string.format("%.6f,%.6f,%.6f", pl0, top - pb0, pw0)
         end
-        local hl0, hb0 = x.lane:GetScaledRect()
-        out[#out + 1] = string.format("%.6f,%.6f", hl0, top - hb0)
         return table.concat(out, ";")
     end
     local withBar = Places(b)
@@ -309,23 +308,23 @@ do
     local withoutBar = Places(bare)
     local _, _, _, bareH = bare.box:GetScaledRect()
     check(withBar == withoutBar and #Shown(bare.linkButtons) == 0,
-        "tags, plates and the lane: the same places with and without the bar")
+        "tags and plates: the same places with and without the bar")
     check(math.abs((bh - bareH) / eff - (gap + 2 * m.rowH)) < 1, "the bar adds its gap and its lines, nothing else")
     msg.links = nil
     ConvFrame.Relayout()
     b = ConvFrame.BubbleOf(msg)
-    -- a message without links: no bar, the bubble one row taller than its rows (as before)
+    -- a message without links: no bar, the bubble is its rows and the fill around them
     local id2 = Line("CHAT_MSG_CHANNEL", "Nothing to link in this line at all", "Links-Bar", guid)
     M.Click(H.ButtonOf(id2), ChatFrame1)
     local msg2 = conv.msgs[2]
     local b2 = ConvFrame.BubbleOf(msg2)
     local _, _, _, bh2 = b2.box:GetScaledRect()
     check(#Shown(b2.linkButtons) == 0 and b2.barH == 0 and math.abs(bh2 / b2.box:GetEffectiveScale()
-        - (2 * m.inset + (msg2.K + 1) * m.rowH)) < 1, "no links: no bar, the bubble as before")
-    -- the lane still shows 1.5 s after the rows, with the bar under it
+        - (2 * m.inset + msg2.K * m.rowH)) < 1, "no links: no bar, the bubble is inset, K rows, inset")
+    -- 1.5 s later nothing changed (no delayed hint any more)
     M.Tick(91)
     b = ConvFrame.BubbleOf(msg)
-    check(b.lane:IsShown() and b.laneButton:IsShown() and #Shown(b.linkButtons) == 5, "the lane's hint shows, the bar stays")
+    check(#Shown(b.linkButtons) == 5 and b.lane == nil, "the bar stays, nothing shows up under the rows later")
     -- clicks: the chat's handling (SetItemRef), Shift inserts the link, Ctrl dresses up, nothing for the bubble
     buttons = Shown(b.linkButtons)
     M.ClearLinkCalls()

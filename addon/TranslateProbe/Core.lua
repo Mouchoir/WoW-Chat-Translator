@@ -7,23 +7,26 @@ local addonName, ns = ...
 local L = ns.L
 
 ns.name = addonName
-ns.VERSION = "0.6.0"                        -- keep in step with the TOC
+ns.VERSION = "0.7.0"                        -- keep in step with the TOC
 -- Where Translate Companion (the Windows app, WoWTranslateCompanion.exe) is downloaded: the one
--- copy of the URL on the addon side (the dialog of CompanionDialog.lua and /tpr app show it).
+-- copy of the URL on the addon side (the popup of CompanionDialog.lua and /tpr app show it).
 ns.COMPANION_URL = "https://github.com/Mouchoir/WoW-Chat-Translator/releases"
-ns.ADDON_BUILD = 5                          -- STATUS.addonBuild, bump on protocol-visible changes
+ns.ADDON_BUILD = 6                          -- STATUS.addonBuild, bump on protocol-visible changes
                                             -- (2: TRANSLATE rows 1..6, 2026-10-18; 3: TRANSLATE
                                             -- reply and copy flags, 2026-10-19; 4: a hint lane
                                             -- under every card, 2026-10-19, which Translate
                                             -- Companion 0.4.0 covers: an older one shows "older
                                             -- than the addon"; 5: the link colours, a COLOURS
-                                            -- message right before the TRANSLATE, 2026-10-19)
+                                            -- message right before the TRANSLATE, 2026-10-19;
+                                            -- 6: no hint lane any more, slot 125 is the presence
+                                            -- card of the Translate Companion popup, VIEW 201,
+                                            -- 2026-10-19)
 ns.sessionId = math.random(1, 65535)        -- u16 for the bridge, new on every UI load
 ns.session = tostring(ns.sessionId)         -- string used in links (link clicks compare strings)
 ns.inits = {}
 
 local KEEP = {
-    schema = true, target = true, names = true, glossShow = true, mode = true, glossary = true, helpShown = true,
+    schema = true, target = true, names = true, glossShow = true, mode = true, glossary = true,
     -- conversation window and reply settings (docs\ADDON.md, "Settings of the conversation window")
     display = true, follow = true, replyClipboard = true, convOriginal = true, convText = true, convScale = true,
     convCombat = true, convFocus = true, convOpenWhisper = true, convPos = true, convTipShown = true,
@@ -168,9 +171,6 @@ local function Purge(db)
     db.convPos = CleanPos(db.convPos)
     if type(db.convTipShown) ~= "boolean" then
         db.convTipShown = nil
-    end
-    if type(db.helpShown) ~= "boolean" then
-        db.helpShown = nil
     end
     local glossary = type(db.glossary) == "table" and db.glossary or {}
     local keyPattern = "^" .. ns.Glossary.KEY_PATTERN .. "$"

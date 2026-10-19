@@ -44,7 +44,7 @@ local en = {
     CONV_BUBBLE_HINT_CLICK = "Click: translate again (more lines if cut).",
     CONV_BUBBLE_HINT_SHIFT = "Shift-click: without the cache. Right-click: more.",
     CONV_BUBBLE_HINT_PLAIN = "Click Translate to translate this message.",
-    CONV_HELPER_TIP = "Coloured blocks? Translate Companion is not running.",
+    CONV_HELPER_TIP = "Nothing painted? Translate Companion may be closed.",
     -- the links of a message (the links bar under a bubble, its Original text): the tooltip of a
     -- link the client has no tooltip for
     CONV_LINK_TIP_CLICK = "Click: open it, as in the chat.",
@@ -65,12 +65,6 @@ local en = {
     CONV_YOUR_TEXT = "Your text:",
     CONV_EDIT = "Edit",
     CONV_CANCEL_TIP = "Cancel this reply",
-    CONV_LANE_HINT = "No status above? Start Translate Companion.",
-    -- the hint lane under an incoming bubble's rows (user request U1), its short form when the
-    -- bubble is too narrow, and the button that opens the Translate Companion dialog
-    CONV_LANE_IN = "No translation above? Start Translate Companion.",
-    CONV_LANE_SHORT = "Start Translate Companion.",
-    CONV_DOWNLOAD = "Download",
     CONV_CLEARED = "conversations cleared.",
 
     CONV_BINDING_HEADER = "TranslateProbe",
@@ -115,7 +109,7 @@ local frFR = {
     CONV_BUBBLE_HINT_CLICK = "Clic : retraduire (plus de lignes si c'est coupé).",
     CONV_BUBBLE_HINT_SHIFT = "Maj-clic : sans le cache. Clic droit : plus de choix.",
     CONV_BUBBLE_HINT_PLAIN = "Cliquez sur Traduire pour traduire ce message.",
-    CONV_HELPER_TIP = "Des blocs de couleur ? Translate Companion n'est pas lancé.",
+    CONV_HELPER_TIP = "Rien d'affiché ? Translate Companion est peut-être fermé.",
     CONV_LINK_TIP_CLICK = "Clic : l'ouvrir, comme dans le chat.",
     CONV_LINK_TIP_SHIFT = "Maj-clic : l'ajouter à votre message.",
     CONV_MENU_RETRANSLATE = "Retraduire",
@@ -134,10 +128,6 @@ local frFR = {
     CONV_YOUR_TEXT = "Votre texte :",
     CONV_EDIT = "Modifier",
     CONV_CANCEL_TIP = "Annuler cette réponse",
-    CONV_LANE_HINT = "Pas d'état au-dessus ? Lancez Translate Companion.",
-    CONV_LANE_IN = "Pas de traduction au-dessus ? Lancez Translate Companion.",
-    CONV_LANE_SHORT = "Lancez Translate Companion.",
-    CONV_DOWNLOAD = "Télécharger",
     CONV_CLEARED = "conversations effacées.",
 
     CONV_BINDING_TOGGLE = "Afficher/cacher la fenêtre de conversation",

@@ -1,5 +1,5 @@
 -- User-visible strings. English is the base table; other locales override keys they translate.
--- Strings shown inside chat links (SUFFIX_*, NAME_LINE, TR_DEFERRED, LANE_*) must never contain a "|".
+-- Strings shown inside chat links (SUFFIX_*, NAME_LINE, TR_DEFERRED) must never contain a "|".
 -- The Windows app is "Translate Companion" in every user string (the addon keeps its name).
 local _, ns = ...
 
@@ -28,13 +28,17 @@ local L = {
     HELP_DEBUG = "/tpr debug - counters of this session",
     HELP_CLICK = "Click [T] after a player message to translate it: Translate Companion draws the translation under the line. Shift-click: translate again. Click the translation to hide it.",
 
-    FIRST_USE = "Translations are drawn by the Translate Companion app. Start it any time, no /reload needed. Check the setup with /tpr test.",
     TIP_T = "Translate this line (needs Translate Companion). Shift-click: translate again.",
     APP_1 = "Translate Companion is a Windows app that translates chat lines with an AI model running on this PC, and draws the translation under the line.",
     APP_2 = "Start it beside WoW, before or after a click: no /reload is needed. WoW must run in a window or in windowed fullscreen.",
     APP_3 = "On each click a thin strip of coloured dots flickers for about half a second in the top-left corner: that is how the addon talks to Translate Companion.",
     APP_4 = "Type /tpr test to check the setup.",
     APP_DOWNLOAD = "Not installed? Download it from %s",
+    -- what the status file said when the game loaded the addon (Presence.lua)
+    APP_STATUS_RUNNING = "Translate Companion%s was running when the game loaded the addon.",
+    APP_STATUS_INSTALLED = "Translate Companion is installed, but it was not running when the game loaded the addon.",
+    APP_STATUS_ABSENT = "Translate Companion was not seen when the game loaded the addon (not installed, or not started yet).",
+    APP_STATUS_CONFIRMED = "A [T] click opens the translation at once in this session.",
 
     SUFFIX_GLOSS = "Glossary: ",
     SUFFIX_NO_GLOSS = "Glossary: no known abbreviation",
@@ -42,17 +46,16 @@ local L = {
     OLD_SESSION = "this line comes from before the last /reload.",
     TR_DEFERRED = "Waiting for the end of the restriction...",
     NAME_LINE = "Name: %s",
-    -- the hint lane under the reserved rows (user request U1): seen only when nothing paints over it
-    LANE_HINT = "No translation above? Start Translate Companion.",
-    LANE_HINT_SHORT = "Start Translate Companion.",
-    LANE_DOWNLOAD = "Download",
 
-    -- the Translate Companion dialog (CompanionDialog.lua; a dialog, so its French says "vous")
+    -- the Translate Companion popup (CompanionDialog.lua; a dialog, so its French says "vous")
     COMPANION_TITLE = "Translate Companion",
-    COMPANION_NOT_RUNNING = "Translate Companion is not running. Start it on your computer.",
-    COMPANION_DOWNLOAD = "Not installed? Download it from:",
+    COMPANION_TEXT_ABSENT = "Translate Companion is not installed or not running. Start it on your computer, then click Continue. Not installed? Download it.",
+    COMPANION_TEXT_INSTALLED = "Translate Companion is installed but not running. Start it on your computer, then click Continue.",
+    COMPANION_CARD_CAPTION = "Once Translate Companion runs, it says so on the bar above.",
+    COMPANION_BTN_CONTINUE = "Continue",
+    COMPANION_BTN_DOWNLOAD = "Download",
+    COMPANION_BTN_CANCEL = "Cancel",
     COMPANION_COPY_HINT = "Press Ctrl+C to copy the link, then paste it in your web browser.",
-    COMPANION_CLOSE = "Close",
 
     OPTIONS_NA = "the options panel is not available on this client: use the commands below.",
     OPT_TARGET = "Target language",
@@ -174,13 +177,16 @@ local frFR = {
     HELP_DEBUG = "/tpr debug - compteurs de cette session",
     HELP_CLICK = "Clique sur [T] après un message de joueur pour le traduire : Translate Companion dessine la traduction sous la ligne. Maj-clic : retraduire. Clique sur la traduction pour la cacher.",
 
-    FIRST_USE = "Les traductions sont dessinées par l'application Translate Companion. Lance-la quand tu veux, sans /reload. Vérifie l'installation avec /tpr test.",
     TIP_T = "Traduire cette ligne (il faut Translate Companion). Maj-clic : retraduire.",
     APP_1 = "Translate Companion est une application Windows qui traduit les lignes du chat avec un modèle d'IA qui tourne sur ce PC, et dessine la traduction sous la ligne.",
     APP_2 = "Lance-la à côté de WoW, avant ou après un clic : pas besoin de /reload. WoW doit tourner en fenêtre ou en plein écran fenêtré.",
     APP_3 = "À chaque clic, une fine bande de points colorés clignote environ une demi-seconde dans le coin en haut à gauche : c'est ainsi que l'addon parle à Translate Companion.",
     APP_4 = "Tape /tpr test pour vérifier l'installation.",
     APP_DOWNLOAD = "Pas encore installé ? Télécharge-le ici : %s",
+    APP_STATUS_RUNNING = "Translate Companion%s tournait quand le jeu a chargé l'addon.",
+    APP_STATUS_INSTALLED = "Translate Companion est installé, mais il ne tournait pas quand le jeu a chargé l'addon.",
+    APP_STATUS_ABSENT = "Translate Companion n'a pas été vu quand le jeu a chargé l'addon (pas installé, ou pas encore lancé).",
+    APP_STATUS_CONFIRMED = "Un clic sur [T] ouvre la traduction tout de suite pendant cette session.",
 
     SUFFIX_GLOSS = "Lexique : ",
     SUFFIX_NO_GLOSS = "Lexique : aucun sigle connu",
@@ -188,15 +194,15 @@ local frFR = {
     OLD_SESSION = "cette ligne date d'avant le dernier /reload.",
     TR_DEFERRED = "En attente de la fin de la restriction...",
     NAME_LINE = "Nom : %s",
-    LANE_HINT = "Pas de traduction au-dessus ? Lance Translate Companion.",
-    LANE_HINT_SHORT = "Lance Translate Companion.",
-    LANE_DOWNLOAD = "Télécharger",
 
     COMPANION_TITLE = "Translate Companion",
-    COMPANION_NOT_RUNNING = "Translate Companion n'est pas lancé. Lancez-le sur votre ordinateur.",
-    COMPANION_DOWNLOAD = "Pas encore installé ? Téléchargez-le ici :",
+    COMPANION_TEXT_ABSENT = "Translate Companion n'est pas installé ou n'est pas lancé. Lancez-le sur votre ordinateur, puis cliquez sur Continuer. Pas installé ? Téléchargez-le.",
+    COMPANION_TEXT_INSTALLED = "Translate Companion est installé mais n'est pas lancé. Lancez-le sur votre ordinateur, puis cliquez sur Continuer.",
+    COMPANION_CARD_CAPTION = "Dès que Translate Companion tourne, il l'indique sur la barre ci-dessus.",
+    COMPANION_BTN_CONTINUE = "Continuer",
+    COMPANION_BTN_DOWNLOAD = "Télécharger",
+    COMPANION_BTN_CANCEL = "Annuler",
     COMPANION_COPY_HINT = "Appuyez sur Ctrl+C pour copier le lien, puis collez-le dans votre navigateur.",
-    COMPANION_CLOSE = "Fermer",
 
     OPTIONS_NA = "le panneau d'options n'est pas disponible sur ce client : utilise les commandes ci-dessous.",
     OPT_TARGET = "Langue cible",

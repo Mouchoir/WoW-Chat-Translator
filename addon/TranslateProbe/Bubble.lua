@@ -9,16 +9,15 @@
 -- the original drawn by the addon and a Translate button instead of rows.
 -- My bubble: right-aligned, the sent text drawn by the addon (white, the window font), the
 -- mirrored tail, "You wrote: ..." under it when the draft differs, and a meta line with the state.
--- The reply card: the same art without a tail; "Your text: ..." with Edit and cancel buttons, the
--- reply's rows (row 0 = the Helper's status), and the lane under the last row: one row of fill
--- with a hint the Helper covers when it paints the card (docs\BRIDGE.md section 8c).
--- Incoming bubbles have the same lane under their rows (user request U1): "No translation above?
--- Start Translate Companion." and a [Download] button that opens the Translate Companion dialog,
--- shown 1.5 s after the lane became visible for the card's request (see "the hint lane" below).
+-- The reply card: the same art without a tail; "Your text: ..." with Edit and cancel buttons and
+-- the reply's rows (row 0 = the Helper's status).
+-- Bubbles are compact (user request of 2026-10-19): the box is the rows and the fill around them,
+-- nothing more; there is no hint lane any more (addon build 6: a [T] click without Translate
+-- Companion opens only its popup, Presence.lua).
 -- A message with hyperlinks (items, spells, professions, map pins...) gets a links bar inside its
--- bubble, under the lane (under the Translate button of an untranslated bubble): its links in their
--- own colours, clickable as in the chat (Links.lua), since the Helper's painted text is not; and
--- its Original text has its hyperlinks enabled the same way (user request L2, 2026-10-19).
+-- bubble, right under its last row (under the Translate button of an untranslated bubble): its
+-- links in their own colours, clickable as in the chat (Links.lua), since the Helper's painted
+-- text is not; and its Original text has its hyperlinks enabled the same way (user request L2).
 --
 -- Art (Bubble.Art, once): the ChatBubble layout and tail atlas of the 12.x UI (checked on the
 -- Forever branch, NineSliceLayouts.lua), else the old Interface\Tooltips\ChatBubble-* backdrop,
@@ -39,21 +38,14 @@ local FILL_UNDER = 6            -- the fill reaches this close to the bubble's e
 local GAP = 6                   -- between two messages
 local OUT_PAD_X, OUT_PAD_Y = 12, 10
 local ORIGINAL_LINES = 2
-local CARD_TOP, CARD_BOTTOM = 8, 8      -- reply card: margins above the draft line and below the lane
+local CARD_TOP = 8                      -- reply card: margin above the draft line (under its rows: inset)
 local CARD_DRAFT_H, CARD_GAP = 14, 4
-local LANE_EDGE, LANE_GAP = 2, 4        -- the lane's text: clear of its top and bottom 2 units; 4 before [Download]
-local LANE_EDGE_PX = 2                  -- ...and 2 physical px at least (the Helper reads the outer 2 px rows)
-local LANE_DELAY = 1.5                  -- seconds before a lane's hint shows (Reserve.LANE_DELAY)
-local LINK_COLOR = "|cff66bbff"         -- our links' light blue ([T], [Show them], [Download])
-local BAR_GAP, BAR_GAP_PX = 4, 4        -- the links bar: 4 units and 4 physical px under the lane at least
+local BAR_GAP, BAR_GAP_PX = 4, 4        -- the links bar: 4 units and 4 physical px under the last row at least
 local BAR_SPACE = 6                     -- between two links of the bar
 Bubble.META_H, Bubble.GAP, Bubble.TAIL_SPACE = META_H, GAP, TAIL_SPACE
-Bubble.LANE_DELAY, Bubble.LANE_EDGE, Bubble.LANE_GAP = LANE_DELAY, LANE_EDGE, LANE_GAP
 Bubble.BAR_SPACE = BAR_SPACE
 
 local pools = { ["in"] = {}, out = {}, reply = {} }
-local live = {}                         -- cards in use that have a lane (incoming bubbles, the reply card)
-local moving = false                    -- the window is being dragged or resized (Bubble.SetMoving)
 local art
 
 ---------------------------------------------------------------------------- shared art and font
@@ -238,12 +230,9 @@ end
 
 -- Hides the tag and plate of every row that is not entirely inside [bottom, top] (GetScaledRect
 -- units, y up): the Helper never sees a partly clipped row; the fill shows there.
-local UpdateLane
 local function ClipRows(self, top, bottom)
     local _, b, _, h = self.box:GetScaledRect()
     if not (b and h) or issecretvalue(b) then
-        self.laneClipped = true
-        UpdateLane(self)
         return
     end
     local eff = self.box:GetEffectiveScale()
@@ -257,12 +246,6 @@ local function ClipRows(self, top, bottom)
             ShowRow(row, row.visible and not row.clipped)
         end
     end
-    -- the lane: the same rule as a row
-    if self.laneTop and self.rowH then
-        local laneTop = boxTop - self.laneTop * eff
-        self.laneClipped = top == nil or laneTop > top + eps or laneTop - self.rowH * eff < bottom - eps
-    end
-    UpdateLane(self)
 end
 
 -- Number of rows shown (tags drawn) right now, for tests and the slot manager.
@@ -277,186 +260,7 @@ local function ShownRows(self)
 end
 
 ---------------------------------------------------------------------------- common pieces
-local Text, LinkButton
-
----------------------------------------------------------------------------- the hint lane
--- One row of fill right under a card's last row: its band is [rowTop0 + K * rowH, + rowH] in the
--- card's units, so row0.yTop + K * rowPx physical px, from the tag's x0 (inset) to the plate's end
--- (inset + 8 W + plateWidth). The hint (TranslateProbeLaneFont: GameFontNormalSmall, the gold of
--- NORMAL_FONT_COLOR, smaller than its box) starts at the plate's x, LaneEdge units under the
--- lane's top (LANE_EDGE units and LANE_EDGE_PX physical px at least) and as high as the row less
--- 2 LaneEdge; [Download] (our links' light blue) follows LANE_GAP units after it, inside the
--- plate's width.
--- The longest hint that fits beside the button is used (the full one, then CONV_LANE_SHORT), and
--- the tag column of the lane is plain fill (the Helper samples the fill colour there).
--- The Helper paints the lane flat whenever it paints the card, so the hint is seen only when no
--- Helper paints. It shows LANE_DELAY seconds after the lane became ready for the card's current
--- request, slot, rows and place (C_Timer, no OnUpdate), so it never flashes before the Helper's
--- first paint. Ready: the card has a slot, is visible, the window is not being dragged or resized,
--- and its lane and last row are entirely inside the visible thread (the Helper finds the lane right
--- under that row). Hidden otherwise. The delay starts again whenever the lane moves on the screen
--- (a scroll, a new message above it, the window dragged or resized): the Helper finds it at its
--- new place one capture later, and only once the addon sends the new VIEW after a drag.
--- TranslateProbeLaneFont: a copy of GameFontNormalSmall (its gold included) one point smaller than
--- the lane's text box (h units: its 1-unit shadow fits too), so the hint always fits its box and
--- clears the lane's edges (at text size 12 the box is about 10 units high).
-local laneFont, laneBaseSize
-local function LaneFont(h)
-    if not laneFont then
-        laneFont = CreateFont("TranslateProbeLaneFont")
-        laneFont:CopyFontObject(GameFontNormalSmall)
-        laneBaseSize = select(2, laneFont:GetFont()) or 10
-    end
-    local path, size, flags = laneFont:GetFont()
-    local want = max(6, min(laneBaseSize, math.floor(h) - 1))
-    if size ~= want then
-        laneFont:SetFont(path, want, flags or "")
-    end
-    return laneFont
-end
-
--- [Download] opens the Translate Companion dialog. In an incoming bubble it sits over the bubble's
--- box (which the Helper's overlay does not hide from the mouse, even while it paints the lane
--- over): a right-click and the hover go on to the bubble (its menu, its tooltip), so only a left
--- click on [Download] itself differs from a click on the bubble.
-local Fire
-local function MakeLane(self)
-    local hint = Text(self.rowFrame, "OVERLAY", GameFontNormalSmall)
-    hint:SetWordWrap(false)
-    hint:Hide()
-    local button = LinkButton(self.rowFrame, GameFontNormalSmall)
-    local forward = self.box ~= self
-    if forward then
-        button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-    end
-    button:SetScript("OnClick", function(_, which)
-        if forward and which == "RightButton" then
-            Fire(self, "click", which)
-            return
-        end
-        local cf = ns.ConvFrame
-        ns.CompanionDialog.Open(cf and cf.Frame and cf.Frame() or nil)
-    end)
-    if forward then
-        button:SetScript("OnEnter", function()
-            Fire(self, "enter")
-        end)
-        button:SetScript("OnLeave", function()
-            Fire(self, "leave")
-        end)
-    end
-    button:Hide()
-    self.lane, self.laneButton, self.laneShown = hint, button, false
-end
-
-local function ShowLane(self, on)
-    on = (on and self.laneFits) and true or false
-    self.laneShown = on
-    self.lane:SetShown(on and (self.lane:GetText() or "") ~= "")
-    self.laneButton:SetShown(on)
-end
-
--- The lane's text margin at its top and bottom, in the card's units: LANE_EDGE units and
--- LANE_EDGE_PX physical px at least.
-local function LaneEdge(m)
-    return max(LANE_EDGE, LANE_EDGE_PX / (m.ppu or 1))
-end
-Bubble.LaneEdge = LaneEdge
-
--- Places the lane laneTop units under the card's top (full: the hint for this kind of card).
-local function PlaceLane(self, m, laneTop, full)
-    if self.laneTop ~= laneTop then
-        self.laneKey = nil      -- moved: the delay starts again
-        ShowLane(self, false)
-    end
-    self.laneTop = laneTop
-    local x = m.inset + 8 * m.W
-    local edge = LaneEdge(m)
-    local h = max(1, m.rowH - 2 * edge)
-    local laneFontObj = LaneFont(h)
-    local button = self.laneButton
-    self.lane:SetFontObject(laneFontObj)
-    button:GetFontString():SetFontObject(laneFontObj)
-    button:SetLabel(LINK_COLOR .. "[" .. L.CONV_DOWNLOAD .. "]|r")
-    button:SetHeight(h)
-    local bw = button:GetWidth()
-    local hint = self.lane
-    local text = ""
-    for _, candidate in ipairs({ full or "", L.CONV_LANE_SHORT }) do
-        hint:SetText(candidate)
-        if candidate ~= "" and hint:GetUnboundedStringWidth() + 2 + LANE_GAP + bw <= m.plateWidth then
-            text = candidate
-            break
-        end
-    end
-    hint:SetText(text)
-    local tw = text ~= "" and (hint:GetUnboundedStringWidth() + 2) or 0
-    hint:ClearAllPoints()
-    hint:SetPoint("TOPLEFT", self.box, "TOPLEFT", x, -(laneTop + edge))
-    hint:SetWidth(max(1, tw))
-    hint:SetHeight(h)
-    button:ClearAllPoints()
-    button:SetPoint("TOPLEFT", self.box, "TOPLEFT", x + (tw > 0 and tw + LANE_GAP or 0), -(laneTop + edge))
-    self.laneFits = bw <= m.plateWidth
-end
-
--- No lane (an untranslated bubble).
-local function ClearLane(self)
-    self.laneTop, self.laneKey, self.laneClipped = nil, nil, nil
-    ShowLane(self, false)
-end
-
-local function LaneReady(self)
-    if moving or not (self.laneTop and self.slot and not self.plainText and not self.laneClipped and self.box:IsVisible()) then
-        return false
-    end
-    local last = self.rowsList[self.K or 0]
-    return last ~= nil and last.visible == true and not last.clipped
-end
-
--- Shows the hint once it has been ready for LANE_DELAY seconds with the same key, else hides it.
-function UpdateLane(self)
-    if not self.lane then
-        return
-    end
-    if not LaneReady(self) then
-        self.laneKey = nil
-        ShowLane(self, false)
-        return
-    end
-    -- the request, the slot, the rows, and the lane's place in the box and on the screen (physical
-    -- px): any move starts the delay again
-    local l, b, _, h = self.box:GetScaledRect()
-    local where = "?"
-    if l and b and h and not issecretvalue(b) then
-        local okSize, _, physH = pcall(GetPhysicalScreenSize)
-        local k = (okSize and type(physH) == "number" and physH > 0) and physH / 768 or 1
-        where = math.floor(l * k + 0.5) .. "," .. math.floor((b + h) * k + 0.5)
-    end
-    local key = table.concat({ self.slot, self.K, tostring(self.laneReq), math.floor(self.laneTop * 64 + 0.5), where }, ":")
-    if key ~= self.laneKey then
-        self.laneKey, self.laneSince = key, GetTime()
-        self.laneToken = (self.laneToken or 0) + 1
-        local token = self.laneToken
-        ShowLane(self, false)
-        C_Timer.After(LANE_DELAY, function()
-            if self.laneToken == token then
-                UpdateLane(self)
-            end
-        end)
-        return
-    end
-    ShowLane(self, GetTime() - self.laneSince >= LANE_DELAY - 0.01)
-end
-
--- The window is being dragged or resized (on), or that ended (off): every lane hides while it
--- moves (the Helper's VIEW is stale until the move ends), then waits its delay again.
-function Bubble.SetMoving(on)
-    moving = on and true or false
-    for b in pairs(live) do
-        UpdateLane(b)
-    end
-end
+local Text, LinkButton, Fire
 
 function Text(parent, layer, fontObject)
     local fs = parent:CreateFontString(nil, layer or "ARTWORK")
@@ -494,8 +298,9 @@ end
 -- The message's hyperlinks (Links.Parse: each once, in order), one button each, labelled with the
 -- link's name in the colour the chat draws it in, in the window font. A click and the hover do what
 -- they do in the chat (Links.Click, Links.ShowTooltip). The bar lies inside the bubble's fill from
--- the tag's x0 to the plate's end, BarGap under the lane (the Helper reads the lane and 2 px around
--- it: the bar never reaches them), its lines rowH apart; a name wider than the bar is cut.
+-- the tag's x0 to the plate's end, BarGap under the last row (the 3 px of fill the Helper needs
+-- under a card's last row, docs\BRIDGE.md section 8c, and a pixel more), its lines rowH apart; a
+-- name wider than the bar is cut.
 local function BarGap(m)
     return max(BAR_GAP, BAR_GAP_PX / (m.ppu or 1))
 end
@@ -612,12 +417,6 @@ end
 
 local Methods = {}
 
--- The request the lane belongs to (an incoming bubble: its reqId; nil: none yet). A new one starts
--- the lane's delay again.
-function Methods:SetLaneReq(req)
-    self.laneReq = req
-end
-
 function Methods:SetMeta(text, r, g, b)
     self.meta:SetText(text or "")
     if r then
@@ -694,7 +493,6 @@ local function NewIn(parent)
     self.translateBtn:SetScript("OnClick", function()
         Fire(self, "translate")
     end)
-    MakeLane(self)
     return self
 end
 
@@ -769,19 +567,17 @@ local function LayoutIn(self, width, m)
         if barH > 0 then
             boxH = boxH + BAR_GAP + barH
         end
-        ClearLane(self)
     else
         self.plain:Hide()
         self.translateBtn:Hide()
+        -- compact: the fill around the K rows, nothing under them but the links bar
         local rowTop0 = Snap(m.inset, self)
         local rowsH = PlaceRows(self, m, rowTop0)
-        -- the hint lane: one more row of fill under the rows (shown by ClipRows' UpdateLane)
-        PlaceLane(self, m, rowTop0 + rowsH, L.CONV_LANE_IN)
-        boxH = 2 * rowTop0 + rowsH + m.rowH
-        -- the links bar: under the lane, from the tag's x0 to the plate's end; the rows, the tags,
-        -- the plates and the lane keep their places
+        boxH = 2 * rowTop0 + rowsH
+        -- the links bar: BarGap under the last row, from the tag's x0 to the plate's end; the rows,
+        -- the tags and the plates keep their places
         local gap = BarGap(m)
-        local barH = PlaceBar(self, m, m.inset, rowTop0 + rowsH + m.rowH + gap, 8 * m.W + m.plateWidth)
+        local barH = PlaceBar(self, m, m.inset, rowTop0 + rowsH + gap, 8 * m.W + m.plateWidth)
         if barH > 0 then
             boxH = boxH + gap + barH
         end
@@ -935,8 +731,6 @@ local function NewReply(parent)
         GameTooltip:Show()
     end)
     self.CancelButton:SetScript("OnLeave", GameTooltip_Hide)
-    MakeLane(self)
-    self.laneText = L.CONV_LANE_HINT
     self.SetRows, self.ClipRows, self.ShownRows = SetRows, ClipRows, ShownRows
     self.K = 2
     return self
@@ -945,10 +739,6 @@ end
 -- "Your text: " .. text on the card's first line.
 function Methods:SetDraft(text)
     self.draft = text or ""
-end
-
-function Methods:SetLaneHint(text)
-    self.laneText = text or ""
 end
 
 local function LayoutReply(self, width, m)
@@ -969,15 +759,11 @@ local function LayoutReply(self, width, m)
     y = y + CARD_DRAFT_H + CARD_GAP
     local rowTop0 = Snap(y, self)
     local rowsH = PlaceRows(self, m, rowTop0)
-    -- the lane: one row of fill right under the last row, the hint clear of its top and bottom 2
-    -- units; each layout is a new reply, a new width or new settings: its delay starts again
-    PlaceLane(self, m, rowTop0 + rowsH, self.laneText)
-    self.laneGen = (self.laneGen or 0) + 1
-    self.laneReq = "reply" .. self.laneGen
-    local h = Snap(rowTop0 + rowsH + m.rowH + CARD_GAP + CARD_BOTTOM, self)
+    -- under the last row: the fill of a bubble (inset: the border art and the padding), so the
+    -- Helper has its 3 px of fill and VIEW 200 reaches below the row
+    local h = Snap(rowTop0 + rowsH + m.inset, self)
     self:SetHeight(h)
     self.metrics = m
-    UpdateLane(self)
     return h
 end
 
@@ -1015,8 +801,6 @@ function Bubble.AcquireIn(parent)
     b.handlers, b.plainText, b.originalText, b.glossText, b.originalShown = nil, nil, nil, nil, false
     b.links = nil
     b.slot, b.K = nil, 1
-    b.laneReq = nil
-    live[b] = true
     return b
 end
 
@@ -1031,16 +815,7 @@ end
 function Bubble.AcquireReply(parent)
     local b = Acquire("reply", parent, NewReply)
     b.Layout = LayoutReply
-    live[b] = true
     return b
-end
-
--- Every lane in use is checked again: the window calls it when it shows (the delay starts again)
--- and when it hides (every hint goes).
-function Bubble.RefreshLanes()
-    for b in pairs(live) do
-        UpdateLane(b)
-    end
 end
 
 function Bubble.Release(b)
@@ -1052,12 +827,6 @@ function Bubble.Release(b)
     b:ClearAllPoints()
     b.handlers, b.msg = nil, nil
     b.slot = nil
-    live[b] = nil
-    if b.lane then
-        b.laneToken = (b.laneToken or 0) + 1   -- a pending reveal does nothing
-        b.laneReq = nil
-        ClearLane(b)
-    end
     for _, row in ipairs(b.rowsList) do
         row.visible, row.clipped = false, false
         ShowRow(row, false)

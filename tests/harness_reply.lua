@@ -68,9 +68,6 @@ local FakeBubble = {
         function card:SetRows(slot, K, sessBit)
             self.slot, self.K, self.sessBit = slot, K, sessBit
         end
-        function card:SetLaneHint(text)
-            self.lane = text
-        end
         function card:Layout(width, m)
             self.width, self.m = width, m
             self:SetSize(width, 82)
@@ -436,8 +433,8 @@ do
         and ui.box.Instructions:GetText() == L.RPL_PH_PASTE, "WAITING: box emptied and focused, 'Press Ctrl+V...'")
     local card = Fake.card
     check(card and card:IsShown() and card.draft == DRAFT and card.slot == 126 and card.K == tr.rows
-        and card.sessBit == ns.sessionId % 2 and card.lane == L.RPL_LANE_HINT and card.width == 360,
-        "the reply card: draft, rows on slot 126, lane hint, bubble column width")
+        and card.sessBit == ns.sessionId % 2 and card.width == 360,
+        "the reply card: draft, rows on slot 126, bubble column width")
     check(Composer.Height() == 88 + 82 + 6 and host:GetHeight() == 176 and Composer.ReplyCardRect() ~= nil
         and Fake.syncs > 0, "composer height 88 + card + 6; the card rectangle is offered for VIEW 200")
     check(Contains(Stepper(), L.RPL_STEP_1) and Contains(Stepper(), L.RPL_STEP_2) and Contains(Stepper(), L.RPL_STEP_3),

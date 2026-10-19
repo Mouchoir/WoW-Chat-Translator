@@ -264,7 +264,7 @@ local function Metrics()
 end
 
 -- Rows of the translation (1..5), from the draft's width in the window font against the
--- bubble plate width, times the script factor (and 10% for the window, as for incoming bubbles).
+-- bubble plate width, times the script factor and 10% for the window.
 local function EstimateRows(draft, lang)
     local m = Metrics()
     local plateW = m and tonumber(m.plateWidth) or 0
@@ -579,7 +579,6 @@ local function ShowCard(force)
     card.tpReq, card.tpWidth = reply.reqId, width
     card:SetDraft(reply.draft)
     card:SetRows(Slot(), reply.rows, ns.sessionId % 2)
-    card:SetLaneHint(L.RPL_LANE_HINT)
     card:ClearAllPoints()
     if PixelUtil and PixelUtil.SetPoint then
         PixelUtil.SetPoint(card, "BOTTOMLEFT", ui.root, "BOTTOMLEFT", x0, BASE_HEIGHT)
@@ -667,9 +666,16 @@ local function LangPopup(after)
 end
 
 -- Translate (Enter in DRAFT, or the button). With the box empty while a reply of this
--- conversation is pending, its draft is translated again ("click Translate again").
+-- conversation is pending, its draft is translated again ("click Translate again"). Without a
+-- confirmed Translate Companion only its popup opens (Presence.Ensure); Continue there runs this.
 function Composer.Translate(noCache)
     if not (ui and conv) then
+        return
+    end
+    if ns.Presence and not ns.Presence.IsConfirmed() then
+        ns.Presence.Ensure(function()
+            Composer.Translate(noCache)
+        end)
         return
     end
     local st = State(conv)

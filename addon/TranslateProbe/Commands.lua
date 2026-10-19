@@ -321,6 +321,19 @@ local handlers = {
             ns.Print(L[key])
         end
         ns.Printf(L.APP_DOWNLOAD, ns.COMPANION_URL)
+        -- what Translate Companion's status file said at load (Presence.lua)
+        local state = ns.Presence.State()
+        if state == "running" then
+            local version = ns.Presence.Info().version
+            ns.Printf(L.APP_STATUS_RUNNING, version and (" " .. version) or "")
+        elseif state == "installed" then
+            ns.Print(L.APP_STATUS_INSTALLED)
+        else
+            ns.Print(L.APP_STATUS_ABSENT)
+        end
+        if ns.Presence.IsConfirmed() then
+            ns.Print(L.APP_STATUS_CONFIRMED)
+        end
     end,
     debug = function()
         local r, s, x = ns.Request.Counters(), ns.Reserve.Counters(), ns.Restriction.Counters()

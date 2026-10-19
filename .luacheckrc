@@ -59,6 +59,8 @@ read_globals = {
 globals = {
     -- SavedVariable and slash handlers (globals WoW reads/writes)
     "TranslateProbeDB", "SLASH_TRANSLATEPROBE1", "SLASH_TRANSLATEPROBE2", "SlashCmdList",
+    -- Translate Companion's status file (CompanionStatus.lua, read by Presence.lua at load)
+    "TranslateProbe_CompanionStatus",
     -- Escape closes the frames listed here (the addon appends its window, guarded with tContains)
     "UISpecialFrames",
     -- Key bindings (Bindings.xml): header and names shown in the key binding panel, and the

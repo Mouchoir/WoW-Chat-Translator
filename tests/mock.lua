@@ -23,7 +23,7 @@
 --   Mock.SetChatRect(cf, l, b, w, h)      chat clip rectangle in scaled units (screen = 768 high,
 --                                          from the bottom-left), as GetScaledRect returns it
 --   Mock.SetFont(cf, path, h)
---   Mock.Printed() -> { lines }; Mock.Errors() -> { messages }
+--   Mock.Printed() -> { lines }; Mock.Errors() -> { messages }; time() = Mock.EPOCH + floor(Mock.Now())
 --   Mock.SetCVar(name, value); Mock.SetShift(down)
 -- Extras: Mock.Fire(event, ...), Mock.Secret(), Mock.SetRectSecret(cf, on), Mock.Frames(),
 --   Mock.echo (default true: prints and errors also go to stdout), Mock.rawprint (stdout).
@@ -105,7 +105,12 @@ wipe = function(t)
     end
     return t
 end
-time = os.time
+-- time(): Unix seconds on the mock's own clock (a fixed start plus Mock.Now()), so a status file's
+-- heartbeat can be tested to the second (Presence.lua)
+M.EPOCH = 1760900000
+time = function()
+    return M.EPOCH + math.floor(state.time)
+end
 
 -- Secret values: any use other than issecretvalue/concatenation raises, like on the client.
 local SecretMT = {}

@@ -124,9 +124,16 @@ ChatFrame1:AddMessage(M.Secret(), 1, 1, 1, 1, 0, 0, "CHAT_MSG_RAID", { [11] = 43
 ChatFrame3:AddMessage(OLD_ENTRY, 1, 1, 1)   -- a copy without eventArgs
 
 ---------------------------------------------------------------------------------------------
--- Load
+-- Load. Translate Companion was running when the game loaded the addon: its status file (the
+-- deployed CompanionStatus.lua it writes) says so, so the session starts confirmed and every [T]
+-- click below acts at once (tests\harness_companion.lua covers the other states and the popup).
 ---------------------------------------------------------------------------------------------
+local RUNNING_STATUS = ("TranslateProbe_CompanionStatus = { v = 1, version = \"0.6.0\", build = 6, "
+    .. "state = \"running\", heartbeat = %d }"):format(time())
 local ns = M.Load(ADDON_FILES, function(file)
+    if file == "CompanionStatus.lua" then
+        return RUNNING_STATUS
+    end
     return ADDON_SOURCES[file]
 end)
 local L = ns.L
@@ -297,15 +304,13 @@ local function ExpectedK(text, plateW, fontH, factor)
     local rowsSrc = width / plateW     -- not rounded up before the factor
     return math.min(6, math.max(1, math.ceil(rowsSrc * factor - 0.15)))
 end
--- The suffix a click writes: K tagged rows, the hint lane (spaces until revealed, then its text:
--- user request U1), then the instant rows.
-local function RowsFor(cf, lineID, slot, K, instant, revealed)
+-- The suffix a click writes: K tagged rows, then the instant rows (no hint lane since build 6).
+local function RowsFor(cf, lineID, slot, K, instant)
     local m = Reserve.Metrics(cf)
     local rows = {}
     for r = 0, K - 1 do
         rows[#rows + 1] = Bridge.TagMarkup(slot, r, ns.sessionId % 2, m.W, m.H) .. Bridge.PlateMarkup(m.plateW, m.H)
     end
-    rows[#rows + 1] = Reserve.LaneRow(cf, m, revealed == true)
     for _, line in ipairs(instant or {}) do
         rows[#rows + 1] = ChatButton.Safe(line)
     end
@@ -318,7 +323,9 @@ check(not fr or L.LOADED:find("Tape", 1, true), "French strings on frFR")
 check(SLASH_TRANSLATEPROBE1 == "/tprobe" and SLASH_TRANSLATEPROBE2 == "/tpr" and slashFn ~= nil, "slash command registered")
 check(type(ns.sessionId) == "number" and ns.sessionId >= 1 and ns.sessionId <= 65535 and ns.session == tostring(ns.sessionId),
     "session id is a u16 and its string form is used in links")
-check(ns.ADDON_BUILD == 5 and Bridge.VERSION == 2 and Bridge.TEST_SLOT == 127, "addon build 5, bridge v2")
+check(ns.ADDON_BUILD == 6 and Bridge.VERSION == 2 and Bridge.TEST_SLOT == 127 and Bridge.PRESENCE_SLOT == 125,
+    "addon build 6, bridge v2, slot 125 for the presence card")
+check(ns.Presence.State() == "running" and ns.Presence.IsConfirmed(), "the status file said running: the session is confirmed")
 check(CountPrinted((L.INIT_FAILED:gsub("%%s", ""))) == 0, "no init failure printed")
 
 section("bridge builders")
@@ -390,7 +397,8 @@ if stubBridge and REAL_BRIDGE_SOURCE then
     check(same, "the stub builds the same tags, plates, messages and window tags as the real Bridge.lua")
     check(R.FLAG_REPLY == Bridge.FLAG_REPLY and R.FLAG_COPY == Bridge.FLAG_COPY and R.FLAGS_MASK == Bridge.FLAGS_MASK
         and R.BUBBLE_RGB[1] == Bridge.BUBBLE_RGB[1] and R.BUBBLE_RGB[2] == Bridge.BUBBLE_RGB[2]
-        and R.BUBBLE_RGB[3] == Bridge.BUBBLE_RGB[3], "the stub has the real flag and colour constants")
+        and R.BUBBLE_RGB[3] == Bridge.BUBBLE_RGB[3] and R.PRESENCE_SLOT == Bridge.PRESENCE_SLOT
+        and R.TEST_SLOT == Bridge.TEST_SLOT, "the stub has the real flag, slot and colour constants")
 end
 
 section("bridge: TRANSLATE flags and window tags")
@@ -442,7 +450,7 @@ end
 
 section("saved variables: whitelist purge")
 check(fixtureSize >= 70000, "the telemetry fixture is about 70 KB (" .. fixtureSize .. " bytes)")
-local KEEP = { schema = true, target = true, names = true, glossShow = true, mode = true, glossary = true, helpShown = true,
+local KEEP = { schema = true, target = true, names = true, glossShow = true, mode = true, glossary = true,
     display = true, follow = true, replyClipboard = true, convOriginal = true, convText = true, convScale = true,
     convCombat = true, convFocus = true, convOpenWhisper = true, convPos = true, convTipShown = true }
 local extra = {}
@@ -453,7 +461,7 @@ for key in pairs(db) do
 end
 check(#extra == 0, "only whitelisted keys are left (" .. table.concat(extra, ", ") .. ")")
 check(db.schema == 4 and db.mode == "auto" and db.names == false and db.glossShow == false and db.helpShown == nil,
-    "schema 4, invalid settings back to their defaults (glossary row off by default)")
+    "schema 4, invalid settings back to their defaults (glossary row off by default; helpShown gone with the first-use line)")
 check(db.follow == "smart" and db.replyClipboard == "ask" and db.convText == 14 and db.convScale == 100
     and db.convCombat == "keep" and db.convOriginal == false and db.convFocus == false and db.convOpenWhisper == false
     and db.convPos == nil and db.convTipShown == nil, "conversation window settings get their defaults")
@@ -549,7 +557,7 @@ local instant = ChatButton.InstantLines(clicked, clickText)
 check(#instant == 2 and instant[1] == L.SUFFIX_GLOSS .. G.Describe(clickText, db.target)
     and instant[2] == L.NAME_LINE:format("ro ro"), "instant rows: glossary, then the romanized name")
 local e1c, e3c = EntryFor(ChatFrame1, clicked).message, EntryFor(ChatFrame3, clicked).message
-check(e1c == base1 .. RowsFor(ChatFrame1, clicked, 0, K, instant), "ChatFrame1: K tagged rows, the lane, then glossary, then name")
+check(e1c == base1 .. RowsFor(ChatFrame1, clicked, 0, K, instant), "ChatFrame1: K tagged rows, then glossary, then name")
 check(e3c == base3 .. RowsFor(ChatFrame3, clicked, 0, K, instant), "ChatFrame3: rows sized with its own metrics")
 local xLink = "|Haddon:TranslateProbe:x:" .. ns.session .. ":" .. clicked .. "|h"
 local firstRow = SUFFIX_START .. ns.session .. ":" .. clicked .. "|h"
@@ -564,8 +572,10 @@ for body in e1c:gmatch("|Haddon:TranslateProbe:x:[^|]*|h(.-)|h") do
     end
 end
 check(oneTexturePerLink, "no link holds more than one texture (the client draws only the first)")
-check(Lines(e1c) == K + 3 and Count(e1c, "|TInterface\\Buttons\\WHITE8X8:") == 9 * K, "K rows of 8 tag blocks and a plate, and the lane")
-check(Printed(L.FIRST_USE) and db.helpShown == true, "first click ever explains the helper")
+check(Lines(e1c) == K + 2 and Count(e1c, "|TInterface\\Buttons\\WHITE8X8:") == 9 * K,
+    "K rows of 8 tag blocks and a plate, then the 2 instant rows: no hint lane")
+check(L.FIRST_USE == nil and db.helpShown == nil and not Printed("Translate Companion"),
+    "no chat line about Translate Companion at the first click (the first-use line is gone)")
 check(Request.Count() == 1 and Reserve.SlotsInUse() == 1 and Reserve.SlotOwner(0) == clicked, "one active request on slot 0")
 local pairsByTerm = {}
 for _, p in ipairs(tr.pairs) do
@@ -625,11 +635,10 @@ n0 = #sent
 M.Click(ButtonOf(clicked))
 check(#sent == n0, "a second click within 1 s is ignored")
 M.Tick(61)
--- 1.5 s after the click the hint lane gets its text: the one rewrite of the line after the click
-M.Tick(math.max(0, clickFrame + 90 - math.floor(M.Now() * 60 + 0.5)))
-e1c, e3c = EntryFor(ChatFrame1, clicked).message, EntryFor(ChatFrame3, clicked).message
-check(e1c == base1 .. RowsFor(ChatFrame1, clicked, 0, K, instant, true)
-    and e3c == base3 .. RowsFor(ChatFrame3, clicked, 0, K, instant, true), "the hint lane is revealed after 1.5 s")
+-- no hint lane any more: nothing rewrites the line after the click
+M.Tick(math.max(0, clickFrame + 120 - math.floor(M.Now() * 60 + 0.5)))
+check(EntryFor(ChatFrame1, clicked).message == e1c and EntryFor(ChatFrame3, clicked).message == e3c,
+    "2 s after the click the rows are as the click wrote them (no timed rewrite)")
 M.Click(ButtonOf(clicked))
 msgs = Since(n0, "translate")
 check(#msgs == 1 and msgs[1].reqId == tr1.reqId and msgs[1].slot == tr1.slot and msgs[1].flags == 2,
@@ -661,8 +670,8 @@ check(dePairs.lf2m == "looking for 2 more" and dePairs.cheap == nil, "de pairs: 
 slash("target " .. (fr and "fr" or "en"))
 -- the glossary row starts with ChatButton.GLOSS_START (its own colour, D11), the others with SUFFIX_START
 check(Count(EntryFor(ChatFrame1, clicked).message, SUFFIX_START) + Count(EntryFor(ChatFrame1, clicked).message,
-    ChatButton.GLOSS_START) == K + 2 and Count(EntryFor(ChatFrame1, clicked).message, ChatButton.LANE_START) == 1,
-    "rows never duplicated (the rewrite cuts first)")
+    ChatButton.GLOSS_START) == K + 2 and ChatButton.LANE_START == nil,
+    "rows never duplicated (the rewrite cuts first), no lane marker")
 
 section("tooltips")
 EventRegistry:TriggerEvent("ChatFrame.OnHyperlinkEnter", ChatFrame1, ButtonOf(clicked), "[T]")
@@ -771,7 +780,7 @@ M.Tick(1)
 M.Click(ButtonOf(leaving))
 local leavingReq, leavingSlot = Request.Get(leaving)
 check(Request.Count() == 1 and Reserve.IsWatching(), "a request starts the watcher")
-M.Tick(91)      -- the hint lane's one rewrite, 1.5 s after the click
+M.Tick(91)
 local beforeLeave = Snapshot()
 n0 = #sent
 M.Tick(60 * 20)
@@ -818,9 +827,9 @@ check(#msgs == 1 and msgs[1].ok and #msgs[1].text <= 1024 and Count(msgs[1].text
     and msgs[1].rows == 6, "a long line: text cut on its own, 6 rows reserved")
 local longEntry = EntryFor(ChatFrame1, longLine).message
 local longSlot = msgs[1].slot
-check(Lines(longEntry) == 7 and Count(longEntry, "|TInterface\\Buttons\\WHITE8X8:") == 9 * 6
+check(Lines(longEntry) == 6 and Count(longEntry, "|TInterface\\Buttons\\WHITE8X8:") == 9 * 6
     and longEntry:find(RowsFor(ChatFrame1, longLine, longSlot, 6), 1, true),
-    "6 reserved rows under the line, each a tag and a plate, then the lane")
+    "6 reserved rows under the line, each a tag and a plate, nothing under them")
 check(Bridge.TagMarkup(longSlot, 4, 1, 4, 14) == Bridge.TagMarkup(longSlot, 0, 1, 4, 14)
     and Bridge.TagMarkup(longSlot, 5, 1, 4, 14) == Bridge.TagMarkup(longSlot, 1, 1, 4, 14)
     and Bridge.TagMarkup(longSlot, 3, 1, 4, 14) ~= Bridge.TagMarkup(longSlot, 0, 1, 4, 14),
@@ -1307,8 +1316,8 @@ local plain = Deliver("CHAT_MSG_SAY", "lfm dm", "Bob")
 M.Tick(1)
 M.Click(ButtonOf(plain))
 local plainK = Request.Get(plain) and select(3, Request.Get(plain))
-check(plainK and Lines(EntryFor(ChatFrame1, plain).message) == plainK + 1,
-    "without the glossary row: only the K reserved rows and the lane")
+check(plainK and Lines(EntryFor(ChatFrame1, plain).message) == plainK,
+    "without the glossary row: only the K reserved rows")
 slash("show on")
 check(db.glossShow == true and Printed(L.SHOW_ON), "show on")
 
@@ -1352,14 +1361,15 @@ check(#Reserve.View() == 0, "a secret chat rectangle is left out of VIEW")
 M.SetLockdown(false)
 M.SetRectSecret(ChatFrame1, false)
 slash("info")
-check(Printed("1.60.1") and Printed(L.INFO_VERSION:format("0.6.0", ns.ADDON_BUILD, ns.sessionId))
+check(Printed("1.60.1") and Printed(L.INFO_VERSION:format("0.7.0", ns.ADDON_BUILD, ns.sessionId))
     and Printed(L.INFO_FRAME:format("ChatFrame1", L.YES, L.YES)), "info prints version, client and chat frames")
 check(Printed(L.INFO_REQUESTS:format(Request.Count(), Reserve.SlotsInUse())), "info prints requests and slots")
 slash("debug")
 check(Printed((L.DEBUG_REQUESTS:match("^[^%%]*"))) and Printed((L.DEBUG_SLOTS:match("^[^%%]*"))), "debug prints the counters")
 slash("app")
-check(Printed(L.APP_1) and Printed(L.APP_4) and Printed(L.APP_DOWNLOAD:format("https://github.com/Mouchoir/WoW-Chat-Translator/releases")),
-    "app explains Translate Companion and prints its download page")
+check(Printed(L.APP_1) and Printed(L.APP_4) and Printed(L.APP_DOWNLOAD:format("https://github.com/Mouchoir/WoW-Chat-Translator/releases"))
+    and Printed(L.APP_STATUS_RUNNING:format(" 0.6.0")) and Printed(L.APP_STATUS_CONFIRMED),
+    "app explains Translate Companion, prints its download page and what its status file said")
 slash("help")
 check(Printed(L.HELP_CLICK) and Printed(L.HELP_TEST_ROWS) and Printed(L.HELP_OPTIONS) and Printed(L.HELP_HELP),
     "help lists the commands (options included) and the click hint")
@@ -1414,10 +1424,10 @@ M.Click("addon:TranslateProbe:x:" .. ns.session .. ":" .. trackedLine)
 
 ---------------------------------------------------------------------------------------------
 section("slots")
--- chat lines own slots 0..99 (Reserve.CHAT_SLOTS); 100..125 are the conversation window's, 126 its
--- reply, 127 the TEST message
-check(Reserve.CHAT_SLOTS == 100 and Reserve.WIN_FIRST == 100 and Reserve.WIN_LAST == 125 and Reserve.REPLY_SLOT == 126,
-    "slot ranges: chat 0..99, window 100..125, reply 126")
+-- chat lines own slots 0..99 (Reserve.CHAT_SLOTS); 100..124 are the conversation window's, 125 the
+-- Translate Companion popup's status card (since build 6), 126 the reply, 127 the TEST message
+check(Reserve.CHAT_SLOTS == 100 and Reserve.WIN_FIRST == 100 and Reserve.WIN_LAST == 124 and Reserve.REPLY_SLOT == 126
+    and Bridge.PRESENCE_SLOT == 125 and not Reserve.IsWindowSlot(125), "slot ranges: chat 0..99, window 100..124, presence 125, reply 126")
 local lines = {}
 for k = 1, Reserve.CHAT_SLOTS do
     lines[k] = Deliver("CHAT_MSG_CHANNEL", "selling stuff number " .. k, "Seller" .. k)

@@ -100,7 +100,6 @@ local en = {
     RPL_TIP_EDIT = "Put your text back in the box and cancel the translation",
     RPL_CANCEL = "Cancel",
     RPL_TIP_CANCEL = "Cancel this translation",
-    RPL_LANE_HINT = "No status above? Start Translate Companion.",
     RPL_BYTES = "%d/255",
 
     -- R1: the clipboard consent dialog
@@ -246,7 +245,6 @@ local frFR = {
     RPL_TIP_EDIT = "Remettre votre texte dans la zone et annuler la traduction",
     RPL_CANCEL = "Annuler",
     RPL_TIP_CANCEL = "Annuler cette traduction",
-    RPL_LANE_HINT = "Pas d'état au-dessus ? Lancez Translate Companion.",
     RPL_BYTES = "%d/255",
 
     RPL_CONSENT_TITLE = "Copier les réponses traduites dans le presse-papiers ?",

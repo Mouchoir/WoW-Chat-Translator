@@ -9,19 +9,21 @@
 -- * Tabs: opening order, new ones on the right, never moved by a message; up to 10 shown, as many
 --   as fit, the rest in "+N". A small close cross on the selected tab and on hover, middle-click
 --   and the right-click popup close a tab; its conversation stays in memory (Conversations.lua).
--- * Slots: a bubble gets a window slot (100..125) when it comes within one page of the view;
+-- * Slots: a bubble gets a window slot (100..124) when it comes within one page of the view;
 --   bubbles of other tabs keep theirs until the budget needs them, the least recently seen first
 --   (CANCEL, then the 2 s quarantine of Reserve). Only bubbles in view are ever requested, so
 --   nothing is queued while the window is hidden.
 -- * Per-row visibility: a row not entirely inside the visible thread has its tag and plate hidden.
--- * Hint lanes (user request U1, Bubble.lua): each translated bubble has one more row of fill under
---   its rows with "No translation above? Start Translate Companion. [Download]", which the Helper
---   paints over; it shows 1.5 s after the lane became visible for the bubble's request, and again
---   1.5 s after it moved (a scroll, a drag or a resize of the window: hidden while dragged).
+-- * Compact bubbles (user request of 2026-10-19): the rows are estimated from the bubble's own text
+--   width, link names counted as they are (the Companion copies them), with the window's own script
+--   factors (Reserve.EstimateWindowRows); no hint lane under them since addon build 6.
+-- * Every action that asks for a translation here (a bubble's Translate button, a click on a
+--   bubble, "Translate again") and every way to show the window (the key bindings, /tpr conv) go
+--   through Presence.Ensure, like a [T] click: no window without a confirmed Translate Companion.
 -- * VIEW 200: the bubble column's fill, from the thread's top to the reply card's fill bottom.
 -- * Links (user request L2, Links.lua): a message's hyperlinks are parsed once (msg.links, memory
---   only) for the links bar its bubble shows under the lane; the bar is inside the bubble column,
---   so VIEW 200 and the per-row visibility do not change.
+--   only) for the links bar its bubble shows under its last row; the bar is inside the bubble
+--   column, so VIEW 200 and the per-row visibility do not change.
 -- Stock templates and fonts, named colours and ChatTypeInfo; no hooks on Blizzard frames, no
 -- Blizzard menus, no animation. Everything is memory only; the saved variables get the window's
 -- position (convPos) and convTipShown.
@@ -246,7 +248,6 @@ local function ApplyRows(b, msg)
     if b.kind ~= "in" or msg.state ~= "translate" then
         return
     end
-    b:SetLaneReq(msg.req and msg.req.reqId or nil)
     local slot = msg.req and msg.req.slot or nil
     if b.slot ~= slot or b.K ~= msg.K then
         local resized = b.K ~= msg.K
@@ -437,10 +438,17 @@ local function Retranslate(conv, msg, noCache)
     ConvFrame.Relayout()
 end
 
+-- Retranslate once Translate Companion is confirmed (else its popup, and this runs on Continue).
+local function AskRetranslate(conv, msg, noCache)
+    ns.Presence.Ensure(function()
+        Retranslate(conv, msg, noCache)
+    end)
+end
+
 local function BubbleMenu(b, conv, msg)
     local items = {
         { text = L.CONV_MENU_RETRANSLATE, onClick = function()
-            Retranslate(conv, msg, false)
+            AskRetranslate(conv, msg, false)
         end },
         { text = L.CONV_MENU_COPY, onClick = function()
             CopyOriginal(msg.text)
@@ -458,7 +466,7 @@ local function InHandlers(conv, msg)
             if button == "RightButton" then
                 BubbleMenu(b, conv, msg)
             elseif msg.state == "translate" then
-                Retranslate(conv, msg, IsShiftKeyDown())
+                AskRetranslate(conv, msg, IsShiftKeyDown() and true or false)
             end
         end,
         enter = BubbleTooltip,
@@ -468,8 +476,10 @@ local function InHandlers(conv, msg)
             ConvFrame.Relayout()
         end,
         translate = function()
-            msg.state = "translate"
-            ConvFrame.Relayout()
+            ns.Presence.Ensure(function()
+                msg.state = "translate"
+                ConvFrame.Relayout()
+            end)
         end,
     }
 end
@@ -480,15 +490,28 @@ local OUT_STATE = {
     blocked = { "CONV_OUT_BLOCKED", RED_FONT_COLOR },
 }
 
--- The row estimate of an incoming bubble: the text in the window font against the plate width,
--- unless the user asked for more rows (a click).
+-- The width of every link name of a message in the window font, as a reader sees it (each
+-- occurrence: the Companion copies them as written, so they do not grow with the translation).
+local function LinkNamesWidth(text)
+    local width = 0
+    ns.Links.Scan(text, function(kind, entry)
+        if kind == "link" then
+            width = width + ns.Bubble.TextWidth(entry.plain)
+        end
+    end)
+    return width
+end
+
+-- The row estimate of an incoming bubble: its text in the window font against the plate width,
+-- link names counted as they are, unless the user asked for more rows (a click).
 local function EstimateK(msg, m)
     if msg.userK then
         return msg.K
     end
     if msg.kPlate ~= m.plateWidth or msg.kText ~= m.textSize or msg.kTarget ~= Settings().target then
         local visible = ns.Glossary.VisibleText(msg.text)
-        msg.K = ns.Reserve.EstimateWindowRows(ns.Bubble.TextWidth(visible), m.plateWidth, visible, Settings().target)
+        msg.K = ns.Reserve.EstimateWindowRows(ns.Bubble.TextWidth(visible), m.plateWidth, visible, Settings().target,
+            LinkNamesWidth(msg.text))
         msg.kPlate, msg.kText, msg.kTarget = m.plateWidth, m.textSize, Settings().target
     end
     return msg.K
@@ -508,7 +531,6 @@ local function ConfigureIn(b, conv, msg, m)
         b:SetOriginal(msg.text, shown)
         EstimateK(msg, m)
         b:SetRows(msg.req and msg.req.slot or nil, msg.K, SessBit())
-        b:SetLaneReq(msg.req and msg.req.reqId or nil)
     else
         b:SetPlain(msg.text)
         b:SetOriginal(nil, false)
@@ -1229,13 +1251,10 @@ function ConvFrame.Build()
     if not tContains(UISpecialFrames, FRAME_NAME) then
         tinsert(UISpecialFrames, FRAME_NAME)
     end
-    -- moved by its title bar
+    -- moved by its title bar; the new VIEW goes out when the move ends
     frame:RegisterForDrag("LeftButton")
-    -- while it moves the Helper's VIEW 200 is stale: the hint lanes hide until the move ends (and
-    -- the new VIEW is sent), then wait their 1.5 s again
     frame:SetScript("OnDragStart", function(self)
         if self.TitleContainer:IsMouseOver() then
-            ns.Bubble.SetMoving(true)
             self:StartMoving()
         end
     end)
@@ -1243,7 +1262,6 @@ function ConvFrame.Build()
         self:StopMovingOrSizing()
         SavePosition()
         ns.Reserve.SyncView(true)
-        ns.Bubble.SetMoving(false)
     end)
     local tabStrip = CreateFrame("Frame", nil, frame)
     tabStrip:SetPoint("TOPLEFT", frame, "TOPLEFT", TAB_LEFT, TAB_TOP)
@@ -1286,22 +1304,14 @@ function ConvFrame.Build()
         end
     end)
     grip:Init(frame, MIN_W, MIN_H, MAX_W, MAX_H)
-    grip:HookScript("OnMouseDown", function()
-        ns.Bubble.SetMoving(true)
-    end)
-    grip:HookScript("OnMouseUp", function()
-        ns.Bubble.SetMoving(false)
-    end)
     grip:SetOnResizeStoppedCallback(function()
         SavePosition()
         ConvFrame.Relayout()
         ns.Reserve.SyncView(true)
-        ns.Bubble.SetMoving(false)
     end)
     frame:SetScript("OnShow", function()
         PlaySound(SOUNDKIT.IG_CHARACTER_INFO_OPEN)
         ConvFrame.Relayout()
-        ns.Bubble.RefreshLanes()    -- the hint lanes wait their 1.5 s again (the reply card's too)
         Conv.MarkRead(Conv.Selected())
         ns.Reserve.StartWatch()
         ns.Reserve.SyncView(true)
@@ -1320,7 +1330,6 @@ function ConvFrame.Build()
         if GameTooltip:GetOwner() and GameTooltip:IsShown() then
             GameTooltip:Hide()
         end
-        ns.Bubble.RefreshLanes()    -- every hint lane goes with the window
         ns.Reserve.SyncView(true)
         ns.Reserve.MaybeStopWatch()
     end)
@@ -1350,19 +1359,22 @@ function ConvFrame.Hide()
 end
 
 -- The binding and /tpr conv: shows the window (the last conversation, else the first one, else the
--- empty window) or hides it.
+-- empty window) or hides it. Like a [T] click, showing it needs a confirmed Translate Companion
+-- (else only its popup opens, and Continue there shows the window).
 function ConvFrame.Toggle()
     if frame and frame:IsShown() then
         frame:Hide()
         return
     end
-    if not Conv.Selected() then
-        local first = Conv.List()[1]
-        if first then
-            Conv.Select(first.key)
+    ns.Presence.Ensure(function()
+        if not Conv.Selected() then
+            local first = Conv.List()[1]
+            if first then
+                Conv.Select(first.key)
+            end
         end
-    end
-    ConvFrame.Show()
+        ConvFrame.Show()
+    end)
 end
 
 -- A [T] click in window mode (ChatButton): see the top of this file. noCache: Shift was held.
@@ -1545,14 +1557,16 @@ function TranslateProbe_ConvToggle()
 end
 
 function TranslateProbe_ConvReply()
-    if not Conv.Selected() then
-        local first = Conv.List()[1]
-        if first then
-            Conv.Select(first.key)
+    ns.Presence.Ensure(function()
+        if not Conv.Selected() then
+            local first = Conv.List()[1]
+            if first then
+                Conv.Select(first.key)
+            end
         end
-    end
-    ConvFrame.Show()
-    if ns.Composer and ns.Composer.Focus then
-        ns.Composer.Focus()
-    end
+        ConvFrame.Show()
+        if ns.Composer and ns.Composer.Focus then
+            ns.Composer.Focus()
+        end
+    end)
 end

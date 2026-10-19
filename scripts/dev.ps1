@@ -82,7 +82,14 @@ foreach ($path in $targets) {
         }
     }
 
-    robocopy $source $destination /MIR /NFL /NDL /NJH /NJS /NP /XF *.zip | Out-Host
+    # Translate Companion writes its status into the deployed CompanionStatus.lua (docs\ADDON.md,
+    # "Translate Companion presence"): once the folder has one, a deploy never resets it to the
+    # empty copy of the repo (robocopy neither copies nor purges an excluded file).
+    $exclude = @('*.zip')
+    if (Test-Path -LiteralPath (Join-Path $destination 'CompanionStatus.lua')) {
+        $exclude += 'CompanionStatus.lua'
+    }
+    robocopy $source $destination /MIR /NFL /NDL /NJH /NJS /NP /XF @exclude | Out-Host
     $code = $LASTEXITCODE
     if ($code -gt 7) {
         throw "robocopy failed with exit code $code (target: $destination)"

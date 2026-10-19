@@ -11,7 +11,7 @@
 -- Escape: the popup is in UISpecialFrames; while it is shown the conversation window leaves that
 -- list (and comes back a frame after the popup hides), so the first Escape closes the popup only.
 -- No keyboard capture: EnableKeyboard is protected in combat. Other frames of ours that sit over
--- the window (the Translate Companion dialog) hold the window out of the list the same way, with
+-- the window (the Translate Companion popup) hold the window out of the list the same way, with
 -- Popup.HoldWindowEscape(key) on show and Popup.ReleaseWindowEscape(key) on hide.
 local _, ns = ...
 

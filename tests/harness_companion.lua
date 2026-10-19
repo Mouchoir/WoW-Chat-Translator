@@ -1,22 +1,24 @@
--- Hint lanes and the Translate Companion dialog (user requests U1-U3, 2026-10-19): the lane under
--- the inline rows and under the conversation window's bubbles (shown 1.5 s after the card's rows,
--- never before; gone with the card), its [Download] link or button, the dialog (exact URL, Ctrl+C
--- ready, Close, Escape, combat), the reply card's lane, and the "Translate Companion" strings in
--- both locales. Run by tests\harness.lua with the shared context H (see the top of that file).
--- Leaves no window, dialog, row, focus or setting change behind.
+-- Translate Companion presence and the compact bubbles (user requests of 2026-10-19): the status
+-- file and the presence it gives (running, stale, stopped, malformed, missing), every action that
+-- asks for a translation gated by Presence.Ensure (no window, no rows, no request, no chat line
+-- without a confirmed Translate Companion: only the centred popup), the popup (texts per state,
+-- Download, Continue, Cancel, Escape, no keyboard focus, combat), its slot-125 card and VIEW 201,
+-- no hint lane anywhere, the bubbles' row estimate and heights, and the strings in both locales.
+-- Run by tests\harness.lua with the shared context H (see the top of that file). Starts and leaves
+-- the session confirmed (the status file of tests\harness.lua said running), with no window,
+-- popup, row, focus or setting change behind.
 local H = ...
 local M, ns, L, db, check, section = H.M, H.ns, H.L, H.db, H.check, H.section
-local Conv, ConvFrame, Reserve, Request, Bubble, ChatButton = ns.Conv, ns.ConvFrame, ns.Reserve, ns.Request, ns.Bubble,
-    ns.ChatButton
-local Dialog = ns.CompanionDialog
+local Conv, ConvFrame, Reserve, Request, Bubble, ChatButton, Bridge = ns.Conv, ns.ConvFrame, ns.Reserve, ns.Request,
+    ns.Bubble, ns.ChatButton, ns.Bridge
+local Presence, Dialog, Composer = ns.Presence, ns.CompanionDialog, ns.Composer
 
 local URL = "https://github.com/Mouchoir/WoW-Chat-Translator/releases"
-local DELAY_FRAMES = 90         -- 1.5 s at the mock's 60 frames per second
 local saved = { display = db.display, follow = db.follow, glossShow = db.glossShow, names = db.names,
-    convFocus = db.convFocus, convPos = db.convPos }
-db.glossShow, db.names, db.convFocus, db.convPos = true, false, false, nil
+    convFocus = db.convFocus, convPos = db.convPos, replyClipboard = db.replyClipboard }
+db.glossShow, db.names, db.convFocus, db.convPos = false, false, false, nil
 
-local guidSeq = 700
+local guidSeq = 800
 local function NewGuid()
     guidSeq = guidSeq + 1
     return "Player-1-0" .. guidSeq
@@ -26,31 +28,11 @@ local function Line(event, text, sender, guid, opts)
     M.Tick(1)
     return id
 end
-local function Count(s, fragment)
-    local n, i = 0, 1
-    while true do
-        local a, b = s:find(fragment, i, true)
-        if not a then
-            return n
-        end
-        n, i = n + 1, b + 1
-    end
-end
-local function Segments(message)
-    local out = {}
-    for seg in (message .. "|n"):gmatch("(.-)|n") do
-        out[#out + 1] = seg
-    end
-    return out
-end
-local function DLink(lineID)
-    return "addon:TranslateProbe:d:" .. ns.session .. ":" .. lineID
-end
-local function XLink(lineID)
-    return "addon:TranslateProbe:x:" .. ns.session .. ":" .. lineID
-end
 local function Win()
     return ConvFrame.Frame()
+end
+local function WinShown()
+    return Win() ~= nil and Win():IsShown()
 end
 -- What CloseSpecialWindows does on Escape: every shown frame named in UISpecialFrames hides.
 local function PressEscape()
@@ -65,14 +47,50 @@ local function PressEscape()
         end
     end
 end
+-- A status file as Translate Companion writes it, then a /reload's reading of it.
+local function Status(stateName, age)
+    return { v = 1, version = "0.6.0", build = 6, state = stateName, heartbeat = time() - (age or 0) }
+end
+local function Reload(status)
+    _G.TranslateProbe_CompanionStatus = status
+    return Presence.Load()
+end
 local function Reset()
+    Dialog.Close()
     Conv.Clear()
     if Win() then
         Win():Hide()
     end
     ns.Popup.Close()
-    Dialog.Close()
+    if M.Focused() then
+        M.Focused():ClearFocus()
+    end
     M.Tick(130)
+end
+-- Messages sent since n of a kind; the VIEWs whose first entry is the popup's (id 201).
+local function Kinds(n)
+    local kinds = {}
+    for _, m in ipairs(H.Since(n)) do
+        kinds[m.kind] = (kinds[m.kind] or 0) + 1
+    end
+    return kinds
+end
+local function PopupViews(n)
+    local out = {}
+    for _, m in ipairs(H.Since(n, "view")) do
+        if m.views[1] and m.views[1].id == 201 then
+            out[#out + 1] = m.views[1]
+        end
+    end
+    return out
+end
+local function Only(kinds, allowed)
+    for kind in pairs(kinds) do
+        if not allowed[kind] then
+            return false
+        end
+    end
+    return true
 end
 
 ---------------------------------------------------------------------------------------------
@@ -87,35 +105,27 @@ do
     table.sort(helperLeft)
     check(#helperLeft == 0, "no user string names the old Helper (" .. table.concat(helperLeft, ", ") .. ")")
     local expected = H.fr and {
-        LANE_HINT = "Pas de traduction au-dessus ? Lance Translate Companion.",
-        LANE_HINT_SHORT = "Lance Translate Companion.",
-        LANE_DOWNLOAD = "Télécharger",
-        CONV_LANE_IN = "Pas de traduction au-dessus ? Lancez Translate Companion.",
-        CONV_LANE_SHORT = "Lancez Translate Companion.",
-        CONV_LANE_HINT = "Pas d'état au-dessus ? Lancez Translate Companion.",
-        RPL_LANE_HINT = "Pas d'état au-dessus ? Lancez Translate Companion.",
-        CONV_DOWNLOAD = "Télécharger",
         COMPANION_TITLE = "Translate Companion",
-        COMPANION_NOT_RUNNING = "Translate Companion n'est pas lancé. Lancez-le sur votre ordinateur.",
-        COMPANION_DOWNLOAD = "Pas encore installé ? Téléchargez-le ici :",
+        COMPANION_TEXT_ABSENT = "Translate Companion n'est pas installé ou n'est pas lancé. Lancez-le sur votre ordinateur, puis cliquez sur Continuer. Pas installé ? Téléchargez-le.",
+        COMPANION_TEXT_INSTALLED = "Translate Companion est installé mais n'est pas lancé. Lancez-le sur votre ordinateur, puis cliquez sur Continuer.",
+        COMPANION_CARD_CAPTION = "Dès que Translate Companion tourne, il l'indique sur la barre ci-dessus.",
+        COMPANION_BTN_CONTINUE = "Continuer",
+        COMPANION_BTN_DOWNLOAD = "Télécharger",
+        COMPANION_BTN_CANCEL = "Annuler",
         COMPANION_COPY_HINT = "Appuyez sur Ctrl+C pour copier le lien, puis collez-le dans votre navigateur.",
-        COMPANION_CLOSE = "Fermer",
+        CONV_HELPER_TIP = "Rien d'affiché ? Translate Companion est peut-être fermé.",
         APP_DOWNLOAD = "Pas encore installé ? Télécharge-le ici : %s",
         HELP_APP = "/tpr app - à propos de Translate Companion et où le télécharger",
     } or {
-        LANE_HINT = "No translation above? Start Translate Companion.",
-        LANE_HINT_SHORT = "Start Translate Companion.",
-        LANE_DOWNLOAD = "Download",
-        CONV_LANE_IN = "No translation above? Start Translate Companion.",
-        CONV_LANE_SHORT = "Start Translate Companion.",
-        CONV_LANE_HINT = "No status above? Start Translate Companion.",
-        RPL_LANE_HINT = "No status above? Start Translate Companion.",
-        CONV_DOWNLOAD = "Download",
         COMPANION_TITLE = "Translate Companion",
-        COMPANION_NOT_RUNNING = "Translate Companion is not running. Start it on your computer.",
-        COMPANION_DOWNLOAD = "Not installed? Download it from:",
+        COMPANION_TEXT_ABSENT = "Translate Companion is not installed or not running. Start it on your computer, then click Continue. Not installed? Download it.",
+        COMPANION_TEXT_INSTALLED = "Translate Companion is installed but not running. Start it on your computer, then click Continue.",
+        COMPANION_CARD_CAPTION = "Once Translate Companion runs, it says so on the bar above.",
+        COMPANION_BTN_CONTINUE = "Continue",
+        COMPANION_BTN_DOWNLOAD = "Download",
+        COMPANION_BTN_CANCEL = "Cancel",
         COMPANION_COPY_HINT = "Press Ctrl+C to copy the link, then paste it in your web browser.",
-        COMPANION_CLOSE = "Close",
+        CONV_HELPER_TIP = "Nothing painted? Translate Companion may be closed.",
         APP_DOWNLOAD = "Not installed? Download it from %s",
         HELP_APP = "/tpr app - about Translate Companion and where to download it",
     }
@@ -126,481 +136,617 @@ do
         end
     end
     table.sort(wrong)
-    check(#wrong == 0, "lane, dialog and /tpr app strings in this locale (" .. table.concat(wrong, ", ") .. ")")
-    local piped = false
-    for _, key in ipairs({ "LANE_HINT", "LANE_HINT_SHORT", "LANE_DOWNLOAD" }) do
-        piped = piped or L[key]:find("|", 1, true) ~= nil
+    check(#wrong == 0, "popup, tooltip and /tpr app strings in this locale (" .. table.concat(wrong, ", ") .. ")")
+    local gone = {}
+    for _, key in ipairs({ "LANE_HINT", "LANE_HINT_SHORT", "LANE_DOWNLOAD", "CONV_LANE_HINT", "CONV_LANE_IN",
+        "CONV_LANE_SHORT", "CONV_DOWNLOAD", "RPL_LANE_HINT", "FIRST_USE", "COMPANION_NOT_RUNNING", "COMPANION_DOWNLOAD",
+        "COMPANION_CLOSE" }) do
+        if L[key] ~= nil then
+            gone[#gone + 1] = key
+        end
     end
-    check(not piped, "the inline lane's strings hold no pipe (they sit inside chat links)")
+    check(#gone == 0, "no hint lane, first-use or old dialog string is left (" .. table.concat(gone, ", ") .. ")")
+    -- frFR complete: every popup and status key of Locales.lua has its French line
+    local src = ADDON_SOURCES and ADDON_SOURCES["Locales.lua"] or ""
+    local enPart, frPart = src:match("local L = (%b{})"), src:match("local frFR = (%b{})")
+    local function Keys(part)
+        local keys = {}
+        for key in (part or ""):gmatch("\n%s*([%u%d_]+)%s*=") do
+            if key:find("^COMPANION_") or key:find("^APP_") then
+                keys[key] = true
+            end
+        end
+        return keys
+    end
+    local en, frk = Keys(enPart), Keys(frPart)
+    local missing, count = {}, 0
+    for key in pairs(en) do
+        count = count + 1
+        if not frk[key] then
+            missing[#missing + 1] = key
+        end
+    end
+    table.sort(missing)
+    check(count >= 16 and #missing == 0, "every popup and /tpr app string has its frFR line (" .. count .. " keys; missing: "
+        .. table.concat(missing, ", ") .. ")")
+    local piped, dashed = {}, {}
+    for key in pairs(en) do
+        if type(L[key]) == "string" and L[key]:find("|", 1, true) then
+            piped[#piped + 1] = key
+        end
+    end
+    for _, file in ipairs({ "Locales.lua", "Presence.lua", "CompanionDialog.lua", "CompanionStatus.lua" }) do
+        local s = ADDON_SOURCES and ADDON_SOURCES[file] or ""
+        if s:find("\226\128\148", 1, true) or s:find("\226\128\166", 1, true) then
+            dashed[#dashed + 1] = file
+        end
+    end
+    check(#piped == 0 and #dashed == 0, "no pipe in the popup strings, no em dash or one-character ellipsis ("
+        .. table.concat(piped, ", ") .. table.concat(dashed, ", ") .. ")")
     check(ns.COMPANION_URL == URL, "one download URL on the addon side: " .. URL)
-    check(ns.VERSION == "0.6.0", "addon version 0.6.0")
+    check(ns.VERSION == "0.7.0" and ns.ADDON_BUILD == 6, "addon version 0.7.0, protocol build 6")
     local printed = #M.Printed()
     H.slash("app")
     local lines = {}
     for i = printed + 1, #M.Printed() do
         lines[#lines + 1] = M.Printed()[i]
     end
-    check(#lines == 5 and lines[5]:find(L.APP_DOWNLOAD:format(URL), 1, true) ~= nil and lines[1]:find(L.APP_1, 1, true) ~= nil,
-        "/tpr app: the four lines, then where to download Translate Companion (the exact URL)")
-    H.slash("help")
-    check(H.Printed(L.HELP_APP), "/tpr help lists /tpr app")
+    check(#lines == 7 and lines[1]:find(L.APP_1, 1, true) and lines[5]:find(L.APP_DOWNLOAD:format(URL), 1, true)
+        and lines[6]:find(L.APP_STATUS_RUNNING:format(" 0.6.0"), 1, true) and lines[7]:find(L.APP_STATUS_CONFIRMED, 1, true),
+        "/tpr app: the four lines, the download page, what the status file said, the session confirmed")
 end
 
 ---------------------------------------------------------------------------------------------
-section("companion: Reserve.LaneRow fits the plate")
+section("companion: the status file")
 do
-    local m = Reserve.Metrics(ChatFrame1)
-    local function Fake(plateW)
-        return { W = m.W, plateW = plateW, tex = m.tex }
+    local now = time()
+    local function Is(status, want, label)
+        local got = Presence.Classify(status, now)
+        check(got == want, label .. ": " .. want .. " (" .. tostring(got) .. ")")
     end
-    local function Fits(row, plateW)
-        local text = (row.hint or "") .. (row.download and ("[" .. row.download .. "]") or "")
-        return select(1, Reserve.Measure(ChatFrame1, text)) <= (8 * m.W + plateW) * m.tex
+    Is(nil, "absent", "no status table (the file as the addon ships it)")
+    Is({ v = 1, state = "running", heartbeat = now }, "running", "running, heartbeat now")
+    Is({ v = 1, state = "running", heartbeat = now - 150 }, "running", "running, heartbeat 150 s old")
+    Is({ v = 1, state = "running", heartbeat = now + 150 }, "running", "running, heartbeat 150 s ahead (clock skew)")
+    Is({ v = 1, state = "running", heartbeat = now - 151 }, "installed", "running but stale (151 s)")
+    Is({ v = 1, state = "running", heartbeat = now + 151 }, "installed", "running, 151 s ahead")
+    Is({ v = 1, state = "stopped", heartbeat = now }, "installed", "stopped (a clean exit)")
+    Is({ v = 1, state = "RUNNING", heartbeat = now }, "installed", "malformed: another word")
+    Is({ v = 1, state = "running", heartbeat = tostring(now) }, "installed", "malformed: heartbeat as a string")
+    Is({ v = 1, state = "running" }, "installed", "malformed: no heartbeat")
+    Is({ v = 1, state = "running", heartbeat = 0 / 0 }, "installed", "malformed: NaN heartbeat")
+    Is({ v = 1, state = "running", heartbeat = math.huge }, "installed", "malformed: infinite heartbeat")
+    Is({}, "installed", "an empty table")
+    Is("running", "installed", "not a table")
+    Is(setmetatable({}, { __index = function()
+        error("no")
+    end }), "installed", "a table whose metamethods fail is read raw")
+    local _, info = Presence.Classify({ v = 1, version = "0.6.0", build = 6, state = "running", heartbeat = now - 12 }, now)
+    check(info.version == "0.6.0" and info.build == 6 and info.age == 12, "version, build and heartbeat age are read")
+    local _, odd = Presence.Classify({ version = "0.6.0; os.exit()", build = "6", heartbeat = now }, now)
+    check(odd.version == nil and odd.build == nil, "a version with other characters, a build as text: ignored")
+
+    -- what a /reload reads (the global the deployed CompanionStatus.lua sets)
+    check(Reload(Status("running", 30)) == "running" and Presence.IsConfirmed(), "running at load: the session starts confirmed")
+    check(Reload(Status("running", 600)) == "installed" and not Presence.IsConfirmed(), "stale at load: installed, not confirmed")
+    check(Reload(Status("stopped")) == "installed" and not Presence.IsConfirmed(), "stopped at load: installed, not confirmed")
+    check(Reload(nil) == "absent" and not Presence.IsConfirmed(), "no status at load: absent, not confirmed")
+    -- the shipped file: a comment and the global set to nil, nothing else
+    local shipped = ADDON_SOURCES and ADDON_SOURCES["CompanionStatus.lua"] or ""
+    local code = shipped:gsub("%-%-[^\n]*", ""):gsub("%s+", " ")
+    check(code == " TranslateProbe_CompanionStatus = nil " or code == "TranslateProbe_CompanionStatus = nil "
+        or code == " TranslateProbe_CompanionStatus = nil", "the shipped CompanionStatus.lua sets the global to nil only")
+    local toc = {}
+    for i, file in ipairs(ADDON_FILES) do
+        toc[file] = i
     end
-    local pending = Reserve.LaneRow(ChatFrame1, m, false)
-    check(pending.lane and pending.hint == nil and pending.download == nil, "before the reveal: the row's room only")
-    local wide = Reserve.LaneRow(ChatFrame1, Fake(600), true)
-    check(wide.hint == L.LANE_HINT .. " " and wide.download == L.LANE_DOWNLOAD and Fits(wide, 600),
-        "a wide chat: the full hint and [Download], within the plate's end")
-    local mid = Reserve.LaneRow(ChatFrame1, m, true)
-    check(mid.hint == L.LANE_HINT_SHORT .. " " and mid.download == L.LANE_DOWNLOAD and Fits(mid, m.plateW)
-        and not Fits({ hint = L.LANE_HINT .. " ", download = L.LANE_DOWNLOAD }, m.plateW),
-        "the default chat: the short hint (the full one would pass the plate's end)")
-    local narrow = Reserve.LaneRow(ChatFrame1, Fake(70), true)
-    check(narrow.hint == nil and narrow.download == L.LANE_DOWNLOAD and Fits(narrow, 70), "a narrow chat: [Download] alone")
-    local tiny = Reserve.LaneRow(ChatFrame1, Fake(10), true)
-    check(tiny.hint == nil and tiny.download == nil, "no room: spaces only, the row never wraps")
+    check(toc["CompanionStatus.lua"] and toc["CompanionStatus.lua"] < toc["Core.lua"] and toc["Presence.lua"],
+        "listed in the TOC before Core.lua")
 end
 
 ---------------------------------------------------------------------------------------------
-section("companion: the hint lane under inline rows")
+section("companion: [T] without Translate Companion opens only the popup")
 do
-    db.display = "inline"
-    local text = "Hallo zusammen, wer kommt mit in die Todesminen? Wir brauchen noch einen Heiler, lfm"
-    local id = Line("CHAT_MSG_SAY", text, "Lane-Pewpewp", NewGuid())
-    local base = H.EntryFor(ChatFrame1, id).message
-    local n0 = #H.sent
+    Reload(nil)     -- absent
+    db.display = "window"
+    local guid = NewGuid()
+    local id = Line("CHAT_MSG_WHISPER", "Hallo, hast du Lust auf die Todesminen heute Abend?", "Gate-Pewpewp", guid)
+    local base1 = H.EntryFor(ChatFrame1, id).message
+    local function Untouched(label)
+        check(not WinShown() and Conv.Get(guid) == nil and #Conv.List() == 0, label .. ": no conversation window, no conversation")
+        check(H.EntryFor(ChatFrame1, id).message == base1 and Request.Count() == 0, label .. ": no rows under the line")
+    end
+    local printed, n = #M.Printed(), #H.sent
     M.Click(H.ButtonOf(id), ChatFrame1)
-    local tr = H.Since(n0, "translate")[1]
-    local K = tr and tr.rows
-    local pendingEntry = H.EntryFor(ChatFrame1, id).message
-    local segs = Segments(pendingEntry)
-    local laneSeg = segs[K + 2] or ""
-    check(K and Request.LaneState(id) == "pending" and laneSeg:find("|cffffd100    |H" .. XLink(id) .. "|h |h|r", 1, true) == 1,
-        "at the click: one more row right after the K tagged rows, gold, spaces only")
-    check(not pendingEntry:find(L.LANE_HINT_SHORT, 1, true) and not pendingEntry:find(DLink(id), 1, true),
-        "no hint and no [Download] before 1.5 s")
-    check(segs[K + 1]:find("|TInterface\\Buttons\\WHITE8X8:", 1, true) and segs[K + 3]
-        and segs[K + 3]:find(ChatButton.GLOSS_START:sub(3), 1, true) == 1, "the lane sits between the last tagged row and the glossary row")
-    local lines = H.Lines(pendingEntry)
-    M.Tick(DELAY_FRAMES - 1)
-    check(H.EntryFor(ChatFrame1, id).message == pendingEntry and Request.LaneState(id) == "pending",
-        "still spaces at 1.5 s minus one frame (no rewrite before)")
-    M.Tick(1)
-    local shown = H.EntryFor(ChatFrame1, id).message
-    local expectedLane = "|n|cffffd100    |H" .. XLink(id) .. "|h" .. L.LANE_HINT_SHORT .. " |h|r|cff66bbff|H" .. DLink(id)
-        .. "|h[" .. L.LANE_DOWNLOAD .. "]|h|r"
-    check(Request.LaneState(id) == "shown" and shown:find(expectedLane, 1, true) ~= nil,
-        "at 1.5 s: the gold hint, then [Download] in our links' blue (a link of kind d)")
-    check(H.Lines(shown) == lines and Count(shown, ChatButton.LANE_START) == 1 and shown:sub(1, #base) == base,
-        "the same number of rows as before the reveal (no jump), one lane")
-    local f3 = H.EntryFor(ChatFrame3, id)
-    check(f3 and f3.message:find(DLink(id), 1, true) ~= nil, "the lane is in every chat frame that shows the line")
-    local snap = H.Snapshot()
-    M.Tick(60 * 20)
-    check(H.Snapshot() == snap, "no other rewrite afterwards (the line fades like any other)")
-    -- hovering [Download] shows no tooltip (it would cover the translation the Helper draws)
-    EventRegistry:TriggerEvent("ChatFrame.OnHyperlinkEnter", ChatFrame1, DLink(id), "[" .. L.LANE_DOWNLOAD .. "]")
-    check(not GameTooltip:IsShown(), "no tooltip on [Download]")
-    EventRegistry:TriggerEvent("ChatFrame.OnHyperlinkLeave", ChatFrame1)
-
-    section("companion: [Download] opens the dialog")
-    n0 = #H.sent
-    M.Click(DLink(id), ChatFrame1)
     local d = Dialog.Frame()
     check(Dialog.IsShown() and d and d:GetFrameStrata() == "DIALOG" and d:IsToplevel() and d:IsClampedToScreen(),
-        "[Download] opens the Translate Companion dialog (strata DIALOG)")
-    check(#H.sent == n0 and H.EntryFor(ChatFrame1, id).message == shown and Request.LaneState(id) == "shown",
-        "the rows and the lane stay, nothing sent")
-    check(d.Title:GetText() == L.COMPANION_TITLE and d.Body:GetText() == L.COMPANION_NOT_RUNNING
-        and d.Download:GetText() == L.COMPANION_DOWNLOAD and d.Hint:GetText() == L.COMPANION_COPY_HINT,
-        "title, start-it, download-it and Ctrl+C texts")
-    local box = d.Box
-    check(box:GetText() == URL, "the URL, exactly: " .. URL)
-    check(M.Focused() == box and box.highlight and box.highlight[1] == 0 and box.highlight[2] == #URL,
-        "the URL is focused and highlighted, ready for Ctrl+C")
-    check(d.CloseButton:GetText() == CLOSE, "a Close button with the client's own word")
+        "a [T] click: the Translate Companion popup (strata DIALOG)")
+    Untouched("[T]")
+    local kinds = Kinds(n)
+    check(Only(kinds, { view = true }) and (kinds.view or 0) >= 1, "nothing sent but the popup's VIEW (no TRANSLATE, no COLOURS)")
+    check(#M.Printed() == printed, "nothing printed in the chat")
+    check(M.Focused() == nil, "the popup never takes the keyboard focus")
+    check(Presence.HasPending(), "the click waits for Continue")
+    -- centred on the screen
+    local dl, dbm, dw, dh = d:GetScaledRect()
+    local sw, sh = UIParent:GetScaledRect()
+    sw, sh = select(3, UIParent:GetScaledRect())
+    check(math.abs((dl + dw / 2) - sw / 2) < 1 and math.abs((dbm + dh / 2) - sh / 2) < 1, "centred on the screen")
+    -- the texts and buttons for "absent"
+    check(d.Title:GetText() == L.COMPANION_TITLE and d.Body:GetText() == L.COMPANION_TEXT_ABSENT
+        and d.Caption:GetText() == L.COMPANION_CARD_CAPTION, "title, the absent text, the card's caption")
+    check(d.ContinueButton:IsShown() and d.DownloadButton:IsShown() and d.CancelButton:IsShown()
+        and d.ContinueButton:GetText() == L.COMPANION_BTN_CONTINUE and d.DownloadButton:GetText() == L.COMPANION_BTN_DOWNLOAD
+        and d.CancelButton:GetText() == L.COMPANION_BTN_CANCEL, "[Continue] [Download] [Cancel]")
+    local _, cb = d.ContinueButton:GetScaledRect()
+    local _, db2 = d.DownloadButton:GetScaledRect()
+    local cl = d.ContinueButton:GetScaledRect()
+    local dll = d.DownloadButton:GetScaledRect()
+    local kl = d.CancelButton:GetScaledRect()
+    check(cb == db2 and cl < dll and dll < kl, "in one row, Continue first")
+    check(not d.Box:IsShown() and not d.CopyHint:IsShown(), "the download page waits for [Download]")
     check(tContains(UISpecialFrames, "TranslateProbeCompanion"), "Escape closes it (UISpecialFrames)")
-    M.Type(box, "x")
-    check(box:GetText() == URL and box.highlight and box.highlight[2] == #URL, "read-only: typing puts the URL back, highlighted")
-    M.Key(box, "ESCAPE")
-    check(not Dialog.IsShown() and M.Focused() == nil, "Escape in the box closes it and frees the keyboard")
-    M.Click(DLink(id), ChatFrame1)
-    M.ClickButton(d.CloseButton)
-    check(not Dialog.IsShown() and M.Focused() == nil, "Close closes it")
-    M.Click(DLink(id), ChatFrame1)
-    box:ClearFocus()
-    PressEscape()
-    check(not Dialog.IsShown(), "Escape without the box's focus (UISpecialFrames) closes it too")
-    M.Tick(1)
-    -- combat: the box gives the keys back, and a dialog opened in combat never takes them
-    M.Click(DLink(id), ChatFrame1)
-    M.SetCombat(true)
-    check(Dialog.IsShown() and M.Focused() == nil, "combat start: the box loses the focus, the dialog stays")
-    Dialog.Close()
-    M.Click(DLink(id), ChatFrame1)
-    check(Dialog.IsShown() and M.Focused() == nil and box:GetText() == URL, "opened in combat: shown, no keyboard focus")
-    Dialog.Close()
-    M.SetCombat(false)
-    M.Tick(1)
 
-    section("companion: inline lane removal")
+    -- Ctrl-click (inline) and Shift-click: the same popup, still nothing else
     M.Tick(61)
-    M.Click(XLink(id), ChatFrame1)
-    check(H.EntryFor(ChatFrame1, id).message == base and Request.LaneState(id) == nil, "a click on the rows removes the lane with them")
-    -- removed before the reveal: nothing comes back
-    local id2 = Line("CHAT_MSG_SAY", "wer geht mit Gnomeregan, brauchen Tank", "Lane-Two", NewGuid())
-    local base2 = H.EntryFor(ChatFrame1, id2).message
-    M.Click(H.ButtonOf(id2), ChatFrame1)
-    M.Tick(30)
-    M.Click(XLink(id2), ChatFrame1)
-    M.Tick(DELAY_FRAMES)
-    check(H.EntryFor(ChatFrame1, id2).message == base2, "rows removed before 1.5 s: the reveal does nothing")
-    -- a re-click while the lane waits: still one lane, revealed once
+    n = #H.sent
+    M.Click(H.ButtonOf(id), ChatFrame1, false, true)
+    Untouched("Ctrl-click")
     M.Tick(61)
-    M.Click(H.ButtonOf(id2), ChatFrame1)
-    M.Tick(65)
-    M.Click(H.ButtonOf(id2), ChatFrame1)
-    M.Tick(30)
-    local e2 = H.EntryFor(ChatFrame1, id2).message
-    check(Request.LaneState(id2) == "shown" and Count(e2, ChatButton.LANE_START) == 1 and Count(e2, DLink(id2)) == 1,
-        "a re-click keeps one lane, revealed 1.5 s after the first click")
-    -- /tpr clear before the reveal
+    M.Click(H.ButtonOf(id), ChatFrame1, true)
+    Untouched("Shift-click")
+    check(Only(Kinds(n), { view = true }) and Dialog.IsShown() and #M.Printed() == printed,
+        "Ctrl and Shift: the popup again, nothing sent but VIEWs, nothing printed")
+
+    -- Cancel drops the click; Escape too
+    M.ClickButton(d.CancelButton)
+    M.Tick(5)
+    check(not Dialog.IsShown() and not Presence.HasPending() and not Presence.IsConfirmed(), "Cancel: closed, the click dropped")
+    Untouched("after Cancel")
     M.Tick(61)
-    M.Click(XLink(id2), ChatFrame1)
-    local id3 = Line("CHAT_MSG_SAY", "lf1m heal, dann gehts los", "Lane-Three", NewGuid())
-    local base3 = H.EntryFor(ChatFrame1, id3).message
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    PressEscape()
+    M.Tick(5)
+    check(not Dialog.IsShown() and not Presence.HasPending(), "Escape: closed, the click dropped")
+    Untouched("after Escape")
+    -- the key bindings and /tpr conv: the window needs Translate Companion too
+    TranslateProbe_ConvToggle()
+    check(Dialog.IsShown() and not WinShown(), "the show/hide binding: only the popup")
+    Dialog.Close()
+    H.slash("conv")
+    check(Dialog.IsShown() and not WinShown(), "/tpr conv: only the popup")
+    Dialog.Close()
+    TranslateProbe_ConvReply()
+    check(Dialog.IsShown() and not WinShown() and M.Focused() == nil, "the reply binding: only the popup, no focus taken")
+    Dialog.Close()
+    check(#M.Printed() == printed and not Presence.HasPending(), "nothing printed, nothing waiting")
+
+    -- Continue runs the latest click once
+    local guid2 = NewGuid()
+    local id2 = Line("CHAT_MSG_WHISPER", "Bist du noch da? Wir warten am Eingang.", "Gate-Second", guid2)
+    M.Tick(61)
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    M.Click(H.ButtonOf(id2), ChatFrame1)
+    n = #H.sent
+    M.ClickButton(d.ContinueButton)
+    local tr = H.Since(n, "translate")
+    check(not Dialog.IsShown() and Presence.IsConfirmed() and not Presence.HasPending(), "Continue: closed, the session confirmed")
+    check(WinShown() and Conv.Get(guid2) ~= nil and Conv.Get(guid) == nil and #tr == 1 and tr[1].slot >= 100
+        and tr[1].slot <= 124, "the latest click runs, once: its conversation opens and its bubble is requested")
+    local extra = {}
+    for i = printed + 1, #M.Printed() do
+        if not M.Printed()[i]:find(L.CONV_FIRST_TIP, 1, true) then
+            extra[#extra + 1] = M.Printed()[i]
+        end
+    end
+    check(#extra == 0, "nothing printed in the chat but the window's one-time tip")
+    M.ClickButton(d.ContinueButton)
+    check(#H.Since(n, "translate") == 1, "a second Continue runs nothing")
+    -- confirmed: [T] acts at once, no popup
+    M.Tick(61)
+    n = #H.sent
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    check(not Dialog.IsShown() and Conv.Get(guid) ~= nil and #H.Since(n, "translate") == 1, "confirmed: [T] opens the window at once")
+    M.Tick(61)
+    db.display = "inline"
+    local id3 = Line("CHAT_MSG_SAY", "wer kommt mit Gnomeregan, brauchen Tank", "Gate-Third", NewGuid())
+    n = #H.sent
     M.Click(H.ButtonOf(id3), ChatFrame1)
-    Request.ClearAll()
-    M.Tick(DELAY_FRAMES)
-    check(H.EntryFor(ChatFrame1, id3).message == base3, "/tpr clear before 1.5 s: no lane comes back")
-    db.display = saved.display
+    check(not Dialog.IsShown() and Request.Get(id3) ~= nil and #H.Since(n, "translate") == 1, "confirmed: inline rows at once")
+    Request.Remove(id3)
+    db.display = "window"
 end
 Reset()
 
 ---------------------------------------------------------------------------------------------
-section("companion: the hint lane under a window bubble")
+section("companion: inline mode, Continue writes the rows")
 do
+    Reload(Status("stopped"))
+    db.display = "inline"
+    local id = Line("CHAT_MSG_SAY", "Hallo zusammen, wer kommt mit in die Todesminen? lfm", "Gate-Inline", NewGuid())
+    local base = H.EntryFor(ChatFrame1, id).message
+    local n = #H.sent
+    M.Click(H.ButtonOf(id), ChatFrame1, true)    -- Shift: without the cache
+    local d = Dialog.Frame()
+    check(Dialog.IsShown() and d.Body:GetText() == L.COMPANION_TEXT_INSTALLED and not d.DownloadButton:IsShown()
+        and d.ContinueButton:IsShown() and d.CancelButton:IsShown(), "installed: its own text, no [Download]")
+    local cl = d.ContinueButton:GetScaledRect()
+    local kl = d.CancelButton:GetScaledRect()
+    local _, _, cw = d.ContinueButton:GetScaledRect()
+    local dl, _, dw = d:GetScaledRect()
+    check(math.abs((cl + (kl + cw)) / 2 - (dl + dw / 2)) < 1, "[Continue] [Cancel] centred")
+    check(H.EntryFor(ChatFrame1, id).message == base and #H.Since(n, "translate") == 0, "no rows, no TRANSLATE before Continue")
+    M.ClickButton(d.ContinueButton)
+    local tr = H.Since(n, "translate")
+    check(#tr == 1 and tr[1].slot < 100 and tr[1].flags == 3 and H.EntryFor(ChatFrame1, id).message ~= base,
+        "Continue: the rows and the TRANSLATE of the click, Shift kept (noCache)")
+    check(H.Lines(H.EntryFor(ChatFrame1, id).message) == tr[1].rows, "only the K tagged rows under the line (no lane)")
+    local snap = H.Snapshot()
+    M.Tick(60 * 5)
+    check(H.Snapshot() == snap, "no delayed rewrite afterwards")
+    Request.Remove(id)
     db.display = "window"
+end
+Reset()
+
+---------------------------------------------------------------------------------------------
+section("companion: the UI hidden while the popup shows; an old [T]")
+do
+    -- Alt+Z (or a cinematic) hides UIParent: the client fires the popup's OnHide while its own
+    -- IsShown() stays true, then OnShow when the UI comes back (the mock does not propagate, so the
+    -- scripts are called as the client calls them)
+    Reload(nil)
+    db.display = "window"
+    local guid = NewGuid()
+    local id = Line("CHAT_MSG_WHISPER", "Kommst du heute noch mit zum Kloster?", "Hide-Pewpewp", guid)
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    local d = Dialog.Frame()
+    local printed = #M.Printed()
+    local n = #H.sent
+    UIParent:Hide()
+    d:GetScript("OnHide")(d)
+    check(d:IsShown() and Presence.HasPending() and Dialog.ViewEntry() == nil, "UI hidden: the popup and its waiting click stay, its card is off screen")
+    M.Tick(60 * 5)
+    check(#PopupViews(n) == 0, "no VIEW of the card while the UI is hidden")
+    n = #H.sent
+    UIParent:Show()
+    d:GetScript("OnShow")(d)
+    check(Dialog.IsShown() and #PopupViews(n) == 1 and Presence.HasPending(), "UI back: the card's VIEW at once, the click still waits")
+    M.Tick(60 * Dialog.VIEW_SECONDS + 2)
+    check(#PopupViews(n) >= 2, "and again every 2 s")
+    PressEscape()
+    check(not Dialog.IsShown() and not Presence.HasPending() and not WinShown(), "Escape still closes it and drops the click")
+    -- Continue after a hide and show runs the click
+    M.Tick(61)
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    UIParent:Hide()
+    d:GetScript("OnHide")(d)
+    UIParent:Show()
+    d:GetScript("OnShow")(d)
+    n = #H.sent
+    M.ClickButton(d.ContinueButton)
+    check(Presence.IsConfirmed() and WinShown() and Conv.Get(guid) ~= nil and #H.Since(n, "translate") == 1,
+        "Continue after the UI came back: the waiting click runs")
+    Reset()
+    -- closed while the UI is hidden (no OnHide fires then): the click is dropped all the same
+    Reload(nil)
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    UIParent:Hide()
+    d:GetScript("OnHide")(d)
+    Dialog.Close()
+    UIParent:Show()
+    check(not Dialog.IsShown() and not Presence.HasPending(), "closed while the UI is hidden: closed, the click dropped")
+    M.Tick(61)
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    check(Dialog.IsShown() and Presence.HasPending(), "the next [T] opens it again")
+    Dialog.Close()
+    -- a [T] from before the last /reload: the popup first, nothing in the chat
+    printed = #M.Printed()
+    n = #H.sent
+    M.Click("addon:TranslateProbe:t:0:42")
+    check(Dialog.IsShown() and #M.Printed() == printed and Only(Kinds(n), { view = true }), "an old [T]: only the popup, nothing printed")
+    M.ClickButton(d.ContinueButton)
+    check(#M.Printed() == printed + 1 and M.Printed()[#M.Printed()]:find(L.OLD_SESSION, 1, true) ~= nil,
+        "Continue: then the old-line notice")
+    db.display = "window"
+end
+Reset()
+
+---------------------------------------------------------------------------------------------
+section("companion: the popup's card and VIEW 201")
+do
+    Reload(nil)
     local _, physH = GetPhysicalScreenSize()
     local k = physH / 768
+    local id = Line("CHAT_MSG_SAY", "anyone selling linen near the bank", "Card-Pewpewp", NewGuid())
+    local n = #H.sent
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    local d = Dialog.Frame()
+    local card = d.Card
+    local m = Dialog.CardMetrics()
+    local views = PopupViews(n)
+    local v = views[1]
+    local e = Dialog.ViewEntry()
+    check(#views == 1 and v and e and v.id == 201 and v.x == e.x and v.y == e.y and v.w == e.w and v.h == e.h
+        and v.fontPx == m.fontPx and v.rowPx == m.rowPx, "a VIEW goes out when it opens, the card first (id 201)")
+    local l, b, w, h = card:GetScaledRect()
+    check(math.abs(v.x - l * k) <= 0.5 and math.abs(v.y - (physH - (b + h) * k)) <= 0.5 and math.abs(v.w - w * k) <= 0.5
+        and math.abs(v.h - h * k) <= 0.5, "VIEW 201: the card's fill in physical px")
+    local others = 0
+    for _, x in ipairs(H.Since(n, "view")[1].views) do
+        others = others + ((x.id >= 1 and x.id < 200) and 1 or 0)
+    end
+    check(others >= 1 and #H.Since(n, "view")[1].views <= 4, "the shown chat frames follow it, 4 entries at most")
+    -- one row of slot 125: 8 tag blocks of the tag colours, then the plate, over the bubble fill
+    local sessBit = ns.sessionId % 2
+    local colours = Bridge.TagColors(Bridge.PRESENCE_SLOT, 0, sessBit)
+    local tagsOk = true
+    local x0
+    for i, t in ipairs(card.Tags) do
+        local tl, tb, tw, th = t:GetScaledRect()
+        x0 = x0 or tl
+        if math.abs(t.r * 255 - colours[i][1]) > 1e-6 or math.abs(t.g * 255 - colours[i][2]) > 1e-6
+            or math.abs(t.b * 255 - colours[i][3]) > 1e-6 or t.a ~= 1 or not t:IsVisible()
+            or math.abs(tl - (x0 + (i - 1) * m.W * card:GetEffectiveScale())) > 1e-6 or math.abs(th * k - m.rowPx) > 1e-6
+            or tw * k < 5 - 1e-6 or tb ~= select(2, card.Tags[1]:GetScaledRect()) then
+            tagsOk = false
+        end
+    end
+    check(tagsOk, "8 tag blocks of slot 125, row 0, this session, opaque, 5 px wide at least, rowPx high")
+    local pl, pb, pw, ph = card.Plate:GetScaledRect()
+    local pr, pg, pbl = card.Plate.r * 255, card.Plate.g * 255, card.Plate.b * 255
+    check(math.abs(pr - 32) < 1e-6 and math.abs(pg - 40) < 1e-6 and math.abs(pbl - 64) < 1e-6 and card.Plate:IsVisible()
+        and math.abs(pl - (x0 + 8 * m.W * card:GetEffectiveScale())) < 1e-6 and math.abs(ph * k - m.rowPx) < 1e-6,
+        "then the plate: the dark strip (PLATE_RGB), one row")
+    local fr, fg, fb = card.Fill.r * 255, card.Fill.g * 255, card.Fill.b * 255
+    check(math.abs(fr - 36) < 1e-6 and math.abs(fg - 30) < 1e-6 and math.abs(fb - 24) < 1e-6 and card.Fill.a == 1,
+        "over the opaque bubble fill (BUBBLE_RGB)")
+    local tb = select(2, card.Tags[1]:GetScaledRect())
+    check((x0 - l) * k >= 3 and (b + h - (tb + m.rowH * card:GetEffectiveScale())) * k >= 3 and (tb - b) * k >= 3
+        and (l + w - (pl + pw)) * k >= 3, "3 px of fill at least above, under, left and right of the row")
+    check((x0 - l) * k >= Dialog.DISCOVERY_LEFT * m.rowPx + 3 - 1e-6 and math.abs(pl + pw - (l + w - m.pad * card:GetEffectiveScale())) < 1e-6,
+        "left of the tag, the fill a discovery scan samples (0.75 of the row height) and 3 px more; the plate ends pad before the right edge")
+    local _, capB, _, capH = d.Caption:GetScaledRect()
+    check(capB + capH <= b + 1e-6 and d.Caption:GetText() ~= "", "the caption is under the card, never on it")
+    -- again every 2 s while it shows
+    n = #H.sent
+    M.Tick(60 * Dialog.VIEW_SECONDS + 2)
+    check(#PopupViews(n) >= 1, "the VIEW goes out again every 2 s (a Companion started later finds the card)")
+    -- [Download]: the page under the card; the card does not move
+    n = #H.sent
+    local beforeH = d:GetHeight()
+    M.ClickButton(d.DownloadButton)
+    local box = d.Box
+    check(d.Box:IsShown() and d.CopyHint:IsShown() and d.CopyHint:GetText() == L.COMPANION_COPY_HINT and d:GetHeight() > beforeH,
+        "[Download]: the page and the Ctrl+C hint, the popup grows")
+    check(box:GetText() == URL and box.highlight and box.highlight[1] == 0 and box.highlight[2] == #URL and M.Focused() == box,
+        "the URL, exactly, highlighted and focused for Ctrl+C after the click: " .. URL)
+    local l2, b2 = card:GetScaledRect()
+    check(math.abs(l2 - l) < 1e-6 and math.abs(b2 - b) < 1e-6 and #PopupViews(n) >= 1
+        and PopupViews(n)[1].y == v.y, "the card stays where it was (the popup grows down)")
+    M.Type(box, "x")
+    check(box:GetText() == URL and box.highlight and box.highlight[2] == #URL, "read-only: typing puts the URL back, highlighted")
+    M.Key(box, "ENTER")
+    check(Dialog.IsShown() and M.Focused() == nil, "Enter in the box gives the keyboard back, the popup stays")
+    -- closing: the card's VIEW goes
+    n = #H.sent
+    box:SetFocus()
+    M.Key(box, "ESCAPE")
+    check(not Dialog.IsShown() and M.Focused() == nil and not Presence.HasPending(), "Escape in the box closes it, the click dropped")
+    local after = H.Since(n, "view")
+    local has201 = false
+    for _, x in ipairs(after[#after] and after[#after].views or {}) do
+        has201 = has201 or x.id == 201
+    end
+    check(#after >= 1 and not has201 and Dialog.ViewEntry() == nil, "closed: a VIEW without the card")
+    n = #H.sent
+    M.Tick(60 * 5)
+    check(#PopupViews(n) == 0, "no more VIEW for it once closed")
+    -- combat: [Download] never takes the keys; combat start gives them back
+    M.Tick(61)
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    M.ClickButton(d.DownloadButton)
+    M.SetCombat(true)
+    check(Dialog.IsShown() and M.Focused() == nil, "combat start: the box loses the focus, the popup stays")
+    Dialog.Close()
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    M.ClickButton(d.DownloadButton)
+    check(Dialog.IsShown() and M.Focused() == nil and d.Box:GetText() == URL, "[Download] in combat: the page, no keyboard focus")
+    Dialog.Close()
+    M.SetCombat(false)
+    -- the UI scale changes while it shows: laid out and its VIEW sent again
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    n = #H.sent
+    M.SetScreen(1920, 1080, 0.9)
+    local v2 = PopupViews(n)[1]
+    local m2 = Dialog.CardMetrics()
+    check(v2 and v2.rowPx == m2.rowPx and m2.W * m2.ppu >= 5 and math.abs(m2.ppu - 0.9 * 1080 / 768) < 1e-9,
+        "a new UI scale: the card's metrics and VIEW follow")
+    M.SetScreen(1920, 1080, 1)
+    Dialog.Close()
+end
+Reset()
+
+---------------------------------------------------------------------------------------------
+section("companion: the window's own translate actions are gated too")
+do
+    -- a conversation made while confirmed, then a session without Translate Companion
+    Reload(Status("running"))
+    db.display, db.follow = "window", "add"
     local guid = NewGuid()
-    local id = Line("CHAT_MSG_WHISPER", "Hallo, hast du Lust auf die Todesminen heute Abend? Wir brauchen noch jemanden.",
-        "Bubble-Lane", guid)
+    local id = Line("CHAT_MSG_WHISPER", "Hallo, kommst du mit in die Todesminen?", "Gate-Window", guid)
     M.Click(H.ButtonOf(id), ChatFrame1)
     local conv = Conv.Get(guid)
-    local msg = conv and conv.msgs[1]
-    local b = msg and ConvFrame.BubbleOf(msg)
-    local m = ConvFrame.Metrics()
-    check(b and msg.req and b.lane and b.laneButton and not b.lane:IsShown() and not b.laneButton:IsShown(),
-        "at the click: the bubble has a lane, its hint hidden")
-    -- geometry: the band [row0.yTop + K * rowPx, + rowPx], the hint from the plate's x, clear of the
-    -- lane's top and bottom by 2 units and 2 physical px at least
-    local K = msg.K
-    local edge = Bubble.LaneEdge(m)
-    check(edge == math.max(2, 2 / m.ppu) and edge * m.ppu >= 2 - 1e-9, "the lane's margin: 2 units, 2 px at least")
-    local _, p1b, _, p1h = b.rowsList[1].plate:GetScaledRect()
-    local row0Top = (p1b + p1h) * k
-    local hl, hb, hw, hh = b.lane:GetScaledRect()
-    local hintTop = (hb + hh) * k
-    local eff = b.box:GetEffectiveScale()
-    local bl, bb, _, bh = b.box:GetScaledRect()
-    check(math.abs((row0Top - hintTop) - (K * m.rowPx + edge * m.ppu)) < 1e-3,
-        "the hint starts its margin under row0.yTop + K * rowPx (the lane's top)")
-    check(math.abs(hh / eff - (m.rowH - 2 * edge)) < 1e-6, "the hint is the row's height less the margin at each edge")
-    check(math.abs((hl - bl) / eff - (m.inset + 8 * m.W)) < 1e-6, "the hint starts at the plate's x (the lane's tag column is plain fill)")
-    local btl, btb, btw, bth = b.laneButton:GetScaledRect()
-    local plateEnd = bl + (m.inset + 8 * m.W + m.plateWidth) * eff
-    check(math.abs(btl - (hl + hw + 4 * eff)) < 1e-6 and btl + btw <= plateEnd + 1e-6 and math.abs((btb + bth) - (hb + hh)) < 1e-6,
-        "[Download] 4 units after the hint, on the same band, before the plate's end")
-    local laneBottom = row0Top - (K + 1) * m.rowPx
-    check(laneBottom - bb * k >= (m.border + 3 / m.ppu) * m.ppu - 1e-6, "fill under the lane: the border and 3 px at least")
-    check(math.abs(bh / eff - (2 * m.inset + (K + 1) * m.rowH)) < 1, "the bubble is one row taller: inset, K rows, the lane, inset")
-    local tw = b.lane:GetUnboundedStringWidth()
-    local fullW = (function()
-        local t = b.lane:GetText()
-        b.lane:SetText(L.CONV_LANE_IN)
-        local w = b.lane:GetUnboundedStringWidth()
-        b.lane:SetText(t)
-        return w
-    end)()
-    local bw = b.laneButton:GetWidth()
-    local fitsFull = fullW + 2 + 4 + bw <= m.plateWidth
-    check((fitsFull and b.lane:GetText() == L.CONV_LANE_IN) or (not fitsFull and b.lane:GetText() == L.CONV_LANE_SHORT
-        and tw + 2 + 4 + bw <= m.plateWidth), "the longest hint that fits beside [Download] (" .. b.lane:GetText() .. ")")
-    local laneFont = _G.TranslateProbeLaneFont or GameFontNormalSmall
-    local lr, lg, lbl = laneFont:GetTextColor()
-    local _, laneSize = laneFont:GetFont()
-    check(laneFont and b.lane.fontObject == laneFont and b.laneButton:GetFontString().fontObject == laneFont,
-        "the hint and [Download] use TranslateProbeLaneFont")
-    check(lr == 1 and lg == 0.82 and lbl == 0 and laneSize <= m.rowH - 2 * edge - 1 and laneSize == 10,
-        "the lane font: GameFontNormalSmall's gold and size (" .. tostring(laneSize) .. "), a point under the hint's box")
-    check(b.laneButton:GetFontString():GetText() == "|cff66bbff[" .. L.CONV_DOWNLOAD .. "]|r", "[Download] in our links' blue")
-    -- text size 12 at 1.1 px per unit: rows of 15 px, the hint's box 9.6 units: an 8-point lane font
-    local convText = db.convText
-    db.convText = 12
-    M.SetScreen(1920, 1080, 1.1 * 768 / 1080)
+    Line("CHAT_MSG_WHISPER", "Wir brauchen noch einen Heiler, bitte.", "Gate-Window", guid)
+    local plainMsg = conv.msgs[#conv.msgs]
+    db.follow = saved.follow
+    Reload(nil)
     ConvFrame.Relayout()
-    local m12 = ConvFrame.Metrics()
-    local e12 = Bubble.LaneEdge(m12)
-    local _, size12 = laneFont:GetFont()
-    check(m12.rowPx == 15 and e12 == 2 and size12 == 8 and math.abs(b.lane:GetHeight() - (m12.rowH - 2 * e12)) < 1e-6,
-        "text size 12, 1.1 px per unit: the lane font shrinks to fit its box (" .. size12 .. ")")
-    -- a pixel-perfect UI (UIParent at 768 / physH) and the window at 80%: 0.8 px per unit, so 2 units
-    -- are 1.6 px: the margin grows to 2 px, the hint's box and font shrink with it
-    local convScale = db.convScale
-    db.convText, db.convScale = convText, 80
-    M.SetScreen(1920, 1080, 768 / 1080)
-    ConvFrame.Relayout()
-    local m80 = ConvFrame.Metrics()
-    local e80 = Bubble.LaneEdge(m80)
-    local _, size80 = laneFont:GetFont()
-    local _, p80b, _, p80h = b.rowsList[1].plate:GetScaledRect()
-    local _, h80b, _, h80h = b.lane:GetScaledRect()
-    local laneTop80 = (p80b + p80h) * k - msg.K * m80.rowPx
-    local hintTop80, hintBottom80 = (h80b + h80h) * k, h80b * k
-    check(math.abs(m80.ppu - 0.8) < 1e-6 and math.abs(e80 - 2.5) < 1e-6 and size80 <= math.floor(m80.rowH - 2 * e80) - 1,
-        "window at 80% on a pixel-perfect UI: margin 2.5 units (2 px), lane font " .. size80)
-    check(laneTop80 - hintTop80 >= 2 - 1e-6 and hintBottom80 - (laneTop80 - m80.rowPx) >= 2 - 1e-6,
-        "the hint's box keeps clear of the lane's outer 2 px rows (the Helper reads them as plain fill)")
-    db.convScale = convScale
-    M.SetScreen(1920, 1080, 1)
-    ConvFrame.Relayout()
-    check(select(2, laneFont:GetFont()) == 10, "back to the default: 10")
-    -- the delayed reveal (the layouts above moved it: it waits from the last one)
-    M.Tick(DELAY_FRAMES - 1)
-    check(not b.lane:IsShown() and not b.laneButton:IsShown(), "still hidden at 1.5 s minus one frame")
-    M.Tick(1)
-    check(b.lane:IsShown() and b.laneButton:IsShown(), "shown at 1.5 s")
-    -- [Download] in a bubble: a right-click and the hover go on to the bubble
-    M.Hover(b.laneButton)
-    check(GameTooltip:IsShown() and GameTooltip:GetOwner() == b.box, "hovering [Download]: the bubble's tooltip")
-    M.Leave()
-    check(not GameTooltip:IsShown(), "and it goes with the cursor")
-    M.ClickButton(b.laneButton, "RightButton")
-    check(ns.Popup.IsOpen() and not Dialog.IsShown(), "a right-click on [Download]: the bubble's menu, not the dialog")
-    ns.Popup.Close()
-    M.Tick(1)
-    -- the window dragged: every hint hides at once (the Helper's VIEW is stale), then waits again
-    local wl0, wb0 = Win():GetScaledRect()
-    M.Hover(Win().TitleContainer)
-    M.Drag(Win(), 40, -30)
-    M.Leave()
-    local wl1, wb1 = Win():GetScaledRect()
-    check(wl1 ~= wl0 and wb1 ~= wb0 and not b.lane:IsShown() and not b.laneButton:IsShown(), "dragged: the hint hides at its new place")
-    M.Tick(DELAY_FRAMES - 1)
-    check(not b.lane:IsShown(), "still hidden 1.5 s minus one frame after the drag")
-    M.Tick(1)
-    check(b.lane:IsShown(), "shown 1.5 s after the drag")
-    Bubble.SetMoving(true)
-    check(not b.lane:IsShown(), "while the window moves: hidden")
-    M.Tick(DELAY_FRAMES)
-    check(not b.lane:IsShown(), "and still hidden 1.5 s into the move")
-    Bubble.SetMoving(false)
-    M.Tick(DELAY_FRAMES)
-    check(b.lane:IsShown(), "1.5 s after the move: shown")
-    -- the grip pressed (a resize): hidden until 1.5 s after it ends
-    M.MouseDown(ConvFrame.Widgets().grip)
-    check(not b.lane:IsShown(), "the resize grip pressed: hidden")
-    M.MouseUp(ConvFrame.Widgets().grip)
-    M.Tick(DELAY_FRAMES)
-    check(b.lane:IsShown(), "1.5 s after the resize: shown")
-    -- [Download]: the dialog, centred on the window; the window leaves the Escape list meanwhile
-    check(M.ClickButton(b.laneButton), "[Download] is a button")
-    local d = Dialog.Frame()
-    local dl, db_, dw, dh = d:GetScaledRect()
-    local wl, wb, ww, wh = Win():GetScaledRect()
-    check(Dialog.IsShown() and math.abs((dl + dw / 2) - (wl + ww / 2)) < 1e-6 and math.abs((db_ + dh / 2) - (wb + wh / 2)) < 1e-6,
-        "the dialog opens centred on the conversation window")
-    check(not tContains(UISpecialFrames, "TranslateProbeConvFrame") and tContains(UISpecialFrames, "TranslateProbeCompanion"),
-        "while it shows, Escape closes the dialog only")
-    d.Box:ClearFocus()
-    PressEscape()
-    check(not Dialog.IsShown() and Win():IsShown(), "Escape: the dialog goes, the window stays")
-    M.Tick(1)
-    check(tContains(UISpecialFrames, "TranslateProbeConvFrame"), "the window is back in the Escape list a frame later")
-    -- a popup and the dialog together: the window stays out until both are gone
-    M.ClickButton(b.box, "RightButton")
-    check(ns.Popup.IsOpen() and not tContains(UISpecialFrames, "TranslateProbeConvFrame"), "a bubble popup opens")
-    Dialog.Open(Win())
-    ns.Popup.Close()
-    M.Tick(2)
-    check(Dialog.IsShown() and not tContains(UISpecialFrames, "TranslateProbeConvFrame"), "the popup closed, the dialog still holds the window out")
-    Dialog.Close()
-    M.Tick(1)
-    check(tContains(UISpecialFrames, "TranslateProbeConvFrame"), "both closed: the window is back once")
-    local inList = 0
-    for _, name in ipairs(UISpecialFrames) do
-        inList = inList + (name == "TranslateProbeConvFrame" and 1 or 0)
-    end
-    check(inList == 1, "listed once")
-
-    section("companion: window lanes follow the request, the window and the bubble")
-    -- a click asks again with 6 rows: the lane moves, hidden again for 1.5 s
-    M.ClickButton(b.box, "LeftButton")
-    check(msg.K == 6 and not b.lane:IsShown(), "a bubble click (6 rows, a new request): the lane moves and waits again")
-    local _, nb, _, nh = b.lane:GetScaledRect()
-    local _, q1b, _, q1h = b.rowsList[1].plate:GetScaledRect()
-    check(math.abs(((q1b + q1h) * k - (nb + nh) * k) - (6 * m.rowPx + 2 * m.ppu)) < 1e-3, "now under row 6")
-    M.Tick(DELAY_FRAMES)
-    check(b.lane:IsShown(), "shown 1.5 s later")
-    -- the window hides and shows: the lane waits again
-    Win():Hide()
-    check(not b.lane:IsShown() and not b.laneButton:IsShown(), "the window hides: the hint goes")
-    ConvFrame.Show()
-    check(not b.lane:IsShown(), "the window shows: the hint waits")
-    M.Tick(DELAY_FRAMES)
-    check(b.lane:IsShown(), "and comes back 1.5 s later")
-    -- a re-layout that changes nothing keeps it
-    ConvFrame.Relayout()
-    check(b.lane:IsShown(), "a layout that moves nothing keeps the hint")
-    -- removed: the bubble is released, its lane hidden, a pending reveal does nothing
-    local guid2 = NewGuid()
-    M.Click(H.ButtonOf(Line("CHAT_MSG_WHISPER", "bist du noch da? wir warten am Eingang", "Bubble-Two", guid2)), ChatFrame1)
-    local conv2 = Conv.Get(guid2)
-    local msg2 = conv2.msgs[1]
-    local b2 = ConvFrame.BubbleOf(msg2)
-    M.Tick(30)
-    Conv.RemoveMsg(conv2, msg2)
-    M.Tick(DELAY_FRAMES)
-    check(not b2.lane:IsShown() and not b2.laneButton:IsShown() and not b2.inUse, "a removed bubble: its lane never shows")
-    -- an untranslated bubble (follow add): no lane
-    db.follow = "add"
-    local guid3 = NewGuid()
-    M.Click(H.ButtonOf(Line("CHAT_MSG_CHANNEL", "WTS Leinenstoff billig, flüstert mir", "Plain-Lane", guid3,
-        { channelString = "2. Trade - City", channelIndex = 2, channelBase = "Trade - City", zoneChannelID = 2 })), ChatFrame1)
-    local conv3 = Conv.Get(guid3)
-    Line("CHAT_MSG_CHANNEL", "noch 20 Stück Leinenstoff da", "Plain-Lane", guid3,
-        { channelString = "2. Trade - City", channelIndex = 2, channelBase = "Trade - City", zoneChannelID = 2 })
-    local plainMsg = conv3.msgs[#conv3.msgs]
     local pb = ConvFrame.BubbleOf(plainMsg)
-    M.Tick(DELAY_FRAMES)
-    check(plainMsg.state ~= "translate" and pb and pb.laneTop == nil and not pb.lane:IsShown() and not pb.laneButton:IsShown(),
-        "an untranslated bubble has no lane")
-    db.follow = saved.follow
-end
-Reset()
-
----------------------------------------------------------------------------------------------
-section("companion: window lanes at the thread's edges")
-do
-    db.display, db.follow = "window", "translate"
-    local guid = NewGuid()
-    local long = "Wir suchen noch einen Heiler und zwei Schadensverursacher für die Schwarzfelsspitze, Treffpunkt in "
-        .. "zehn Minuten am Eingang, bitte mit Erfahrung und Geduld, danke schön"
-    M.Click(H.ButtonOf(Line("CHAT_MSG_SAY", long, "Edge-Lane", guid)), ChatFrame1)
-    local conv = Conv.Get(guid)
-    for i = 1, 12 do
-        H.Deliver("CHAT_MSG_SAY", long .. " " .. i, "Edge-Lane", guid)
-    end
-    M.Tick(1)
-    local scroll = ConvFrame.Widgets().scroll
-    local m = ConvFrame.Metrics()
-    local function LaneState()
-        local _, sb, _, sh = scroll:GetScaledRect()
-        local top, bottom = sb + sh, sb
-        local wrongShown, wrongHidden, shown, cut = 0, 0, 0, 0
-        for _, msg in ipairs(conv.msgs) do
-            local b = ConvFrame.BubbleOf(msg)
-            if b and b.lane then
-                local _, lb, _, lh = b.lane:GetScaledRect()
-                local eff = b.box:GetEffectiveScale()
-                local laneTop, laneBottom = lb + lh + 2 * eff, lb - 2 * eff
-                local _, pb, _, ph = b.rowsList[msg.K].plate:GetScaledRect()
-                local inside = laneTop <= top + 0.01 and laneBottom >= bottom - 0.01 and pb + ph <= top + 0.01 and pb >= bottom - 0.01
-                if not inside and (laneTop > top + 0.01 and laneBottom < top or laneBottom < bottom - 0.01 and laneTop > bottom) then
-                    cut = cut + 1
-                end
-                local should = inside and msg.req ~= nil
-                if b.lane:IsShown() then
-                    shown = shown + 1
-                    if not should then
-                        wrongShown = wrongShown + 1
-                    end
-                elseif should then
-                    wrongHidden = wrongHidden + 1
-                end
-            end
-        end
-        return wrongShown, wrongHidden, shown, cut
-    end
-    M.Tick(DELAY_FRAMES)
-    local wrongShown, wrongHidden, shown = LaneState()
-    check(shown > 0 and wrongShown == 0 and wrongHidden == 0, "at the end of the thread: every whole lane with a request shows (" .. shown .. ")")
-    local base = scroll:GetVerticalScroll()
-    local cut
-    for _, rows in ipairs({ 2.5, 3.5, 1.5, 4.5, 0.5, 5.5 }) do
-        scroll:SetVerticalScroll(math.max(0, base - m.rowH * rows))
-        wrongShown, wrongHidden, shown, cut = LaneState()
-        if cut > 0 then
-            break
-        end
-    end
-    check(cut > 0 and wrongShown == 0, "a lane cut by the thread's edge, or above a cut last row, never shows (" .. cut .. " cut)")
-    -- every lane moved with the scroll: the hint moves one capture before the Helper's paint does,
-    -- so each one hides at its new place and waits again
-    check(shown == 0, "right after a scroll every moved lane hides (" .. shown .. " shown)")
-    M.Tick(DELAY_FRAMES)
-    wrongShown, wrongHidden = LaneState()
-    check(wrongShown == 0 and wrongHidden == 0, "1.5 s after the scroll: every whole lane with a request shows again")
-    db.follow = saved.follow
-end
-Reset()
-
----------------------------------------------------------------------------------------------
-section("companion: the reply card's lane")
-do
-    ConvFrame.Build()
-    ConvFrame.Show()
-    local host = ConvFrame.composerHost
-    local card = Bubble.AcquireReply(host)
-    local m = ConvFrame.Metrics()
-    card:SetDraft("on y va ?")
-    card:SetRows(Reserve.REPLY_SLOT, 2, ns.sessionId % 2)
-    card:SetLaneHint(L.RPL_LANE_HINT)
-    card:ClearAllPoints()
-    card:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", m.x0, 100)
-    card:Layout(m.bubbleWidth, m)
-    check(card.laneButton and not card.lane:IsShown() and not card.laneButton:IsShown(), "a new reply: the lane's hint waits")
-    M.Tick(DELAY_FRAMES - 1)
-    check(not card.lane:IsShown(), "still hidden at 1.5 s minus one frame")
-    M.Tick(1)
-    -- the full hint when it fits beside [Download] in the plate's width, else the short one
-    local shownText = card.lane:GetText()
-    card.lane:SetText(L.RPL_LANE_HINT)
-    local fitsFull = card.lane:GetUnboundedStringWidth() + 2 + 4 + card.laneButton:GetWidth() <= m.plateWidth
-    card.lane:SetText(shownText)
-    local want = fitsFull and L.RPL_LANE_HINT or L.CONV_LANE_SHORT
-    check(card.lane:IsShown() and card.laneButton:IsShown() and shownText == want
-        and card.lane.fontObject == _G.TranslateProbeLaneFont, "then \"" .. want .. "\" in gold, with [Download]")
-    M.ClickButton(card.laneButton)
-    check(Dialog.IsShown(), "the reply card's [Download] opens the dialog too")
+    check(WinShown() and plainMsg.state ~= "translate" and pb and pb.translateBtn:IsShown(), "an untranslated bubble with its Translate button")
+    local n, printed = #H.sent, #M.Printed()
+    M.ClickButton(pb.translateBtn)
+    check(Dialog.IsShown() and plainMsg.state ~= "translate" and #H.Since(n, "translate") == 0 and #M.Printed() == printed,
+        "its Translate: only the popup (no TRANSLATE, no chat line)")
+    check(not tContains(UISpecialFrames, "TranslateProbeConvFrame"), "while it shows, Escape closes the popup only")
+    PressEscape()
+    M.Tick(2)
+    check(not Dialog.IsShown() and WinShown() and tContains(UISpecialFrames, "TranslateProbeConvFrame"),
+        "Escape: the popup goes, the window stays and is back in the Escape list")
+    -- a click on a translated bubble (translate again)
+    local first = conv.msgs[1]
+    local fb = ConvFrame.BubbleOf(first)
+    n = #H.sent
+    M.ClickButton(fb.box, "LeftButton")
+    check(Dialog.IsShown() and #H.Since(n, "translate") == 0 and not first.userK, "a bubble click: only the popup")
     Dialog.Close()
-    M.Tick(1)
-    card:Layout(m.bubbleWidth, m)
-    check(not card.lane:IsShown(), "laid out again (a new reply): it waits again")
-    Win():Hide()
-    M.Tick(DELAY_FRAMES)
-    check(not card.lane:IsShown(), "the window hidden: no hint")
-    ConvFrame.Show()
-    check(not card.lane:IsShown(), "the window shown again: it waits")
-    M.Tick(DELAY_FRAMES)
-    check(card.lane:IsShown(), "then shows")
-    Bubble.Release(card)
-    check(not card.lane:IsShown() and not card.laneButton:IsShown(), "released: no hint")
-    Win():Hide()
+    -- the reply's Translate
+    db.replyClipboard = "never"
+    if not Conv.ReplyLang(conv) then
+        Conv.SetReplyLang(conv, "de")
+    end
+    local box = Composer.Widgets().box
+    box:SetFocus()
+    M.Type(box, "oui j'arrive")
+    n = #H.sent
+    M.ClickButton(Composer.Widgets().translate)
+    check(Dialog.IsShown() and #H.Since(n, "translate") == 0, "the reply's Translate: only the popup")
+    -- Continue: the reply's TRANSLATE goes out
+    M.ClickButton(Dialog.Frame().ContinueButton)
+    local tr = H.Since(n, "translate")
+    check(#tr == 1 and tr[1].slot == Reserve.REPLY_SLOT and tr[1].flags == 6, "Continue: the reply's TRANSLATE (slot 126)")
+    -- confirmed now: the bubble's Translate acts at once
+    n = #H.sent
+    pb = ConvFrame.BubbleOf(plainMsg)
+    M.ClickButton(pb.translateBtn)
+    check(not Dialog.IsShown() and plainMsg.state == "translate" and #H.Since(n, "translate") == 1,
+        "confirmed: the bubble's Translate acts at once")
+    -- the bubble's tooltip says what to check when nothing is painted
+    M.Hover(ConvFrame.BubbleOf(first).box)
+    local tipped = false
+    for _, line in ipairs(GameTooltip.lines or {}) do
+        tipped = tipped or line == L.CONV_HELPER_TIP
+    end
+    check(GameTooltip:IsShown() and tipped, "the bubble's tooltip: \"" .. L.CONV_HELPER_TIP .. "\"")
+    M.Leave()
+    Composer.Reset()
+    db.replyClipboard = saved.replyClipboard
 end
 Reset()
 
-db.display, db.follow, db.glossShow, db.names, db.convFocus, db.convPos = saved.display, saved.follow, saved.glossShow,
-    saved.names, saved.convFocus, saved.convPos
+---------------------------------------------------------------------------------------------
+section("companion: no hint lane anywhere")
+do
+    Reload(Status("running"))
+    check(Reserve.LaneRow == nil and Reserve.LANE_DELAY == nil and Request.LaneState == nil and ChatButton.LANE_START == nil
+        and Bubble.LaneEdge == nil and Bubble.SetMoving == nil and Bubble.RefreshLanes == nil, "no lane code is left")
+    -- inline: the rows and nothing gold under them, then or later
+    db.display, db.glossShow = "inline", true
+    local id = Line("CHAT_MSG_SAY", "Hallo zusammen, wer kommt mit in die Todesminen? lfm", "NoLane-Inline", NewGuid())
+    M.Click(H.ButtonOf(id), ChatFrame1)
+    M.Tick(60 * 3)
+    local entry = H.EntryFor(ChatFrame1, id).message
+    local K = select(3, Request.Get(id))
+    check(not entry:find("|cffffd100", 1, true) and not entry:find(":d:", 1, true) and H.Lines(entry) == K + 1,
+        "inline: K rows and the glossary row, no gold hint, no [Download], 3 s later too")
+    -- an old [Download] link of this session does nothing
+    local printed = #M.Printed()
+    M.Click("addon:TranslateProbe:d:" .. ns.session .. ":" .. id, ChatFrame1)
+    check(not Dialog.IsShown() and #M.Printed() == printed, "a [Download] link of an older build does nothing")
+    Request.Remove(id)
+    -- window: a bubble and the reply card have no lane
+    db.display = "window"
+    local guid = NewGuid()
+    M.Click(H.ButtonOf(Line("CHAT_MSG_WHISPER", "Hallo, hast du heute Zeit?", "NoLane-Window", guid)), ChatFrame1)
+    local msg = Conv.Get(guid).msgs[1]
+    local b = ConvFrame.BubbleOf(msg)
+    M.Tick(60 * 3)
+    local m = ConvFrame.Metrics()
+    local _, bb, _, bh = b.box:GetScaledRect()
+    check(b.lane == nil and b.laneButton == nil and b.laneTop == nil
+        and math.abs(bh / b.box:GetEffectiveScale() - (2 * m.inset + msg.K * m.rowH)) < 1,
+        "a bubble: inset, K rows, inset; nothing under the rows")
+    local reply = Bubble.AcquireReply(ConvFrame.composerHost)
+    reply:SetDraft("on y va ?")
+    reply:SetRows(Reserve.REPLY_SLOT, 2, ns.sessionId % 2)
+    local rh = reply:Layout(m.bubbleWidth, m)
+    check(reply.lane == nil and reply.SetLaneHint == nil and math.abs(rh - (8 + 14 + 4 + 2 * m.rowH + m.inset)) < 1,
+        "the reply card: the draft line, its rows and the inset under them (no lane)")
+    Bubble.Release(reply)
+    check(bb ~= nil and not reply:IsShown(), "released")
+    db.glossShow = false
+end
+Reset()
+
+---------------------------------------------------------------------------------------------
+section("companion: compact bubbles (row estimate and heights)")
+do
+    Reload(Status("running"))
+    db.display = "window"
+    -- the estimate: link names counted as they are, the other text times the bubble factor
+    check(Reserve.WindowFactor("hello there", "fr") == 1.25 and Reserve.WindowFactor("hello there", "en") == 1.25,
+        "Latin to Latin in a bubble: x1.25 (E1 output lengths)")
+    check(math.abs(Reserve.WindowFactor("你好", "en") - 2.2 * 1.1) < 1e-9 and math.abs(Reserve.WindowFactor("привет", "fr") - 1.2 * 1.1) < 1e-9
+        and math.abs(Reserve.WindowFactor("hello", "zh") - 0.8 * 1.1) < 1e-9, "other scripts: the inline factors leaned up by 10%, as before")
+    check(Reserve.EstimateWindowRows(100, 296, "gg", "fr") == 1, "a short line: one row")
+    check(Reserve.EstimateWindowRows(294, 296, "[Encantamiento: Encantar arma 2M: impacto]", "fr", 294) == 1,
+        "a line that is one link name: as wide as it is (the Companion copies it)")
+    check(Reserve.EstimateWindowRows(2000, 296, "long text", "fr", 0) == 6 and Reserve.EstimateWindowRows(0, 296, "", "fr") == 1,
+        "6 rows at most, one for nothing")
+    check(Reserve.EstimateWindowRows(350, 296, "x", "fr", 9999) == Reserve.EstimateWindowRows(350, 296, "x", "fr", 350),
+        "link width capped at the text width")
+    local function BubbleFor(text, sender)
+        local guid = NewGuid()
+        M.Click(H.ButtonOf(Line("CHAT_MSG_CHANNEL", text, sender, guid,
+            { channelString = "2. Trade - City", channelIndex = 2, channelBase = "Trade - City", zoneChannelID = 2 })), ChatFrame1)
+        local msg = Conv.Get(guid).msgs[1]
+        return msg, ConvFrame.BubbleOf(msg)
+    end
+    local m = ConvFrame.Metrics()
+    local ENCHANT = "|cffffd000|Henchant:7788|h[Encantamiento: Encantar arma 2M: impacto]|h|r"
+    local msg, b = BubbleFor("Cherche " .. ENCHANT, "Compact-One")
+    local _, _, _, bh = b.box:GetScaledRect()
+    local eff = b.box:GetEffectiveScale()
+    check(msg.K <= 2 and msg.K >= 1, "\"Cherche [Encantamiento: Encantar arma 2M: impacto]\" at the default window: "
+        .. msg.K .. " row(s), not 3")
+    local gap = Bubble.BarGap(m)
+    check(math.abs(bh / eff - (2 * m.inset + msg.K * m.rowH + gap + b.barH)) < 1 and b.barH == m.rowH,
+        "its bubble: inset, its rows, the gap, one line of links, inset")
+    local _, pkb = b.rowsList[msg.K].plate:GetScaledRect()
+    local _, btnB, _, btnH = b.linkButtons[1]:GetScaledRect()
+    check(math.abs((pkb - (btnB + btnH)) / eff - gap) < 1e-6, "the links bar right under the last row (the small gap)")
+    local msg2, b2 = BubbleFor("lfg", "Compact-Two")
+    local _, _, _, bh2 = b2.box:GetScaledRect()
+    check(msg2.K == 1 and math.abs(bh2 / eff - (2 * m.inset + m.rowH)) < 1, "a short line without links: one row, nothing else")
+    -- a click asks for 6 rows: the bubble grows with them, still nothing under the last row
+    M.ClickButton(b2.box, "LeftButton")
+    b2 = ConvFrame.BubbleOf(msg2)
+    local _, _, _, bh5 = b2.box:GetScaledRect()
+    check(msg2.K == 6 and math.abs(bh5 / eff - (2 * m.inset + 6 * m.rowH)) < 1, "a bubble click: 6 rows, inset under the last")
+    local long = "Wir suchen noch einen Heiler und zwei Schadensverursacher für die Schwarzfelsspitze, Treffpunkt in "
+        .. "zehn Minuten am Eingang, bitte mit Erfahrung und Geduld"
+    local msg3, b3 = BubbleFor(long, "Compact-Three")
+    local _, _, _, bh3 = b3.box:GetScaledRect()
+    local visible = ns.Glossary.VisibleText(long)
+    local expected = math.min(6, math.max(1, math.ceil(Bubble.TextWidth(visible) / m.plateWidth * 1.25 - 0.15)))
+    check(msg3.K == expected and math.abs(bh3 / eff - (2 * m.inset + msg3.K * m.rowH)) < 1,
+        "a long line without links: width in plates x1.25 (" .. msg3.K .. " rows), no extra row")
+    local medium = "Wir suchen noch einen Heiler für die Schwarzfelsspitze, Treffpunkt am Eingang"
+    local msg4, b4 = BubbleFor(medium .. " " .. ENCHANT, "Compact-Four")
+    local _, _, _, bh4 = b4.box:GetScaledRect()
+    local nameW = Bubble.TextWidth("[Encantamiento: Encantar arma 2M: impacto]")
+    local withName = math.min(6, math.max(1, math.ceil((Bubble.TextWidth(medium .. " ") * 1.25 + nameW) / m.plateWidth - 0.15)))
+    local before = math.min(6, math.max(1, math.ceil(Bubble.TextWidth(ns.Glossary.VisibleText(medium .. " " .. ENCHANT))
+        / m.plateWidth * 1.35 * 1.1 - 0.15)))
+    check(msg4.K == withName and withName < before and math.abs(bh4 / eff - (2 * m.inset + msg4.K * m.rowH + gap + b4.barH)) < 1,
+        "a longer line with a link: the name counted as it is, " .. msg4.K .. " rows (" .. before
+        .. " with the factor on the whole line), then the bar")
+end
+Reset()
+
+-- the session as the other files expect it: Translate Companion running, confirmed
+Reload(Status("running"))
+check(Presence.IsConfirmed() and not Dialog.IsShown() and not WinShown() and M.Focused() == nil,
+    "companion: the session is confirmed again, no window, popup or focus left")
+db.display, db.follow, db.glossShow, db.names, db.convFocus, db.convPos, db.replyClipboard = saved.display, saved.follow,
+    saved.glossShow, saved.names, saved.convFocus, saved.convPos, saved.replyClipboard

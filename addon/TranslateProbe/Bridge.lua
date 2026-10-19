@@ -73,6 +73,9 @@ local BUBBLE_RGB = { 36, 30, 24 }              -- art-ok: protocol colour
 
 Bridge.VERSION = VERSION
 Bridge.TEST_SLOT = 127
+-- The status card of the Translate Companion popup (docs\BRIDGE.md section 8d, addon build 6): one
+-- row, no TRANSLATE; a Translate Companion that sees its tag paints "detected" over it.
+Bridge.PRESENCE_SLOT = 125
 Bridge.PLATE_RGB = PLATE_RGB
 Bridge.BUBBLE_RGB = BUBBLE_RGB
 Bridge.LEVELS = LEVELS

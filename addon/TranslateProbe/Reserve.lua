@@ -6,8 +6,9 @@
 -- capture and paints only on plate pixels it sees. Lua geometry never positions a line: the
 -- VIEW message (chat clip rectangles and font size) only bounds the helper's scan.
 --
--- Slots name a request's rows: 0..99 chat lines, 100..125 the conversation window's bubbles,
--- 126 the window's reply card, 127 the TEST message (docs\BRIDGE.md section 8c). A chat slot is
+-- Slots name a request's rows: 0..99 chat lines, 100..124 the conversation window's bubbles,
+-- 125 the status card of the Translate Companion popup (Bridge.PRESENCE_SLOT, no request), 126
+-- the window's reply card, 127 the TEST message (docs\BRIDGE.md sections 8c and 8d). A chat slot is
 -- freed when its rows are removed, or by a read-only scan of the chat history once its line has
 -- left every chat frame. Rows are never rewritten on a timer, so lines fade like any other chat
 -- line. A window slot belongs to { kind = "win", conv, msg } (never scanned, never expired) and
@@ -23,9 +24,10 @@ local floor, ceil, max, min = math.floor, math.ceil, math.max, math.min
 Reserve.PLATE = true            -- false: no plate (full-row fill mode, TRANSLATE flags bit1 = 0)
 
 local NUM_SLOTS = 100           -- chat slots 0..99 (0..126 until 2026-10-19, then the window took 100..126)
-local WIN_FIRST, WIN_LAST = 100, 125    -- the conversation window's bubbles
+local WIN_FIRST, WIN_LAST = 100, 124    -- the conversation window's bubbles (125 is the presence card since build 6)
 local QUARANTINE = 2.0          -- seconds a freed window slot waits before it is used again
-Reserve.REPLY_SLOT = 126        -- the window's reply card (one reply at a time); 127 is Bridge.TEST_SLOT
+Reserve.REPLY_SLOT = 126        -- the window's reply card (one reply at a time); 125 is Bridge.PRESENCE_SLOT,
+                                -- 127 Bridge.TEST_SLOT
 Reserve.CHAT_SLOTS = NUM_SLOTS
 Reserve.WIN_FIRST, Reserve.WIN_LAST = WIN_FIRST, WIN_LAST
 local MAX_VIEWS = 4
@@ -45,6 +47,18 @@ local FACTOR = {
     ["latin>han"] = 0.8, ["cyrillic>han"] = 0.8, ["latin>hangul"] = 1.0,
 }
 local DEFAULT_FACTOR = 1.3
+-- Bubbles of the conversation window: the same factors leaned up by 10% (a cut translation costs
+-- a click, an empty row only space), except Latin to Latin, whose bubbles came out too tall (user
+-- request of 2026-10-19: 3 rows for a 1-row translation). 1.25 is measured: E1 on CPU, the
+-- shipped engine on the Latin-to-Latin lines of tests\eval\chat_samples.tsv, output length over
+-- input length outside the protected spans (tests\eval\out\e1d_lengths.json, counts only): the 22
+-- lines of 30 characters or more (the ones that can need a second row) median 1.06, P75 1.30, P90
+-- 1.39, max 1.42; with the Companion's shrink down to 80% a row holds 1.25 times more, so
+-- 1.25 x 1.25 = 1.56 covers them all. Shorter lines run higher (all 37: P90 1.78, max 2.5: an
+-- abbreviation spelled out) but stay at 35 characters out at most, one row ("..." stays possible;
+-- a click asks again with 6 rows).
+local WINDOW_LEAN = 1.1
+local WINDOW_FACTOR = { ["latin>latin"] = 1.25 }
 
 local free = {}                 -- FIFO of free chat slots: the most recently freed is reused last
 local owner = {}                -- chat slot -> lineID
@@ -166,15 +180,26 @@ function Reserve.EstimateRows(chatFrame, visibleText, target)
     return min(MAX_ROWS, max(1, ceil(rowsSrc * f - 0.15)))
 end
 
--- Rows of a window bubble (1..MAX_ROWS): the text width in the window font against the plate
--- width, times the script factor and 1.1 (the estimate leans up: a cut translation costs a
--- click, an empty row only space).
-function Reserve.EstimateWindowRows(textWidth, plateWidth, visibleText, target)
+-- How much longer a translation into target usually is than visibleText, in a bubble.
+function Reserve.WindowFactor(visibleText, target)
+    local script = ns.Lang.Script(visibleText)
+    local own = script and WINDOW_FACTOR[script .. ">" .. ns.Lang.TargetScript(target)]
+    return own or Reserve.ScriptFactor(visibleText, target) * WINDOW_LEAN
+end
+
+-- Rows of a window bubble (1..MAX_ROWS) from the bubble's own text width (the window font; the
+-- plate width of WindowMetrics): the text outside link names times the bubble factor, plus the
+-- link names as they are (linkWidth, the width of every link name of the line: Translate Companion
+-- copies them as written), against the plate width. Like the inline estimate, the ratio is not
+-- rounded up first, so a short line reserves one row.
+function Reserve.EstimateWindowRows(textWidth, plateWidth, visibleText, target, linkWidth)
     if not (IsPositive(textWidth) and IsPositive(plateWidth)) then
         return 1
     end
-    local f = Reserve.ScriptFactor(visibleText, target)
-    return min(MAX_ROWS, max(1, ceil(textWidth / plateWidth * f * 1.1 - 0.15)))
+    linkWidth = IsNumber(linkWidth) and min(textWidth, max(0, linkWidth)) or 0
+    local f = Reserve.WindowFactor(visibleText, target)
+    local est = ((textWidth - linkWidth) * f + linkWidth) / plateWidth
+    return min(MAX_ROWS, max(1, ceil(est - 0.15)))
 end
 
 -- Geometry of the conversation window's bubbles, in the window's units (docs\ADDON.md, the
@@ -227,36 +252,6 @@ function Reserve.Rows(m, slot, K)
     return rows
 end
 
--- The hint lane of an inline card (user request U1, docs\ADDON.md "Hint lanes"): one more chat row
--- right after the K tagged rows, so its band is [row0.yTop + K * rowPx, + rowPx]. It holds the
--- 4-space indent of every row, then, once revealed, "No translation above? Start Translate
--- Companion." in gold and a [Download] link (ChatButton.SuffixLinks draws it). The text starts at
--- the tag's x0 and never passes the plate's end ((8 W + plateW) texture units from x0), so it never
--- wraps and the Helper's background samples left of the tag and right of the plate stay clean.
--- The longest text that fits is used: the full hint, the short one, the link alone, else nothing.
--- revealed = false: the row's room only (spaces), for the first LANE_DELAY seconds.
--- Returns { lane = true, hint = string|nil, download = string|nil } for SuffixLinks.
-Reserve.LANE_DELAY = 1.5        -- seconds before a hint lane shows (the Helper's first paint comes first)
-function Reserve.LaneRow(chatFrame, m, revealed)
-    local row = { lane = true }
-    if not revealed then
-        return row
-    end
-    local L = ns.L
-    local room = (8 * m.W + m.plateW) * m.tex           -- chat units from the tag's x0 to the plate's end
-    local link = "[" .. L.LANE_DOWNLOAD .. "]"
-    for _, hint in ipairs({ L.LANE_HINT, L.LANE_HINT_SHORT, "" }) do
-        local text = hint == "" and link or (hint .. " " .. link)
-        local ok, width = pcall(Reserve.Measure, chatFrame, text)
-        if ok and IsNumber(width) and width <= room then
-            row.hint = hint ~= "" and (hint .. " ") or nil
-            row.download = L.LANE_DOWNLOAD
-            return row
-        end
-    end
-    return row
-end
-
 ---------------------------------------------------------------------------- slots
 function Reserve.FreeSlot(slot)
     if slot ~= nil and owner[slot] ~= nil then
@@ -284,7 +279,7 @@ local function ReleaseQuarantine()
     end
 end
 
--- A window slot (100..125) for slotOwner = { kind = "win", conv, msg }, or nil when every slot
+-- A window slot (100..124) for slotOwner = { kind = "win", conv, msg }, or nil when every slot
 -- is in use or still in quarantine (the caller frees the least recently visible one and tries
 -- again once the quarantine is over).
 function Reserve.AllocWindowSlot(slotOwner)
@@ -405,6 +400,18 @@ local function ViewOf(frame, k, physH)
     }
 end
 
+-- The Translate Companion popup's VIEW entry (id 201, its status card) while it shows, else nil.
+local function PopupView()
+    local dialog = ns.CompanionDialog
+    if not (dialog and dialog.ViewEntry) then
+        return nil
+    end
+    local ok, view = pcall(dialog.ViewEntry)
+    if ok and type(view) == "table" then
+        return view
+    end
+end
+
 -- The conversation window's VIEW entry (id 200) while it is shown, else nil.
 local function WindowView()
     local cf = ns.ConvFrame
@@ -428,10 +435,10 @@ local function CoveredChat(frame)
     return ok and covered == true
 end
 
--- Rectangles of the conversation window (first, id 200, while shown) and of the shown chat
--- frames, 4 in all at most, in physical px from the client's top-left. A frame whose rectangle is
--- missing or secret is left out, and so is a chat frame the window overlaps while no inline
--- request is active.
+-- Rectangles of the Translate Companion popup's card (first, id 201, while it shows), of the
+-- conversation window (id 200, while shown) and of the shown chat frames, 4 in all at most, in
+-- physical px from the client's top-left. A frame whose rectangle is missing or secret is left
+-- out, and so is a chat frame the window overlaps while no inline request is active.
 function Reserve.View()
     local views = {}
     local okSize, _, physH = pcall(GetPhysicalScreenSize)
@@ -439,9 +446,13 @@ function Reserve.View()
         return views
     end
     local k = physH / 768
+    local popup = PopupView()
+    if popup then
+        views[#views + 1] = popup
+    end
     local win = WindowView()
     if win then
-        views[1] = win
+        views[#views + 1] = win
     end
     ChatFrameUtil.ForEachChatFrame(function(frame)
         if #views >= MAX_VIEWS then

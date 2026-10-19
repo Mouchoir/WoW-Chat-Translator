@@ -78,8 +78,9 @@ do
     local msg = conv and conv.msgs[1]
     local translates = H.Since(n0, "translate")
     local tr = translates[#translates]
-    check(#translates == 1 and tr.slot >= 100 and tr.slot <= 125 and tr.flags == 2 and tr.rows == msg.K
-        and tr.target == db.target, "one TRANSLATE on a window slot (100..125) with the plate, K rows")
+    check(#translates == 1 and tr.slot >= Reserve.WIN_FIRST and tr.slot <= Reserve.WIN_LAST and Reserve.WIN_LAST == 124
+        and tr.flags == 2 and tr.rows == msg.K and tr.target == db.target,
+        "one TRANSLATE on a window slot (100..124; 125 is the presence card) with the plate, K rows")
     local views = H.Since(n0, "view")
     local view = views[#views]
     check(view and view.views[1].id == 200 and #view.views <= 4, "VIEW lists the window first (id 200)")
@@ -532,7 +533,7 @@ do
         return partial, wrongShown, wrongHidden
     end
     -- scroll by a whole number of rows and a half, so rows straddle the edges (the first offset
-    -- that cuts a row: the bubbles' heights, hint lanes included, decide which one does)
+    -- that cuts a row: the bubbles' heights decide which one does)
     local m = ConvFrame.Metrics()
     local base = scroll:GetVerticalScroll()
     local partial, wrongShown, wrongHidden
@@ -778,7 +779,6 @@ do
     local m = ConvFrame.Metrics()
     card:SetDraft("on part dans 5 min ?")
     card:SetRows(Reserve.REPLY_SLOT, 3, ns.sessionId % 2)
-    card:SetLaneHint(L.CONV_LANE_HINT)
     card:ClearAllPoints()
     card:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", m.x0, 100)
     ConvFrame.Show()
@@ -794,17 +794,15 @@ do
     end
     check(math.abs((tops[1] - tops[2]) - m.rowPx) < 1e-6 and math.abs((tops[2] - tops[3]) - m.rowPx) < 1e-6,
         "card rows touch at exactly rowPx")
-    local _, lb, _, lh = card.lane:GetScaledRect()
-    local laneTop = (lb + lh) * k
-    local row0Top = tops[1]
-    check(math.abs((row0Top - laneTop) - (3 * m.rowPx + 2 * m.ppu)) < 1e-3,
-        "the lane hint starts 2 units under row0.yTop + K * rowPx (clear of the lane's top)")
+    check(card.lane == nil and card.laneButton == nil, "no hint lane under the reply's rows (build 6)")
+    local lastBottom = tops[3] - m.rowPx
     local cl, cb, cw, ch = card:CardRect()
     local l, b, w, hh = card:GetScaledRect()
     local inset = m.border * card:GetEffectiveScale()
     check(math.abs(cl - (l + inset)) < 1e-6 and math.abs(cb - (b + inset)) < 1e-6 and math.abs(cw - (w - 2 * inset)) < 1e-6
         and math.abs(ch - (hh - 2 * inset)) < 1e-6, "CardRect: the clean fill inside the border")
-    check(cb * k < (laneTop - m.rowPx * 1) , "the fill reaches below the lane")
+    check(lastBottom - cb * k >= 3 - 1e-6 and math.abs(((b * k + 0) - (lastBottom - m.inset * m.ppu))) < 1,
+        "under the last row: the bubble's inset (VIEW 200 reaches 3 px of fill and more below it)")
     local tag = card.rowsList[1].tag[1]
     local tl = tag:GetScaledRect()
     check(math.abs((tl - l) / card:GetEffectiveScale() - m.inset) < 1e-6, "the tag starts at border + pad")
