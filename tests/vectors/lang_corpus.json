@@ -1,163 +1,651 @@
 {
-  "about": "Chat lines with their language, for the conversation window's language detector (addon/TranslateProbe/LangDetect.lua; checked by tests/harness_conv.lua). Synthetic lines written for the tests, no real player's chat. Each entry is [language code, line]; ko, zh and ru are decided by the writing system.",
-  "lines": [
-    ["de", "hallo zusammen, wer will mit in die Todesminen"],
-    ["en", "Hello, how are you?"],
-    ["fr", "salut, quelqu'un pour le donjon ?"],
-    ["es", "¿Alguien quiere hacer la mazmorra?"],
-    ["de", "(inkl. Speedruns/Split-Raids/BG intern). Kein ewiges PUG-Suchen mehr! Bei Interesse bewerben: https://example.org/gilde"],
-    ["en", "youre lucky to live here"],
-    ["en", "LFM DM need tank"],
-    ["en", "insane"],
-    ["en", "gg"],
-    ["en", "lol ok"],
-    ["en", "WTS [Linen Cloth] x20, pst"],
-    ["en", "where is the flight master"],
-    ["de", "danke"],
-    ["de", "ja klar"],
-    ["de", "Suche Gruppe für die Elite-Quest"],
-    ["de", "wer hat lust auf strat"],
-    ["fr", "merci beaucoup"],
-    ["fr", "je cherche un groupe pour la quête"],
-    ["fr", "besoin d'un heal"],
-    ["es", "Gracias por la ayuda"],
-    ["es", "dónde está el maestro de vuelo"],
-    ["it", "qualcuno per il dungeon?"],
-    ["pt", "alguém quer fazer a masmorra?"],
-    ["en", "anyone know where the mage trainer is"],
-    ["en", "how do i get to ironforge from here"],
-    ["en", "selling copper ore cheap, whisper me"],
-    ["en", "can someone help me with this quest pls"],
-    ["en", "need 2 more dps for SFK then we go"],
-    ["en", "thanks for the group guys"],
-    ["en", "brb"],
-    ["en", "ty"],
-    ["en", "nice one"],
-    ["en", "is the server down for anyone else"],
-    ["en", "my bags are full again"],
-    ["en", "which spec is best for leveling a warrior"],
-    ["en", "guild recruiting casual players, all levels welcome"],
-    ["en", "omw"],
-    ["en", "yes please"],
-    ["en", "sorry i was afk"],
-    ["de", "hat jemand Lust auf Gnomeregan"],
-    ["de", "wo finde ich den Lehrer für Bergbau"],
-    ["de", "verkaufe Kupfererz, bitte flüstern"],
-    ["de", "kann mir jemand bei der Quest helfen"],
-    ["de", "suche noch zwei DDs und einen Heiler"],
-    ["de", "danke für die Gruppe"],
-    ["de", "bin gleich wieder da"],
-    ["de", "gute Nacht zusammen"],
-    ["de", "ist der Server bei euch auch so langsam"],
-    ["de", "welche Skillung ist am besten zum Leveln"],
-    ["de", "Gilde sucht noch aktive Spieler"],
-    ["de", "moin"],
-    ["de", "ich komme"],
-    ["de", "nein danke"],
-    ["fr", "quelqu'un sait où est le maître des mages"],
-    ["fr", "comment on va à Forgefer depuis ici"],
-    ["fr", "je vends du minerai de cuivre pas cher, mp"],
-    ["fr", "quelqu'un peut m'aider pour cette quête svp"],
-    ["fr", "il nous manque un tank et un heal pour les Mortemines"],
-    ["fr", "merci pour le groupe"],
-    ["fr", "je reviens"],
-    ["fr", "bonne nuit tout le monde"],
-    ["fr", "le serveur lag chez vous aussi ?"],
-    ["fr", "quelle spé est la meilleure pour monter un guerrier"],
-    ["fr", "guilde recrute des joueurs actifs"],
-    ["fr", "salut"],
-    ["fr", "j'arrive"],
-    ["fr", "non merci"],
-    ["fr", "c'est trop bien"],
-    ["es", "alguien sabe dónde está el instructor de magos"],
-    ["es", "cómo llego a Forjaz desde aquí"],
-    ["es", "vendo mineral de cobre barato, susurrad"],
-    ["es", "alguien me puede ayudar con esta misión"],
-    ["es", "buscamos un tanque y un sanador para las Minas de la Muerte"],
-    ["es", "gracias por el grupo"],
-    ["es", "ahora vuelvo"],
-    ["es", "buenas noches a todos"],
-    ["es", "hola"],
-    ["es", "vamos"],
-    ["it", "qualcuno sa dove si trova l'istruttore dei maghi"],
-    ["it", "come arrivo a Forgiardente da qui"],
-    ["it", "vendo minerale di rame a poco, sussurratemi"],
-    ["it", "qualcuno mi aiuta con questa missione"],
-    ["it", "grazie per il gruppo"],
-    ["it", "buonanotte a tutti"],
-    ["it", "ciao"],
-    ["it", "arrivo subito"],
-    ["pt", "alguém sabe onde fica o instrutor de magos"],
-    ["pt", "como chego a Altaforja daqui"],
-    ["pt", "vendo minério de cobre barato, sussurrem"],
-    ["pt", "alguém pode me ajudar com essa missão"],
-    ["pt", "obrigado pelo grupo"],
-    ["pt", "boa noite pessoal"],
-    ["pt", "valeu"],
-    ["pt", "já volto"],
-    ["ru", "кто-нибудь идет в подземелье?"],
-    ["ko", "파티 구해요 탱커 1명"],
-    ["zh", "有人组队吗"],
-    ["en", "anyone up for deadmines?"],
-    ["en", "need 1 more dps for strat"],
-    ["en", "ty for the run"],
-    ["en", "can someone help me with this quest"],
-    ["en", "where do i learn mining"],
-    ["en", "is this server always this dead"],
-    ["en", "u going?"],
-    ["en", "how much for the boots"],
-    ["en", "sure, give me a sec"],
-    ["de", "hat jemand lust auf BRD?"],
-    ["de", "brauche noch einen heiler"],
-    ["de", "wo finde ich den lehrer für bergbau"],
-    ["de", "kann mir jemand helfen"],
-    ["de", "gut gemacht"],
-    ["de", "suchen noch dd für scholo"],
-    ["de", "alles klar danke"],
-    ["de", "weiß jemand wo der händler ist"],
-    ["de", "ich hab keine zeit mehr"],
-    ["fr", "qqn pour les mortemines ?"],
-    ["fr", "il nous manque un tank"],
-    ["fr", "je reviens dans 5 min"],
-    ["fr", "où est le maître de vol"],
-    ["fr", "tu peux m'aider pour la quête"],
-    ["fr", "on y va"],
-    ["fr", "c'est quoi le meilleur métier"],
-    ["fr", "désolé j'étais afk"],
-    ["fr", "bien joué"],
-    ["es", "alguien para las minas?"],
-    ["es", "necesitamos un healer"],
-    ["es", "dónde se aprende minería"],
-    ["es", "buenas a todos"],
-    ["es", "vamos ya"],
-    ["es", "lo siento, me tengo que ir"],
-    ["es", "cuánto cuesta"],
-    ["es", "me ayudas con la misión"],
-    ["it", "c'è qualcuno per le miniere?"],
-    ["it", "cerchiamo un tank"],
-    ["it", "grazie mille"],
-    ["it", "dove trovo il maestro di volo"],
-    ["it", "andiamo"],
-    ["it", "scusate devo andare"],
-    ["pt", "alguém pra minas?"],
-    ["pt", "precisamos de um tank"],
-    ["pt", "obrigado pela ajuda"],
-    ["pt", "onde fica o mestre de voo"],
-    ["pt", "vamos lá galera"],
-    ["pt", "alguém me ajuda nessa missão"],
-    ["ru", "кто в мертвые копи?"],
-    ["ko", "같이 하실분"],
-    ["zh", "有人一起吗"],
-    ["en", "ok"],
-    ["en", "thx"],
-    ["en", "lol"],
-    ["en", "hi"],
-    ["en", "sure"],
-    ["fr", "merci"],
-    ["fr", "ouais"],
-    ["de", "jo"],
-    ["es", "vale"],
-    ["it", "grazie"],
-    ["pt", "obrigado"]
+ "about": "Chat lines with their language, for the conversation window's language detector (addon/TranslateProbe/LangDetect.lua; checked by tests/harness_conv.lua). Synthetic lines written for the tests, no real player's chat. Each entry is [language code, line]; ko, zh and ru are decided by the writing system. \"unknown\" lists lines in languages the detector has no profile for (Finnish, Dutch, Polish, Swedish): they must come out unknown, never as a wrong language.",
+ "lines": [
+  [
+   "de",
+   "hallo zusammen, wer will mit in die Todesminen"
+  ],
+  [
+   "en",
+   "Hello, how are you?"
+  ],
+  [
+   "fr",
+   "salut, quelqu'un pour le donjon ?"
+  ],
+  [
+   "es",
+   "¿Alguien quiere hacer la mazmorra?"
+  ],
+  [
+   "de",
+   "(inkl. Speedruns/Split-Raids/BG intern). Kein ewiges PUG-Suchen mehr! Bei Interesse bewerben: https://example.org/gilde"
+  ],
+  [
+   "en",
+   "youre lucky to live here"
+  ],
+  [
+   "en",
+   "LFM DM need tank"
+  ],
+  [
+   "en",
+   "insane"
+  ],
+  [
+   "en",
+   "gg"
+  ],
+  [
+   "en",
+   "lol ok"
+  ],
+  [
+   "en",
+   "WTS [Linen Cloth] x20, pst"
+  ],
+  [
+   "en",
+   "where is the flight master"
+  ],
+  [
+   "de",
+   "danke"
+  ],
+  [
+   "de",
+   "ja klar"
+  ],
+  [
+   "de",
+   "Suche Gruppe für die Elite-Quest"
+  ],
+  [
+   "de",
+   "wer hat lust auf strat"
+  ],
+  [
+   "fr",
+   "merci beaucoup"
+  ],
+  [
+   "fr",
+   "je cherche un groupe pour la quête"
+  ],
+  [
+   "fr",
+   "besoin d'un heal"
+  ],
+  [
+   "es",
+   "Gracias por la ayuda"
+  ],
+  [
+   "es",
+   "dónde está el maestro de vuelo"
+  ],
+  [
+   "it",
+   "qualcuno per il dungeon?"
+  ],
+  [
+   "pt",
+   "alguém quer fazer a masmorra?"
+  ],
+  [
+   "en",
+   "anyone know where the mage trainer is"
+  ],
+  [
+   "en",
+   "how do i get to ironforge from here"
+  ],
+  [
+   "en",
+   "selling copper ore cheap, whisper me"
+  ],
+  [
+   "en",
+   "can someone help me with this quest pls"
+  ],
+  [
+   "en",
+   "need 2 more dps for SFK then we go"
+  ],
+  [
+   "en",
+   "thanks for the group guys"
+  ],
+  [
+   "en",
+   "brb"
+  ],
+  [
+   "en",
+   "ty"
+  ],
+  [
+   "en",
+   "nice one"
+  ],
+  [
+   "en",
+   "is the server down for anyone else"
+  ],
+  [
+   "en",
+   "my bags are full again"
+  ],
+  [
+   "en",
+   "which spec is best for leveling a warrior"
+  ],
+  [
+   "en",
+   "guild recruiting casual players, all levels welcome"
+  ],
+  [
+   "en",
+   "omw"
+  ],
+  [
+   "en",
+   "yes please"
+  ],
+  [
+   "en",
+   "sorry i was afk"
+  ],
+  [
+   "de",
+   "hat jemand Lust auf Gnomeregan"
+  ],
+  [
+   "de",
+   "wo finde ich den Lehrer für Bergbau"
+  ],
+  [
+   "de",
+   "verkaufe Kupfererz, bitte flüstern"
+  ],
+  [
+   "de",
+   "kann mir jemand bei der Quest helfen"
+  ],
+  [
+   "de",
+   "suche noch zwei DDs und einen Heiler"
+  ],
+  [
+   "de",
+   "danke für die Gruppe"
+  ],
+  [
+   "de",
+   "bin gleich wieder da"
+  ],
+  [
+   "de",
+   "gute Nacht zusammen"
+  ],
+  [
+   "de",
+   "ist der Server bei euch auch so langsam"
+  ],
+  [
+   "de",
+   "welche Skillung ist am besten zum Leveln"
+  ],
+  [
+   "de",
+   "Gilde sucht noch aktive Spieler"
+  ],
+  [
+   "de",
+   "moin"
+  ],
+  [
+   "de",
+   "ich komme"
+  ],
+  [
+   "de",
+   "nein danke"
+  ],
+  [
+   "fr",
+   "quelqu'un sait où est le maître des mages"
+  ],
+  [
+   "fr",
+   "comment on va à Forgefer depuis ici"
+  ],
+  [
+   "fr",
+   "je vends du minerai de cuivre pas cher, mp"
+  ],
+  [
+   "fr",
+   "quelqu'un peut m'aider pour cette quête svp"
+  ],
+  [
+   "fr",
+   "il nous manque un tank et un heal pour les Mortemines"
+  ],
+  [
+   "fr",
+   "merci pour le groupe"
+  ],
+  [
+   "fr",
+   "je reviens"
+  ],
+  [
+   "fr",
+   "bonne nuit tout le monde"
+  ],
+  [
+   "fr",
+   "le serveur lag chez vous aussi ?"
+  ],
+  [
+   "fr",
+   "quelle spé est la meilleure pour monter un guerrier"
+  ],
+  [
+   "fr",
+   "guilde recrute des joueurs actifs"
+  ],
+  [
+   "fr",
+   "salut"
+  ],
+  [
+   "fr",
+   "j'arrive"
+  ],
+  [
+   "fr",
+   "non merci"
+  ],
+  [
+   "fr",
+   "c'est trop bien"
+  ],
+  [
+   "es",
+   "alguien sabe dónde está el instructor de magos"
+  ],
+  [
+   "es",
+   "cómo llego a Forjaz desde aquí"
+  ],
+  [
+   "es",
+   "vendo mineral de cobre barato, susurrad"
+  ],
+  [
+   "es",
+   "alguien me puede ayudar con esta misión"
+  ],
+  [
+   "es",
+   "buscamos un tanque y un sanador para las Minas de la Muerte"
+  ],
+  [
+   "es",
+   "gracias por el grupo"
+  ],
+  [
+   "es",
+   "ahora vuelvo"
+  ],
+  [
+   "es",
+   "buenas noches a todos"
+  ],
+  [
+   "es",
+   "hola"
+  ],
+  [
+   "es",
+   "vamos"
+  ],
+  [
+   "it",
+   "qualcuno sa dove si trova l'istruttore dei maghi"
+  ],
+  [
+   "it",
+   "come arrivo a Forgiardente da qui"
+  ],
+  [
+   "it",
+   "vendo minerale di rame a poco, sussurratemi"
+  ],
+  [
+   "it",
+   "qualcuno mi aiuta con questa missione"
+  ],
+  [
+   "it",
+   "grazie per il gruppo"
+  ],
+  [
+   "it",
+   "buonanotte a tutti"
+  ],
+  [
+   "it",
+   "ciao"
+  ],
+  [
+   "it",
+   "arrivo subito"
+  ],
+  [
+   "pt",
+   "alguém sabe onde fica o instrutor de magos"
+  ],
+  [
+   "pt",
+   "como chego a Altaforja daqui"
+  ],
+  [
+   "pt",
+   "vendo minério de cobre barato, sussurrem"
+  ],
+  [
+   "pt",
+   "alguém pode me ajudar com essa missão"
+  ],
+  [
+   "pt",
+   "obrigado pelo grupo"
+  ],
+  [
+   "pt",
+   "boa noite pessoal"
+  ],
+  [
+   "pt",
+   "valeu"
+  ],
+  [
+   "pt",
+   "já volto"
+  ],
+  [
+   "ru",
+   "кто-нибудь идет в подземелье?"
+  ],
+  [
+   "ko",
+   "파티 구해요 탱커 1명"
+  ],
+  [
+   "zh",
+   "有人组队吗"
+  ],
+  [
+   "en",
+   "anyone up for deadmines?"
+  ],
+  [
+   "en",
+   "need 1 more dps for strat"
+  ],
+  [
+   "en",
+   "ty for the run"
+  ],
+  [
+   "en",
+   "can someone help me with this quest"
+  ],
+  [
+   "en",
+   "where do i learn mining"
+  ],
+  [
+   "en",
+   "is this server always this dead"
+  ],
+  [
+   "en",
+   "u going?"
+  ],
+  [
+   "en",
+   "how much for the boots"
+  ],
+  [
+   "en",
+   "sure, give me a sec"
+  ],
+  [
+   "de",
+   "hat jemand lust auf BRD?"
+  ],
+  [
+   "de",
+   "brauche noch einen heiler"
+  ],
+  [
+   "de",
+   "wo finde ich den lehrer für bergbau"
+  ],
+  [
+   "de",
+   "kann mir jemand helfen"
+  ],
+  [
+   "de",
+   "gut gemacht"
+  ],
+  [
+   "de",
+   "suchen noch dd für scholo"
+  ],
+  [
+   "de",
+   "alles klar danke"
+  ],
+  [
+   "de",
+   "weiß jemand wo der händler ist"
+  ],
+  [
+   "de",
+   "ich hab keine zeit mehr"
+  ],
+  [
+   "fr",
+   "qqn pour les mortemines ?"
+  ],
+  [
+   "fr",
+   "il nous manque un tank"
+  ],
+  [
+   "fr",
+   "je reviens dans 5 min"
+  ],
+  [
+   "fr",
+   "où est le maître de vol"
+  ],
+  [
+   "fr",
+   "tu peux m'aider pour la quête"
+  ],
+  [
+   "fr",
+   "on y va"
+  ],
+  [
+   "fr",
+   "c'est quoi le meilleur métier"
+  ],
+  [
+   "fr",
+   "désolé j'étais afk"
+  ],
+  [
+   "fr",
+   "bien joué"
+  ],
+  [
+   "es",
+   "alguien para las minas?"
+  ],
+  [
+   "es",
+   "necesitamos un healer"
+  ],
+  [
+   "es",
+   "dónde se aprende minería"
+  ],
+  [
+   "es",
+   "buenas a todos"
+  ],
+  [
+   "es",
+   "vamos ya"
+  ],
+  [
+   "es",
+   "lo siento, me tengo que ir"
+  ],
+  [
+   "es",
+   "cuánto cuesta"
+  ],
+  [
+   "es",
+   "me ayudas con la misión"
+  ],
+  [
+   "it",
+   "c'è qualcuno per le miniere?"
+  ],
+  [
+   "it",
+   "cerchiamo un tank"
+  ],
+  [
+   "it",
+   "grazie mille"
+  ],
+  [
+   "it",
+   "dove trovo il maestro di volo"
+  ],
+  [
+   "it",
+   "andiamo"
+  ],
+  [
+   "it",
+   "scusate devo andare"
+  ],
+  [
+   "pt",
+   "alguém pra minas?"
+  ],
+  [
+   "pt",
+   "precisamos de um tank"
+  ],
+  [
+   "pt",
+   "obrigado pela ajuda"
+  ],
+  [
+   "pt",
+   "onde fica o mestre de voo"
+  ],
+  [
+   "pt",
+   "vamos lá galera"
+  ],
+  [
+   "pt",
+   "alguém me ajuda nessa missão"
+  ],
+  [
+   "ru",
+   "кто в мертвые копи?"
+  ],
+  [
+   "ko",
+   "같이 하실분"
+  ],
+  [
+   "zh",
+   "有人一起吗"
+  ],
+  [
+   "en",
+   "ok"
+  ],
+  [
+   "en",
+   "thx"
+  ],
+  [
+   "en",
+   "lol"
+  ],
+  [
+   "en",
+   "hi"
+  ],
+  [
+   "en",
+   "sure"
+  ],
+  [
+   "fr",
+   "merci"
+  ],
+  [
+   "fr",
+   "ouais"
+  ],
+  [
+   "de",
+   "jo"
+  ],
+  [
+   "es",
+   "vale"
+  ],
+  [
+   "it",
+   "grazie"
+  ],
+  [
+   "pt",
+   "obrigado"
+  ],
+  [
+   "de",
+   "<Gilde> - Sucht Mitglieder zum Release! Progress & Casual Raids (inkl. Speedruns/BG intern). Kein ewiges PUG-Suchen mehr! Bei Interesse bewerben"
+  ],
+  [
+   "fr",
+   "[GUILDE] Recrute pour son roster PvE/PvP (Heal-Caster) ! Objectif 2 raids/sem. 20h30-23h. Loot en Soft Résa. Joueurs motivés et fiables recherchés."
   ]
+ ],
+ "unknown": [
+  "<Kilta> etsii uutta verta! Yhdessä pelannut porukka jatkaa nyt uudella nimellä. Kaiken tasoiset pelaajat tervetulleita!",
+  "Hoi allemaal, wie wil er mee naar de dungeon vanavond? We zoeken nog een tank",
+  "Siema, ktoś chętny na dungeon? Szukamy jeszcze healera do grupy",
+  "Hej alla, någon som vill köra dungeon ikväll? Vi söker en healer"
+ ]
 }

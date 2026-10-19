@@ -276,7 +276,12 @@ toward English. Rules added for the window:
 - a line of 2 words or fewer is decided by its known words when they all point to one language
   ("moin", "vale", "obrigado") and is **unknown** (nil) without one;
 - unknown when the best language leads the second by less than 15% of the evidence (`Lead`: the
-  gap over the second language's distance above a line of unknown trigrams);
+  gap over the second language's distance above a line of unknown trigrams), going down to 8% for
+  lines of 100 trigrams or more (`NeededLead`; measured in game on 2026-10-19: long German and
+  French guild ads mixed with English game words led by only 12-14% and came out unknown);
+- unknown when the best profile fits the line badly: mean trigram log-probability under -7.95 over
+  30 trigrams or more (`FIT_MIN`). Finnish, Swedish, Polish and Dutch lines (the corpus's
+  `unknown` list) used to come out as Italian or English;
 - per conversation, the scores of the sender's last 5 lines are summed (`Merge`, `Decide`; the
   writing system wins when most lines use one).
 On `tests\vectors\lang_corpus.json` (158 synthetic chat lines): 149 right, 9 unknown, 0 wrong; 91

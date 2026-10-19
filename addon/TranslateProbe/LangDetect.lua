@@ -5,9 +5,10 @@
 -- * Latin text is scored with the character trigram profiles of LangData.lua (en, de, fr, es,
 --   it, pt), plus everyday chat words of each language, English game slang and a small prior
 --   toward English, the usual language of public channels;
--- * "unknown" (nil) instead of a guess: 2 words or fewer with no known word, or a best score that
---   leads the second by less than 15% of the evidence (see Lead below); a line of 2 words or
---   fewer whose known words all point to one language is that language;
+-- * "unknown" (nil) instead of a guess: 2 words or fewer with no known word, a best score that
+--   leads the second by less than 15% of the evidence (8% for long lines; see Lead below), or a
+--   best language whose profile fits the line badly (a language none of the profiles knows); a
+--   line of 2 words or fewer whose known words all point to one language is that language;
 -- * per conversation, the scores of the sender's last lines are summed (Merge, Decide).
 -- Detection runs only for lines added to a conversation and on paste checks (about 1.6 ms per
 -- long line). Nothing is stored: scores live in the conversation's memory only.
@@ -21,9 +22,21 @@ local byte, sub = string.byte, string.sub
 local ENGLISH_PRIOR = 2.0
 local SLANG_BONUS = 3.0
 local WORD_BONUS = 6.0
-local LEAD = 0.15               -- the best language must lead the second by 15% of the evidence
+local LEAD = 0.15               -- the best language must lead the second by 15% of the evidence...
+local LONG_LEAD = 0.08          -- ...going down to 8% for long lines (LONG_TRIGRAMS), which carry more
+local SHORT_TRIGRAMS, LONG_TRIGRAMS = 40, 100
+local FIT_MIN = -7.95           -- mean trigram log-probability of the best language below this, over
+local FIT_TRIGRAMS = 30         -- at least this many trigrams: a language none of the profiles knows
 local SHORT_WORDS = 2           -- up to this many words, a line needs a known word
 LangDetect.LEAD = LEAD
+
+-- Lead needed for a line with this many trigrams (game words in English shrink the lead of long
+-- German or French ads: 0.12-0.14 measured on 2026-10-19).
+local function NeededLead(trigrams)
+    local t = math.min(1, math.max(0, (trigrams - SHORT_TRIGRAMS) / (LONG_TRIGRAMS - SHORT_TRIGRAMS)))
+    return LEAD - (LEAD - LONG_LEAD) * t
+end
+LangDetect.NeededLead = NeededLead
 
 -- English game slang: counts for English and is not scored by trigrams.
 local SLANG = {}
@@ -41,15 +54,15 @@ local WORDS = {
     en = "hello hi hey yes yeah no thanks thank you please insane nice sorry mate guys anyone where what sure "
         .. "the and you your is are for with this that have can need know how which again",
     de = "danke bitte ja nein hallo moin servus klar genau jemand gruppe suche brauche wer wo ich bin nicht "
-        .. "und ist auch noch gleich wieder kann für gut zusammen keine",
+        .. "und ist auch noch gleich wieder kann für gut zusammen keine sucht mitglieder mehr kein bei zum einen eine wir uns heute abend morgen jo",
     fr = "merci oui non salut bonjour bonsoir besoin cherche quelqu'un groupe svp stp mdr ouais c'est j'arrive "
-        .. "je pour avec pas trop qqn désolé bonne nuit les des une",
+        .. "je pour avec pas trop qqn désolé bonne nuit les des une recrute recherche recherchés joueurs motivés objectif joué dans nous vous sur",
     es = "hola gracias sí vale alguien grupo busco necesito dónde amigo vamos buenas noches todos ahora "
-        .. "vuelvo el los muy aquí",
+        .. "vuelvo el los muy aquí vendo barato siento tengo cuánto cuesta desde",
     it = "ciao grazie sì qualcuno gruppo cerco arrivo andiamo scusate grazie mille buonanotte tutti c'è per "
-        .. "dove questa subito",
+        .. "dove questa subito qui da sono",
     pt = "olá obrigado obrigada sim alguém grupo procuro valeu galera lá você vc não pra pelo onde fica boa "
-        .. "pessoal já volto",
+        .. "pessoal já volto chego daqui vendo barato minério desde",
 }
 local HINT = {}
 for lang, list in pairs(WORDS) do
@@ -144,7 +157,7 @@ local function Lower(s)
 end
 
 local function NewScores()
-    return { lang = {}, hints = {}, script = nil, words = 0, known = 0, trigrams = 0 }
+    return { lang = {}, tri = {}, hints = {}, script = nil, words = 0, known = 0, trigrams = 0 }
 end
 
 -- Scores of one line: { lang = { [code] = score } (Latin languages), hints = { [code] = number of
@@ -195,7 +208,9 @@ function LangDetect.Scores(text)
                     local g = chars[k] .. chars[k + 1] .. chars[k + 2]
                     scores.trigrams = scores.trigrams + 1
                     for lang, table3 in pairs(data.trigrams) do
-                        score[lang] = score[lang] + (table3[g] or data.floor[lang])
+                        local p = table3[g] or data.floor[lang]
+                        score[lang] = score[lang] + p
+                        scores.tri[lang] = (scores.tri[lang] or 0) + p
                     end
                 end
             end
@@ -218,6 +233,9 @@ function LangDetect.Merge(acc, scores)
         end
         for lang, n in pairs(scores.hints) do
             acc.hints[lang] = (acc.hints[lang] or 0) + n
+        end
+        for lang, value in pairs(scores.tri) do
+            acc.tri[lang] = (acc.tri[lang] or 0) + value
         end
     end
     acc.words = acc.words + scores.words
@@ -288,7 +306,12 @@ function LangDetect.Decide(acc)
         end
     end
     local best, lead = LangDetect.Lead(acc)
-    if lead < LEAD then
+    if lead < NeededLead(acc.trigrams) then
+        return nil
+    end
+    -- Finnish, Swedish, Polish, Dutch...: the best profile still fits badly, so say unknown
+    -- rather than a wrong language
+    if acc.trigrams >= FIT_TRIGRAMS and acc.tri[best] and acc.tri[best] / acc.trigrams < FIT_MIN then
         return nil
     end
     return best

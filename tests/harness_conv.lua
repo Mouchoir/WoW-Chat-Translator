@@ -949,6 +949,15 @@ do
             longRight = longRight + (got == want and 1 or 0)
         end
     end
+    local named = {}
+    for _, text in ipairs(ok and type(doc) == "table" and doc.unknown or {}) do
+        local got = LD.Detect(text)
+        if got ~= nil then
+            named[#named + 1] = got .. ": " .. text
+        end
+    end
+    check(#(ok and doc.unknown or {}) >= 4 and #named == 0,
+        "languages without a profile (Finnish, Dutch, Polish, Swedish) come out unknown (" .. table.concat(named, "; ") .. ")")
     check(#wrong == 0, "no line detected as a wrong language (" .. table.concat(wrong, "; ") .. ")")
     check(right >= 0.9 * #lines, ("at least 90%% right (%d of %d, %d unknown)"):format(right, #lines, unknown))
     check(longRight >= 0.9 * longN, ("lines of 4 words or more: at least 90%% right, the rest unknown (%d of %d)"):format(
