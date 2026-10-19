@@ -15,7 +15,7 @@ with or without Translate Companion.
 
 Download Translate Companion: https://github.com/Mouchoir/WoW-Chat-Translator/releases
 
-Status: development build (addon 0.5.0, protocol build 4; Translate Companion 0.4.0). See
+Status: development build (addon 0.6.0, protocol build 5; Translate Companion 0.5.0). See
 `docs\IN-GAME-CHECKS.md` for the checks that only the real client can make. Translate Companion was called TranslateProbe
 Helper (`TranslateProbeHelper.exe`) until 2026-10-19; the addon keeps its name, TranslateProbe.
 
@@ -41,6 +41,9 @@ Helper (`TranslateProbeHelper.exe`) until 2026-10-19; the addon keeps its name, 
   memory is free, else on the CPU) and unloads it after 10 minutes without use.
 - The conversation window works the same way: each bubble carries tagged rows that Translate
   Companion paints over, so the translation sits in the bubble in light blue.
+- Link names (items, spells, professions, map pins...) are copied into the translation as they
+  are and painted in their own colours (a rare item in blue); IDs, web and Discord addresses and
+  e-mail addresses are copied exactly as written, while levels, prices and times are translated.
 
 Design: `docs\DESIGN.md`. Components: `docs\ADDON.md`, `docs\BRIDGE.md`, `docs\ENGINE.md`,
 `docs\HELPER.md`.
@@ -60,6 +63,11 @@ Design: `docs\DESIGN.md`. Components: `docs\ADDON.md`, `docs\BRIDGE.md`, `docs\E
   an "Original" link. Click a bubble to translate it again (more rows when it was cut, and the fix
   for "Not received - click the bubble"); Shift-click: without the cache; right-click: translate
   again, copy the original, remove.
+- **Links:** under a bubble whose message has links (items, spells, professions, map pins,
+  quests, achievements...), a bar shows them in their own colours: hover for the tooltip, click as
+  in the chat (a map pin opens the map, a profession its recipes), Shift-click to put the link in
+  your chat message, Ctrl-click to try an item on. The links of the "Original" text and of your own
+  whispers work the same way.
 - **New messages from the same player** (option "Translate new messages", default "smart"):
   whispers and conversations you replied to are translated as they come while the window shows
   them; a first message in a public channel is added untranslated with a Translate button.
@@ -97,7 +105,7 @@ Design: `docs\DESIGN.md`. Components: `docs\ADDON.md`, `docs\BRIDGE.md`, `docs\E
 
 **Starting it:** double-click `WoWTranslateCompanion.exe` (a development build is in
 `helper\app\target\release`). No console opens; a small icon appears in the notification area
-(its tooltip: "Translate Companion 0.4.0 - ready, translator not loaded"). It finds the translator
+(its tooltip: "Translate Companion 0.5.0 - ready, translator not loaded"). It finds the translator
 runtime from `runtimeDir` in `%APPDATA%\TranslateProbe\settings.json` (set it once; else the Ollama
 install) and the model in the Ollama store, so no argument is needed. Start it before or after
 WoW, before or after a click: no `/reload`. To stop it: its icon, Exit (a second copy refuses to

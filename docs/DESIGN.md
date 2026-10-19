@@ -11,8 +11,10 @@ the Helper translates the reply and puts it in the clipboard, the player pastes 
 channel. Nothing leaves the PC, and the Helper never touches the game process: the addon and the
 Helper talk through pixels only.
 
-This file is the design as it was built (addon 0.5.0, protocol build 4; Translate Companion 0.4.0;
-section L for the hint lanes and the rename of 2026-10-19). The detailed specs, the measurements
+This file is the design as it was built (addon 0.6.0, protocol build 5; Translate Companion 0.5.0;
+section L for the hint lanes and the rename of 2026-10-19, section M for the links of a message and
+the tokens the model must copy, the same day). Sections I to L keep the numbers of their own dates.
+The detailed specs, the measurements
 behind them and every deviation from the original plan are in:
 
 | File | Part |
@@ -99,12 +101,15 @@ Ollama store.
 - Unloaded after 10 minutes idle, or 60 s after the game window disappears. A 15 s VRAM guard
   moves the session to CPU below 700 MB free.
 
-**6. Prompt** (`PROMPT_VERSION` 2)
+**6. Prompt** (`PROMPT_VERSION` 3 since 2026-10-19: the cache key holds the protected spans)
 - Raw ChatML with thinking disabled. The default system prompt asks for natural, casual chat in
   the target language, keeping placeholders, player names and game abbreviations, using official
   WoW names, and replying with the translation only.
-- Item names and `{...}` groups become placeholders `{1}..{9}`; a missing or duplicated
-  placeholder triggers one retry with the names in brackets.
+- Item names and `{...}` groups become placeholders `{1}..{9}`, then (2026-10-19, user request
+  L4) the tokens the model must copy that no mark covers: URLs, e-mail addresses and IDs (letters
+  with 2 digits or more, handles with `_` or `#1234`), full-width forms included; levels, prices,
+  times and ratings in any of the supported languages' shorthand stay plain (`docs\ENGINE.md`
+  section 6). A missing or duplicated placeholder triggers one retry with the names in brackets.
 - Must-use glossary meanings (chat words, false friends, user entries) are expanded into the
   message before the call; keep-allowed game abbreviations may stay as typed.
 - An unchanged answer counts as "Already in {language}" only with evidence that the line is in
@@ -925,3 +930,34 @@ Start 0.4.0, settings loaded, tray icon, WowFound, WGC capture started).
   "ZZSENTINELZZ") over the 65 diag, truth, report, fakewow and log files of these runs: 0 hits.
 - No llama-server ran during the suites; run.py reported no leftover process; every cargo, node,
   python and fakewow process started here has exited.
+
+## M. Links of a message and tokens to copy (2026-10-19, user requests L1-L4)
+
+The component docs hold the details: `docs\ADDON.md` ("Links of a message", decisions 63-73),
+`docs\BRIDGE.md` (sections 3a and 3b, STATUS build 5), `docs\ENGINE.md` (section 6 step 4, E1c,
+deviations 23-27), `docs\HELPER.md` ("Link colours", build 5) and `docs\IN-GAME-CHECKS.md` (G20).
+
+### M.1 User requests
+
+| # | Request | As built |
+|---|---|---|
+| L1 | A WTS line showed "\|cnIQ3:[Necromancer Leggings]" in a bubble: strip every 12.x colour escape | `\|cAARRGGBB`, `\|cn<name>:` and `\|r` (grammar read in Gethe/wow-ui-source live and forever) stripped wherever the addon reads or measures text (`Links.StripColors`, `Links.Scan`); a typed `\|\|` is never an escape |
+| L2 | Keep the links usable in the conversation window | A links bar inside each bubble with links, under the hint lane (the Helper's lane search never reaches it), every `\|H...\|h` of the message in its own colour: click = `SetItemRef` as the chat, hover = `GameTooltip:SetHyperlink` (else name and hints), Shift-click = `ChatFrameUtil.InsertLink` (the client's own handling for player, Battle.net, channel, appearance... links), Ctrl-click = dress-up. The Original text and my own bubbles' text are hyperlink-enabled the same way |
+| L3 | Link names painted in their colours | `PromptText` resolves each link's colour (`\|cAARRGGBB`, `\|cnIQ<n>:` through the client's quality colour API with the user's overrides, `\|cn<NAME>:`, gold when unknown); the addon sends the colours in a COLOURS message right before the TRANSLATE (build 5; the TRANSLATE text never carries a colour code, so a Companion of build 4 paints plain names and shows its toast); the Companion writes them into the marks and draws each restored name in its colour (wrapping, the 80% shrink, shadow and alpha unchanged) |
+| L4 | "JayJay58026 ou Jay55732" dropped at the end of a Chinese yell | Cause: the output length cap (3 x input characters + 40) cut long translations of Chinese lines; a wide character now counts 3. URLs, e-mail addresses and IDs (letters with 2 digits or more, handles with `_` or `#1234`, full-width forms too) become placeholders like item names (still at most 9, marks first); levels, prices, times and ratings in the supported languages' shorthand stay plain. E1 passes with IDs/URLs 15/15 |
+
+### M.2 Integration review findings
+
+| Finding (severity, review) | Status |
+|---|---|
+| A Companion of build 4 painted "0070DD" before every link name: the colour was in the TRANSLATE text, and its toast came on top of the codes (major, addon) | fixed: the colours travel in COLOURS (0x15), which a build-4 parser drops as an unknown type; the TRANSLATE never carries a 0x04 (BRIDGE.md 3b, ADDON.md decision 71) |
+| Levels, prices, raid sizes and times in other languages' shorthand were protected as IDs and came back untranslated (`niv60`, `60лвл`, `5g50`, `50кк`, `10hm`, `20Uhr`, `pvp1800`) (major, companion) | fixed: the word lists cover fr, de, es, pt, it and ru shorthand and ratings; E1 lines fr22, fr23, en16, de08 with the new `free=` check (ENGINE.md deviation 27) |
+| My own bubbles had no clickable links (minor, addon) | fixed: the out text is hyperlink-enabled while it has links (decision 72) |
+| Shift-click inserted the raw link for types the client handles itself (minor, addon) | fixed: player, Battle.net, channel, appearance, club finder, api and instance lock links go straight to `SetItemRef` (decision 65) |
+| `SetHyperlinksEnabled` deferred to after combat on a likely misreading of the protected flag (minor, addon) | kept as a conservative choice, decision 67 reworded; G20 step 7 settles it in game |
+| README, DESIGN and BRIDGE still said build 4 and 52 message vectors (minor, addon) | fixed for the current state (this section, the BRIDGE validation table); the tables of sections I to L keep the numbers of their dates |
+| The `/tpr test` samples used the old `\|cff` item form (minor, addon) | fixed: `\|cnIQ1:` (decision 73) |
+| Chat words joined by a dot were protected as domains (`add.me`, `merci.de`, `lol.gg`) (minor, companion) | fixed: known hosts, a first label of 4 characters or 3 labels for a bare domain |
+| Full-width IDs were never protected and came back respelled (minor, companion) | fixed: full-width letters, digits and punctuation read as ASCII, protected as written; E1 line en17 |
+| The docs said the build-4 toast replaced the painting (minor, companion) | moot with COLOURS: the build-4 Companion paints plain names; docs updated |
+| A spell's colour (71D5FF) is close to the default translation colour (A8D8FF) (minor, companion) | kept; G20 step 10 checks the legibility in game (an underline is the planned fix) |
