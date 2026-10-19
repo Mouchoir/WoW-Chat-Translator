@@ -6,9 +6,13 @@
 -- capture and paints only on plate pixels it sees. Lua geometry never positions a line: the
 -- VIEW message (chat clip rectangles and font size) only bounds the helper's scan.
 --
--- Slots (0..126) name a request's rows. A slot is freed when its rows are removed, or by a
--- read-only scan of the chat history once its line has left every chat frame. Rows are never
--- rewritten on a timer, so lines fade like any other chat line.
+-- Slots name a request's rows: 0..99 chat lines, 100..125 the conversation window's bubbles,
+-- 126 the window's reply card, 127 the TEST message (docs\BRIDGE.md section 8c). A chat slot is
+-- freed when its rows are removed, or by a read-only scan of the chat history once its line has
+-- left every chat frame. Rows are never rewritten on a timer, so lines fade like any other chat
+-- line. A window slot belongs to { kind = "win", conv, msg } (never scanned, never expired) and
+-- waits 2 s in a quarantine after it is freed, so the Helper never paints an old translation on
+-- the bubble that inherits it during the strip delay.
 local addonName, ns = ...
 
 local Reserve = {}
@@ -18,7 +22,12 @@ local floor, ceil, max, min = math.floor, math.ceil, math.max, math.min
 
 Reserve.PLATE = true            -- false: no plate (full-row fill mode, TRANSLATE flags bit1 = 0)
 
-local NUM_SLOTS = 127           -- 0..126; 127 is Bridge.TEST_SLOT
+local NUM_SLOTS = 100           -- chat slots 0..99 (0..126 until 2026-10-19, then the window took 100..126)
+local WIN_FIRST, WIN_LAST = 100, 125    -- the conversation window's bubbles
+local QUARANTINE = 2.0          -- seconds a freed window slot waits before it is used again
+Reserve.REPLY_SLOT = 126        -- the window's reply card (one reply at a time); 127 is Bridge.TEST_SLOT
+Reserve.CHAT_SLOTS = NUM_SLOTS
+Reserve.WIN_FIRST, Reserve.WIN_LAST = WIN_FIRST, WIN_LAST
 local MAX_VIEWS = 4
 local WATCH_SECONDS = 0.5
 local SCAN_SECONDS = 15        -- read-only slot scan from the watcher, at most this often
@@ -37,16 +46,23 @@ local FACTOR = {
 }
 local DEFAULT_FACTOR = 1.3
 
-local free = {}                 -- FIFO of free slots: the most recently freed is reused last
-local owner = {}                -- slot -> lineID
+local free = {}                 -- FIFO of free chat slots: the most recently freed is reused last
+local owner = {}                -- chat slot -> lineID
 local inUse = 0
+local winFree = {}              -- FIFO of free window slots
+local winQuarantine = {}        -- FIFO of { slot, at } freed window slots
+local winOwner = {}             -- window slot -> { kind = "win", conv, msg }
+local winInUse = 0
 local ticker, lastViewKey
 local lastScan = -math.huge      -- GetTime() of the last read-only scan
 local strippedOnce = false
-local counters = { scans = 0, scanFreed = 0, viewsSent = 0, stripped = 0 }
+local counters = { scans = 0, scanFreed = 0, viewsSent = 0, stripped = 0, winAlloc = 0, winFreed = 0, winRefused = 0 }
 
 for slot = 0, NUM_SLOTS - 1 do
     free[#free + 1] = slot
+end
+for slot = WIN_FIRST, WIN_LAST do
+    winFree[#winFree + 1] = slot
 end
 
 local function IsNumber(v)
@@ -126,6 +142,12 @@ function Reserve.Metrics(chatFrame)
     end
 end
 
+-- How much longer a translation into target usually is than visibleText (by writing script).
+function Reserve.ScriptFactor(visibleText, target)
+    local script = ns.Lang.Script(visibleText)
+    return script and FACTOR[script .. ">" .. ns.Lang.TargetScript(target)] or DEFAULT_FACTOR
+end
+
 -- Number of reserved rows (1..MAX_ROWS) for a line: its width in plates, times how much longer the
 -- target script usually is.
 function Reserve.EstimateRows(chatFrame, visibleText, target)
@@ -140,9 +162,57 @@ function Reserve.EstimateRows(chatFrame, visibleText, target)
     -- both sides in scale-1 units: width (chat units) * eff against plateW * eff. The ratio is
     -- not rounded up before the factor, so a short line ("gg") reserves one row, not two.
     local rowsSrc = width * m.eff / (m.plateW * m.tex * m.eff)
-    local script = ns.Lang.Script(visibleText)
-    local f = script and FACTOR[script .. ">" .. ns.Lang.TargetScript(target)] or DEFAULT_FACTOR
+    local f = Reserve.ScriptFactor(visibleText, target)
     return min(MAX_ROWS, max(1, ceil(rowsSrc * f - 0.15)))
+end
+
+-- Rows of a window bubble (1..MAX_ROWS): the text width in the window font against the plate
+-- width, times the script factor and 1.1 (the estimate leans up: a cut translation costs a
+-- click, an empty row only space).
+function Reserve.EstimateWindowRows(textWidth, plateWidth, visibleText, target)
+    if not (IsPositive(textWidth) and IsPositive(plateWidth)) then
+        return 1
+    end
+    local f = Reserve.ScriptFactor(visibleText, target)
+    return min(MAX_ROWS, max(1, ceil(textWidth / plateWidth * f * 1.1 - 0.15)))
+end
+
+-- Geometry of the conversation window's bubbles, in the window's units (docs\ADDON.md, the
+-- conversation window). frame: the window (for its effective scale); contentWidth: the width of
+-- the thread's scroll child; contentLeft: the scroll child's left edge from the window's left.
+-- Returns m = { ppu, W, H, rowH, rowPx, fontPx, pad, border, inset, bubbleWidth, plateWidth, x0,
+-- margin, fillX0, fillWidth, textSize }, or nil when the scale or the screen size is unreadable.
+--   W       tag block width: at least 5 physical px
+--   H       nominal row height (text size + 2); rowH = rowPx / ppu is the exact row pitch
+--   pad     fill around the rows: at least 6 units and 4 physical px
+--   border  the part of a bubble its ChatBubble border art may shade; the fill is clean inside
+--   inset   border + pad: from a bubble's edge to its first row and to its tag
+--   x0      the bubble column's left edge from the window's left; fillX0 its clean fill
+local BUBBLE_MARGIN, BUBBLE_SPARE, BUBBLE_BORDER = 6, 36, 10
+function Reserve.WindowMetrics(frame, contentWidth, contentLeft)
+    local okSize, _, physH = pcall(GetPhysicalScreenSize)
+    local okEff, eff = pcall(frame.GetEffectiveScale, frame)
+    if not (okSize and okEff and IsPositive(physH) and IsPositive(eff)) then
+        return nil
+    end
+    local textSize = (ns.db and tonumber(ns.db.convText)) or 14
+    textSize = min(20, max(12, floor(textSize + 0.5)))
+    local m = { textSize = textSize, border = BUBBLE_BORDER, margin = BUBBLE_MARGIN }
+    m.ppu = eff * physH / 768
+    m.W = max(2, ceil(5 / m.ppu))
+    m.H = textSize + 2
+    m.rowPx = max(1, Round(m.H * m.ppu))
+    m.rowH = m.rowPx / m.ppu
+    m.fontPx = Round(textSize * m.ppu)
+    m.pad = max(6, ceil(4 / m.ppu))
+    m.inset = m.border + m.pad
+    contentWidth = IsPositive(contentWidth) and contentWidth or 396
+    m.bubbleWidth = max(120, contentWidth - BUBBLE_SPARE)
+    m.plateWidth = max(20, m.bubbleWidth - 2 * m.border - 2 * m.pad - 8 * m.W)
+    m.x0 = (contentLeft or 14) + BUBBLE_MARGIN
+    m.fillX0 = m.x0 + m.border
+    m.fillWidth = m.bubbleWidth - 2 * m.border
+    return m
 end
 
 -- The K reserved rows of a slot: tag, then the plate. The tag's row field has 2 bits, so rows 4
@@ -166,12 +236,65 @@ function Reserve.FreeSlot(slot)
     end
 end
 
+-- The lineID of a chat slot, or the { kind = "win", conv, msg } owner of a window slot.
 function Reserve.SlotOwner(slot)
-    return owner[slot]
+    return owner[slot] or winOwner[slot]
 end
 
+-- Chat slots in use (window slots: Reserve.WindowSlotsInUse).
 function Reserve.SlotsInUse()
     return inUse
+end
+
+-- Quarantined window slots whose 2 s are over go back to the free FIFO, oldest first.
+local function ReleaseQuarantine()
+    local now = GetTime()
+    while winQuarantine[1] and now - winQuarantine[1].at >= QUARANTINE do
+        winFree[#winFree + 1] = table.remove(winQuarantine, 1).slot
+    end
+end
+
+-- A window slot (100..125) for slotOwner = { kind = "win", conv, msg }, or nil when every slot
+-- is in use or still in quarantine (the caller frees the least recently visible one and tries
+-- again once the quarantine is over).
+function Reserve.AllocWindowSlot(slotOwner)
+    ReleaseQuarantine()
+    local slot = table.remove(winFree, 1)
+    if slot == nil then
+        counters.winRefused = counters.winRefused + 1
+        return nil
+    end
+    winOwner[slot] = slotOwner
+    winInUse = winInUse + 1
+    counters.winAlloc = counters.winAlloc + 1
+    Reserve.StartWatch()
+    return slot
+end
+
+-- Puts a window slot into the quarantine (the caller sent its CANCEL).
+function Reserve.FreeWindowSlot(slot)
+    if slot ~= nil and winOwner[slot] ~= nil then
+        winOwner[slot] = nil
+        winInUse = winInUse - 1
+        counters.winFreed = counters.winFreed + 1
+        winQuarantine[#winQuarantine + 1] = { slot = slot, at = GetTime() }
+    end
+end
+
+function Reserve.WindowSlotsInUse()
+    return winInUse
+end
+
+-- Seconds until the oldest quarantined window slot is free again, or nil when none waits.
+function Reserve.QuarantineLeft()
+    local q = winQuarantine[1]
+    if q then
+        return max(0, QUARANTINE - (GetTime() - q.at))
+    end
+end
+
+function Reserve.IsWindowSlot(slot)
+    return type(slot) == "number" and slot >= WIN_FIRST and slot <= WIN_LAST
 end
 
 -- Read-only scan of every chat frame: the predicate records the lineID of each of our rows of
@@ -252,8 +375,33 @@ local function ViewOf(frame, k, physH)
     }
 end
 
--- Clip rectangles of up to 4 shown chat frames, in physical px from the client's top-left. A
--- frame whose rectangle is missing or secret is left out.
+-- The conversation window's VIEW entry (id 200) while it is shown, else nil.
+local function WindowView()
+    local cf = ns.ConvFrame
+    if not (cf and cf.ViewEntry) then
+        return nil
+    end
+    local ok, view = pcall(cf.ViewEntry)
+    if ok and type(view) == "table" then
+        return view
+    end
+end
+
+-- True when the conversation window overlaps this chat frame while no inline request is active:
+-- nothing of ours can be drawn there, so the frame is left out of the VIEW.
+local function CoveredChat(frame)
+    local cf = ns.ConvFrame
+    if not (cf and cf.Covers) or ns.Request.Count() > 0 then
+        return false
+    end
+    local ok, covered = pcall(cf.Covers, frame)
+    return ok and covered == true
+end
+
+-- Rectangles of the conversation window (first, id 200, while shown) and of the shown chat
+-- frames, 4 in all at most, in physical px from the client's top-left. A frame whose rectangle is
+-- missing or secret is left out, and so is a chat frame the window overlaps while no inline
+-- request is active.
 function Reserve.View()
     local views = {}
     local okSize, _, physH = pcall(GetPhysicalScreenSize)
@@ -261,12 +409,19 @@ function Reserve.View()
         return views
     end
     local k = physH / 768
+    local win = WindowView()
+    if win then
+        views[1] = win
+    end
     ChatFrameUtil.ForEachChatFrame(function(frame)
         if #views >= MAX_VIEWS then
             return
         end
         local okVisible, visible = pcall(frame.IsVisible, frame)
         if not okVisible or issecretvalue(visible) or not visible then
+            return
+        end
+        if win and CoveredChat(frame) then
             return
         end
         local ok, view = pcall(ViewOf, frame, k, physH)
@@ -302,9 +457,10 @@ function Reserve.SyncView(force)
     return true
 end
 
--- 2 Hz geometry watch, only while requests are active (geometry reads only). Every SCAN_SECONDS
--- it also runs the read-only scan, so the slots of lines gone from the chat are freed a few at a
--- time (one CANCEL each) and the watch stops once no request is left (Request.Drop).
+-- 2 Hz geometry watch, only while chat requests are active or the conversation window uses
+-- slots or is shown (geometry reads only). Every SCAN_SECONDS it also runs the read-only scan,
+-- so the slots of lines gone from the chat are freed a few at a time (one CANCEL each), and the
+-- watch stops once nothing needs it (Request.Drop, Reserve.MaybeStopWatch).
 function Reserve.StartWatch()
     if not ticker then
         ticker = C_Timer.NewTicker(WATCH_SECONDS, function()
@@ -312,6 +468,7 @@ function Reserve.StartWatch()
             if inUse > 0 and GetTime() - lastScan >= SCAN_SECONDS then
                 Reserve.Scan()
             end
+            Reserve.MaybeStopWatch()
         end)
     end
 end
@@ -320,6 +477,16 @@ function Reserve.StopWatch()
     if ticker then
         ticker:Cancel()
         ticker = nil
+    end
+end
+
+-- Stops the watch once no chat request is active, no window slot is in use and the window is
+-- hidden.
+function Reserve.MaybeStopWatch()
+    local cf = ns.ConvFrame
+    local shown = cf and cf.IsShown and cf.IsShown()
+    if ns.Request.Count() == 0 and winInUse == 0 and not shown then
+        Reserve.StopWatch()
     end
 end
 
@@ -344,6 +511,7 @@ function Reserve.Counters()
         c[key] = value
     end
     c.inUse, c.free = inUse, #free
+    c.winInUse, c.winFree, c.winQuarantined = winInUse, #winFree, #winQuarantine
     return c
 end
 

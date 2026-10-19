@@ -8,9 +8,13 @@
 // tests/stubs/<file> instead when there is one; --stub-bridge (or TPROBE_STUB_BRIDGE=1) also
 // replaces the real Bridge.lua with tests/stubs/Bridge.lua. The real Bridge.lua source is also
 // passed as REAL_BRIDGE_SOURCE, so a stub run checks that the stub builds the same bytes.
+// Every tests/harness_*.lua is passed as HARNESS_FILES (names, sorted) and HARNESS_SOURCES
+// ({ [name] = source }); tests/harness.lua runs each of them before its final privacy checks.
+// READ_TEST_FILE(name) returns the text of a file under tests/ (vector files such as
+// tests/vectors/lang_corpus.json), or nil.
 //
 // As a module (for tests/e2e): require('./run.js') gives { BIT_SHIM, newState, runLua,
-// tocFiles, addonSources }.
+// tocFiles, addonSources, harnessFiles }.
 const fs = require('fs');
 const path = require('path');
 const { lua, lauxlib, lualib, to_luastring } = require('fengari');
@@ -64,9 +68,31 @@ function addonSources(stubBridge) {
     });
 }
 
+// [{ file, source }] of tests/harness_*.lua, sorted by name.
+function harnessFiles() {
+    return fs.readdirSync(__dirname).filter((f) => /^harness_.+\.lua$/.test(f)).sort()
+        .map((file) => ({ file, source: fs.readFileSync(path.join(__dirname, file), 'utf8') }));
+}
+
 function setGlobalString(L, name, value) {
     lua.lua_pushstring(L, to_luastring(value));
     lua.lua_setglobal(L, to_luastring(name));
+}
+
+// READ_TEST_FILE(name) -> the contents of tests/<name>, such as 'vectors/lang_corpus.json' (fengari
+// has no io.open), or nil when the file is missing or outside tests/.
+function setTestFileReader(L) {
+    lua.lua_pushjsfunction(L, (Ls) => {
+        const name = lua.lua_isstring(Ls, 1) ? lua.lua_tojsstring(Ls, 1) : '';
+        const full = path.resolve(__dirname, name);
+        if (!full.startsWith(__dirname + path.sep) || !fs.existsSync(full)) {
+            lua.lua_pushnil(Ls);
+            return 1;
+        }
+        lua.lua_pushstring(Ls, to_luastring(fs.readFileSync(full, 'utf8')));
+        return 1;
+    });
+    lua.lua_setglobal(L, to_luastring('READ_TEST_FILE'));
 }
 
 // ADDON_FILES = { file... }, ADDON_SOURCES = { [file] = source }, ADDON_FROM = { [file] = from }
@@ -94,6 +120,7 @@ function main() {
     const sources = addonSources(stubBridge);
     const L = newState();
     setGlobalString(L, 'LOCALE_UNDER_TEST', locale);
+    setTestFileReader(L);
     try {
         runLua(L, fs.readFileSync(path.join(__dirname, 'mock.lua'), 'utf8'), 'mock.lua');
         runLua(L, BIT_SHIM, 'bitshim');
@@ -102,8 +129,22 @@ function main() {
         if (fs.existsSync(realBridge)) {
             setGlobalString(L, 'REAL_BRIDGE_SOURCE', fs.readFileSync(realBridge, 'utf8'));
         }
+        const extra = harnessFiles();
+        lua.lua_newtable(L);
+        extra.forEach((h, i) => {
+            lua.lua_pushstring(L, to_luastring(h.file));
+            lua.lua_rawseti(L, -2, i + 1);
+        });
+        lua.lua_setglobal(L, to_luastring('HARNESS_FILES'));
+        lua.lua_newtable(L);
+        for (const h of extra) {
+            lua.lua_pushstring(L, to_luastring(h.source));
+            lua.lua_setfield(L, -2, to_luastring(h.file));
+        }
+        lua.lua_setglobal(L, to_luastring('HARNESS_SOURCES'));
         const bridge = sources.find((s) => s.file === 'Bridge.lua');
-        console.log('== ' + locale + ', Bridge.lua from ' + (bridge ? bridge.from : 'nowhere'));
+        console.log('== ' + locale + ', Bridge.lua from ' + (bridge ? bridge.from : 'nowhere')
+            + (extra.length ? ', with ' + extra.map((h) => h.file).join(', ') : ''));
         runLua(L, fs.readFileSync(path.join(__dirname, 'harness.lua'), 'utf8'), 'harness.lua');
     } catch (e) {
         console.error('lua error: ' + e.message);
@@ -117,7 +158,7 @@ function main() {
     process.exit(failures === 0 ? 0 : 1);
 }
 
-module.exports = { BIT_SHIM, newState, runLua, tocFiles, addonSources };
+module.exports = { BIT_SHIM, newState, runLua, tocFiles, addonSources, harnessFiles };
 
 if (require.main === module) {
     main();

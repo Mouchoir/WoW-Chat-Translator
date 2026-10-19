@@ -2,17 +2,28 @@
 ## Title: TranslateProbe
 ## Notes: Click [T] after a player chat line to translate it. Translations are drawn by the TranslateProbe Helper app (local AI, no /reload).
 ## Author: Mouchoir
-## Version: 0.3.0
+## Version: 0.4.0
 ## SavedVariables: TranslateProbeDB
 
 Locales.lua
+ConvLocales.lua
+ReplyLocales.lua
 Core.lua
 Bridge.lua
 Glossary.lua
 Lang.lua
+LangData.lua
+LangDetect.lua
 Reserve.lua
 ChatButton.lua
 Request.lua
 Restriction.lua
+Popup.lua
+Conversations.lua
+Bubble.lua
+Channels.lua
+Consent.lua
+Composer.lua
+ConvFrame.lua
 Commands.lua
 Options.lua

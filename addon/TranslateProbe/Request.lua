@@ -1,6 +1,8 @@
--- What a [T] click does: reserve rows under the line and send a TRANSLATE request over the
--- pixel bridge. The helper does the rest (queue, cache, model, drawing); nothing ever comes
--- back to Lua, so a request lives here until its rows are removed. State is memory only.
+-- What a [T] click does in the inline mode: reserve rows under the line and send a TRANSLATE
+-- request over the pixel bridge. The helper does the rest (queue, cache, model, drawing);
+-- nothing ever comes back to Lua, so a request lives here until its rows are removed. The
+-- conversation window's bubbles send their TRANSLATE through StartWindow and DropWindow below.
+-- State is memory only.
 local _, ns = ...
 local L = ns.L
 
@@ -19,14 +21,15 @@ local nextReq = 0
 local count = 0
 local counters = {
     clicks = 0, debounced = 0, sent = 0, resent = 0, restarted = 0, deferred = 0, tooOld = 0,
-    removed = 0, expired = 0, dropped = 0, cleared = 0,
+    removed = 0, expired = 0, dropped = 0, cleared = 0, windowSent = 0, windowDropped = 0,
 }
 
--- 1..65535, wraps to 1.
+-- 1..65535, wraps to 1. Shared by chat lines, window bubbles and the window's reply.
 local function NextReqId()
     nextReq = nextReq % 65535 + 1
     return nextReq
 end
+Request.NextReqId = NextReqId
 
 local function Flags(shift)
     return (shift and FLAG_NO_CACHE or 0) + (ns.Reserve.PLATE and FLAG_PLATE or 0)
@@ -47,7 +50,7 @@ local function Forget(lineID)
         byReq[a.reqId] = nil
         count = count - 1
         if count == 0 then
-            ns.Reserve.StopWatch()
+            ns.Reserve.MaybeStopWatch()
         end
     end
     return a
@@ -202,7 +205,8 @@ function Request.Drop(lineID)
     end
 end
 
--- /tpr clear: every row of this session is removed and the helper forgets every card.
+-- /tpr clear: every row of this session is removed and the helper forgets every card, the
+-- conversation window's included (its conversations are cleared too).
 function Request.ClearAll()
     counters.cleared = counters.cleared + 1
     ns.ChatButton.CutRows(function(session)
@@ -217,7 +221,54 @@ function Request.ClearAll()
     end
     wipe(byReq)
     count = 0
-    ns.Reserve.StopWatch()
+    if ns.Conv and ns.Conv.Clear then
+        ns.Conv.Clear(true)
+    end
+    ns.Reserve.MaybeStopWatch()
+end
+
+---------------------------------------------------------------------------- window bubbles
+-- TRANSLATE for a bubble of the conversation window: msg = { text, K, req? } (Conversations.lua).
+-- Takes a window slot when the bubble has none (nil when none is free: the window frees one and
+-- tries again after the quarantine), then sends the request with the plate, the glossary pairs
+-- of the line and the saved target, a VIEW first. A bubble that already has a request sends it
+-- again with a new reqId (new rows, Shift-click, or a slot given back). Returns true when sent.
+function Request.StartWindow(conv, msg, noCache)
+    if type(msg) ~= "table" or type(msg.text) ~= "string" then
+        return false
+    end
+    local req = msg.req
+    if not req then
+        local slot = ns.Reserve.AllocWindowSlot({ kind = "win", conv = conv, msg = msg })
+        if slot == nil then
+            return false
+        end
+        req = { slot = slot }
+        msg.req = req
+    end
+    local target = ns.db.target
+    req.reqId = NextReqId()
+    req.K = math.max(1, math.min(ns.Reserve.MAX_ROWS, math.floor(tonumber(msg.K) or 1)))
+    req.target = target
+    req.flags = (noCache and FLAG_NO_CACHE or 0) + FLAG_PLATE
+    req.at = GetTime()
+    counters.windowSent = counters.windowSent + 1
+    SendTranslate(req, ns.Glossary.PromptText(msg.text), ns.Glossary.Extract(msg.text, target))
+    return true
+end
+
+-- The bubble gives its slot back: CANCEL, and the slot waits in the quarantine.
+function Request.DropWindow(msg)
+    local req = type(msg) == "table" and msg.req
+    if not req then
+        return
+    end
+    msg.req = nil
+    counters.windowDropped = counters.windowDropped + 1
+    if req.reqId then
+        ns.Bridge.Send(ns.Bridge.CancelMessage(req.reqId, req.slot))
+    end
+    ns.Reserve.FreeWindowSlot(req.slot)
 end
 
 function Request.Count()

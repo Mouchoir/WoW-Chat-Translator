@@ -1,5 +1,7 @@
 -- The [T] link at the end of each readable player message, the rows written under a line,
--- link clicks and their tooltips.
+-- link clicks and their tooltips. A [T] click opens the line in the conversation window
+-- (display = "window", the default) or reserves rows under it (display = "inline"); Ctrl-click
+-- uses the other mode, Shift-click translates again without the cache in both.
 --
 -- Design notes (checked against the Forever 1.60.1 UI source):
 -- * The message event filter is only a notification. It never returns replacement arguments,
@@ -32,15 +34,25 @@ ChatButton.EVENTS = PLAYER_CHAT_EVENTS
 local LINK_PREFIX = "addon:" .. addonName .. ":"
 local BUTTON_MARK = "|H" .. LINK_PREFIX .. "t:"
 local SUFFIX_START = "|n|cff9fd4ff    |H" .. LINK_PREFIX .. "x:"
+-- The glossary row has a colour of its own (user request, 2026-10-19): the pale gold of the
+-- Blizzard item palette (artifact quality), apart from the light blue of the rows and of [T],
+-- and readable on the chat background. It never starts a row block (the tagged rows come first).
+local GLOSS_COLOR = "e6cc80"
+local GLOSS_START = "|n|cff" .. GLOSS_COLOR .. "    |H" .. LINK_PREFIX .. "x:"
 local MAX_TRACKED = 1000
 ChatButton.LINK_PREFIX = LINK_PREFIX
 ChatButton.SUFFIX_START = SUFFIX_START
+ChatButton.GLOSS_START = GLOSS_START
+ChatButton.GLOSS_COLOR = GLOSS_COLOR
 
 local tracked = {}       -- lineID -> text of a decorated readable message (memory only)
 local trackedOrder = {}  -- FIFO of tracked lineIDs, to bound memory
 local senders = {}       -- lineID -> sender name of a tracked line (memory only)
+local lineInfo = {}      -- lineID -> { event, sender, zoneChannelID, channelIndex, channelBase, guid,
+                         -- bnID } of a tracked line, for the conversation window (memory only)
 local pendingText = {}   -- lineID -> text, between the filter and the next-frame decoration
 local pendingSender = {} -- lineID -> sender name, same lifetime as pendingText
+local pendingInfo = {}   -- lineID -> line details, same lifetime as pendingText
 local decorated = {}     -- lineIDs that received a button in the current decoration pass
 local decorateQueued = false
 local tipShown = false
@@ -77,17 +89,21 @@ local function LinkBodies(text)
     return bodies
 end
 
--- The rows under the message. Each row starts with SUFFIX_START; every piece of it is a link,
--- so clicking anywhere on the rows hides them all.
+-- The rows under the message. Each row starts with SUFFIX_START (the glossary row, which begins
+-- with L.SUFFIX_GLOSS, with GLOSS_START: same link, its own colour); every piece of it is a
+-- link, so clicking anywhere on the rows hides them all.
 function ChatButton.SuffixLinks(lineID, rows)
     local id = ns.session .. ":" .. lineID .. "|h"
-    local first, more = SUFFIX_START .. id, "|H" .. LINK_PREFIX .. "x:" .. id
+    local more = "|H" .. LINK_PREFIX .. "x:" .. id
+    local glossPrefix = L.SUFFIX_GLOSS
     local out = {}
     for _, text in ipairs(rows) do
         local bodies = LinkBodies(text)
         if #bodies == 0 then
             bodies[1] = ""
         end
+        local isGloss = glossPrefix ~= nil and text:sub(1, #glossPrefix) == glossPrefix
+        local first = (isGloss and GLOSS_START or SUFFIX_START) .. id
         for k, body in ipairs(bodies) do
             out[#out + 1] = (k == 1 and first or more) .. body .. "|h"
         end
@@ -96,6 +112,16 @@ function ChatButton.SuffixLinks(lineID, rows)
     return table.concat(out)
 end
 local SuffixLinks = ChatButton.SuffixLinks
+
+-- Where our rows start in a chat message (the first row block marker), or nil.
+local function RowsAt(message)
+    local a = message:find(SUFFIX_START, 1, true)
+    local b = message:find(GLOSS_START, 1, true)
+    if a and b then
+        return math.min(a, b)
+    end
+    return a or b
+end
 
 local function LineIDOf(eventArgs)
     if type(eventArgs) ~= "table" then
@@ -111,14 +137,17 @@ local function IsPlainString(message)
     return not issecretvalue(message) and type(message) == "string"
 end
 
-function ChatButton.Track(lineID, text, sender)
+function ChatButton.Track(lineID, text, sender, info)
     if tracked[lineID] == nil then
         trackedOrder[#trackedOrder + 1] = lineID
     end
     tracked[lineID], senders[lineID] = text, sender
+    if info then
+        lineInfo[lineID] = info
+    end
     while #trackedOrder > MAX_TRACKED do
         local old = table.remove(trackedOrder, 1)
-        tracked[old], senders[old] = nil, nil
+        tracked[old], senders[old], lineInfo[old] = nil, nil, nil
     end
 end
 local Track = ChatButton.Track
@@ -139,19 +168,31 @@ end
 
 -- Adds the buttons, then keeps only the lines some chat frame actually shows: the filter also
 -- runs for channel lines that no frame displays.
+-- The conversation window then sees each new tracked line (Conv.OnLineTracked: a sender who has
+-- a conversation is followed), in arrival order.
 local function DecoratePending()
     decorateQueued = false
     ChatFrameUtil.ForEachChatFrame(function(chatFrame)
         chatFrame:TransformMessages(NeedsButton, AddButton)
     end)
+    local fresh = {}
     for lineID, text in pairs(pendingText) do
         if decorated[lineID] then
-            Track(lineID, text, pendingSender[lineID])
+            Track(lineID, text, pendingSender[lineID], pendingInfo[lineID])
+            fresh[#fresh + 1] = lineID
         end
     end
     wipe(pendingText)
     wipe(pendingSender)
+    wipe(pendingInfo)
     wipe(decorated)
+    table.sort(fresh)
+    local conv = ns.Conv
+    if conv and conv.OnLineTracked then
+        for _, lineID in ipairs(fresh) do
+            conv.OnLineTracked(lineID)
+        end
+    end
 end
 
 -- Replaces whatever we wrote under the line, in every chat frame. rows: nil (remove), an array
@@ -173,7 +214,7 @@ function ChatButton.SetSuffix(lineID, rows)
     end
     local function Rewrite(message, ...)
         count = count + 1
-        local cut = message:find(SUFFIX_START, 1, true)
+        local cut = RowsAt(message)
         if cut then
             message = message:sub(1, cut - 1)
         end
@@ -211,7 +252,7 @@ function ChatButton.CutRows(shouldCut)
     end
     local function Cut(message, ...)
         count = count + 1
-        return message:sub(1, message:find(SUFFIX_START, 1, true) - 1), ...
+        return message:sub(1, RowsAt(message) - 1), ...
     end
     ChatFrameUtil.ForEachChatFrame(function(chatFrame)
         chatFrame:TransformMessages(Matches, Cut)
@@ -244,8 +285,11 @@ function ChatButton.IsTracked(lineID)
 end
 
 -- Message event filter, used only to learn that a readable player line arrived. The client
--- skips addon filters while the text is secret, and we return nothing so nothing changes.
-local function Filter(_, event, message, sender, _, _, _, _, _, _, _, _, lineID, guid)
+-- skips addon filters while the text is secret, and we return nothing so nothing changes. The
+-- line's details (event, sender, channel, GUID, Battle.net account) are kept in memory for the
+-- conversation window; a Battle.net sender name (arg2) is never kept.
+local function Filter(_, event, message, sender, _, _, _, _, zoneChannelID, channelIndex, channelBaseName, _, lineID,
+                      guid, bnSenderID)
     if not IsPlainString(message) or message == "" or not ns.Glossary.HasWords(message) then
         return
     end
@@ -262,10 +306,28 @@ local function Filter(_, event, message, sender, _, _, _, _, _, _, _, _, lineID,
         return
     end
     pendingText[lineID] = message
+    local info = { event = event }
     -- Battle.net names are protected strings: never touch them.
     if event ~= "CHAT_MSG_BN_WHISPER" and IsPlainString(sender) then
         pendingSender[lineID] = sender
+        info.sender = sender
     end
+    if not issecretvalue(guid) and type(guid) == "string" and guid ~= "" then
+        info.guid = guid
+    end
+    if not issecretvalue(bnSenderID) and type(bnSenderID) == "number" and bnSenderID ~= 0 then
+        info.bnID = bnSenderID
+    end
+    if not issecretvalue(zoneChannelID) and type(zoneChannelID) == "number" then
+        info.zoneChannelID = zoneChannelID
+    end
+    if not issecretvalue(channelIndex) and type(channelIndex) == "number" then
+        info.channelIndex = channelIndex
+    end
+    if IsPlainString(channelBaseName) and channelBaseName ~= "" then
+        info.channelBase = channelBaseName
+    end
+    pendingInfo[lineID] = info
     if not decorateQueued then
         decorateQueued = true
         C_Timer.After(0, DecoratePending)
@@ -290,8 +352,41 @@ function ChatButton.SourceText(lineID)
     end
 end
 
+-- Details of a tracked line for the conversation window: { event, sender, zoneChannelID,
+-- channelIndex, channelBase, guid, bnID } (a copy; memory only), or nil. A line that was not seen
+-- by the filter (a line reprinted after a chat restriction) is read back from the client when
+-- chat is not locked: sender name and GUID, no event.
+function ChatButton.LineInfo(lineID)
+    local info = lineInfo[lineID]
+    if info then
+        local copy = {}
+        for k, v in pairs(info) do
+            copy[k] = v
+        end
+        return copy
+    end
+    if not tracked[lineID] or C_ChatInfo.InChatMessagingLockdown() then
+        return nil
+    end
+    local back = {}
+    if C_ChatInfo.GetChatLineSenderGUID then
+        local ok, guid = pcall(C_ChatInfo.GetChatLineSenderGUID, lineID)
+        if ok and IsPlainString(guid) and guid ~= "" then
+            back.guid = guid
+        end
+    end
+    local sender = senders[lineID]
+    if IsPlainString(sender) and sender ~= "" then
+        back.sender = sender
+    end
+    if back.guid or back.sender then
+        return back
+    end
+end
+
 -- Rows shown at once under a clicked line: the glossary (when that option is on and the line
--- has a known abbreviation), then the sender name in Latin letters (when names is on).
+-- has a known abbreviation; drawn in GLOSS_COLOR by SuffixLinks), then the sender name in Latin
+-- letters (when names is on).
 function ChatButton.InstantLines(lineID, text)
     local lines = {}
     if ns.db.glossShow then
@@ -305,6 +400,16 @@ function ChatButton.InstantLines(lineID, text)
         lines[#lines + 1] = L.NAME_LINE:format(roman)
     end
     return lines
+end
+
+-- True when a [T] click goes to the conversation window: display "window" (the default; any
+-- other value than "inline" counts as it), the other mode with Ctrl held.
+function ChatButton.WindowMode(ctrl)
+    local window = not (ns.db and ns.db.display == "inline")
+    if ctrl then
+        window = not window
+    end
+    return window and ns.ConvFrame ~= nil and ns.ConvFrame.OpenFromLine ~= nil
 end
 
 -- kind, lineID (number) of one of our links of this session; kind "old" for an older session.
@@ -328,7 +433,12 @@ local function OnLinkClicked(_, link, _, _, chatFrame)
     if kind == "old" then
         ns.Print(L.OLD_SESSION)
     elseif kind == "t" then
-        ns.Request.Start(id, chatFrame or DEFAULT_CHAT_FRAME, IsShiftKeyDown() and true or false)
+        local shift = IsShiftKeyDown() and true or false
+        if ChatButton.WindowMode(IsControlKeyDown()) then
+            ns.ConvFrame.OpenFromLine(id, shift, chatFrame or DEFAULT_CHAT_FRAME)
+        else
+            ns.Request.Start(id, chatFrame or DEFAULT_CHAT_FRAME, shift)
+        end
     elseif kind == "x" then
         ns.Request.Remove(id)
     elseif kind == "r" then
@@ -338,7 +448,8 @@ end
 
 local function OnLinkEnter(_, frame, link)
     local kind = ParseLink(link)
-    local tip = (kind == "t" and L.TIP_T) or (kind == "x" and L.TIP_ROWS) or nil
+    local tipT = ChatButton.WindowMode(false) and L.CONV_TIP_T_WINDOW or L.CONV_TIP_T_INLINE
+    local tip = (kind == "t" and (tipT or L.TIP_T)) or (kind == "x" and L.TIP_ROWS) or nil
     if tip and GameTooltip then
         GameTooltip:SetOwner(frame or UIParent, "ANCHOR_CURSOR")
         GameTooltip:SetText(tip, 1, 1, 1, 1, true)

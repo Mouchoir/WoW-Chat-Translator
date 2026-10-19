@@ -1,0 +1,12 @@
+<!-- Key bindings of TranslateProbe (Esc > Options > Key Bindings > AddOns), unbound by default.
+     The client loads this file from the addon folder by itself (not through the TOC). The shown
+     names are BINDING_HEADER_TRANSLATEPROBE and BINDING_NAME_* (ConvLocales.lua); the functions
+     are defined in ConvFrame.lua. -->
+<Bindings>
+    <Binding name="TRANSLATEPROBE_CONV_TOGGLE" header="TRANSLATEPROBE" category="ADDONS">
+        TranslateProbe_ConvToggle()
+    </Binding>
+    <Binding name="TRANSLATEPROBE_CONV_REPLY" category="ADDONS">
+        TranslateProbe_ConvReply()
+    </Binding>
+</Bindings>

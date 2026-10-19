@@ -86,7 +86,7 @@ local L = {
     INFO_CLIENT = "client %s build %s, interface %s, project %s",
     INFO_TARGET = "target: %s, bridge mode: %s",
     INFO_SCREEN = "screen: %s x %s px, UI scale %s",
-    INFO_REQUESTS = "translations under the chat: %d, slots in use: %d of 127",
+    INFO_REQUESTS = "translations under the chat: %d, chat slots in use: %d of 100",
     INFO_FRAME = "%s: TransformMessages %s, FontStringContainer %s",
 
     TEST_SENT = "test message sent (number %d). With the Helper running, a message confirms it in the top-left corner.",
@@ -219,7 +219,7 @@ local frFR = {
     INFO_CLIENT = "client %s build %s, interface %s, projet %s",
     INFO_TARGET = "langue cible : %s, mode du pont : %s",
     INFO_SCREEN = "écran : %s x %s px, échelle de l'interface %s",
-    INFO_REQUESTS = "traductions sous le chat : %d, emplacements utilisés : %d sur 127",
+    INFO_REQUESTS = "traductions sous le chat : %d, emplacements du chat utilisés : %d sur 100",
     INFO_FRAME = "%s : TransformMessages %s, FontStringContainer %s",
 
     TEST_SENT = "message de test envoyé (numéro %d). Si le Helper tourne, un message le confirme dans le coin en haut à gauche.",

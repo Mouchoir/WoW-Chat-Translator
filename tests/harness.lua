@@ -2,6 +2,19 @@
 -- with the real Bridge.lua or with tests\stubs\Bridge.lua (--stub-bridge). Every message the
 -- addon sends over the bridge is recorded by wrapping ns.Bridge.Send and parsed here, so the
 -- same checks run with both.
+--
+-- Every tests\harness_*.lua (found by tests\run.js, run in name order) runs before the final
+-- "privacy and errors" section, as a chunk called with one argument H, the shared context:
+--   H.check(cond, label), H.section(name), H.out(line), H.M (= Mock), H.ns, H.L, H.db, H.fr (frFR
+--   run), H.stubBridge, H.sent (every bridge message, live), H.Parse(bytes) -> message table,
+--   H.Since(index, kind) -> parsed messages after index, H.AllOk(list), H.Deliver(event, text,
+--   sender, guid, hidden, opts) -> lineID (records text, sender and GUID for the privacy walk),
+--   H.Private(text) (another string that must never reach the saved variables: a draft, a sent
+--   reply), H.slash(cmd), H.ButtonOf(lineID) -> the [T] link, H.EntryFor(cf, lineID),
+--   H.EntryWith(cf, fragment), H.Printed(fragment), H.CountPrinted(fragment), H.Snapshot(),
+--   H.Lines(message), H.Base(message), H.LinksIn(message), H.SUFFIX_START.
+-- A Lua error in such a file counts as one failure; the other files still run. The files share
+-- the one client session: each sets the settings it needs and leaves no window or focus behind.
 local M = Mock
 local out = M.rawprint
 
@@ -202,12 +215,15 @@ local function AllOk(list)
     return true
 end
 
--- Delivered texts and senders, for the privacy walk at the end.
-local deliveredText, deliveredSender = {}, {}
-local function Deliver(event, text, sender, guid, hidden)
+-- Delivered texts, senders and GUIDs, for the privacy walk at the end.
+local deliveredText, deliveredSender, deliveredGuid = {}, {}, {}
+local function Deliver(event, text, sender, guid, hidden, opts)
     deliveredText[#deliveredText + 1] = text
     deliveredSender[#deliveredSender + 1] = sender
-    return M.Deliver(event, text, sender, guid, hidden)
+    if type(guid) == "string" then
+        deliveredGuid[#deliveredGuid + 1] = guid
+    end
+    return M.Deliver(event, text, sender, guid, hidden, opts)
 end
 
 local function EntryFor(cf, lineID)
@@ -284,7 +300,7 @@ check(not fr or L.LOADED:find("Tape", 1, true), "French strings on frFR")
 check(SLASH_TRANSLATEPROBE1 == "/tprobe" and SLASH_TRANSLATEPROBE2 == "/tpr" and slashFn ~= nil, "slash command registered")
 check(type(ns.sessionId) == "number" and ns.sessionId >= 1 and ns.sessionId <= 65535 and ns.session == tostring(ns.sessionId),
     "session id is a u16 and its string form is used in links")
-check(ns.ADDON_BUILD == 2 and Bridge.VERSION == 2 and Bridge.TEST_SLOT == 127, "addon build 2, bridge v2")
+check(ns.ADDON_BUILD == 3 and Bridge.VERSION == 2 and Bridge.TEST_SLOT == 127, "addon build 3, bridge v2")
 check(CountPrinted((L.INIT_FAILED:gsub("%%s", ""))) == 0, "no init failure printed")
 
 section("bridge builders")
@@ -320,17 +336,94 @@ if stubBridge and REAL_BRIDGE_SOURCE then
         { Bridge.TestMessage(4242), R.TestMessage(4242) }, { Bridge.ViewMessage(views), R.ViewMessage(views) },
         { Bridge.PlateMarkup(290, 14), R.PlateMarkup(290, 14) }, { Bridge.Utf8Cut("aé", 2), R.Utf8Cut("aé", 2) },
     }
+    for flags = 0, 255 do
+        messages[#messages + 1] = { Bridge.TranslateMessage(258, 126, 3, flags, "de", "x", {}),
+            R.TranslateMessage(258, 126, 3, flags, "de", "x", {}) }
+    end
     for _, pair in ipairs(messages) do
         if pair[1] ~= pair[2] then
             same = false
         end
     end
-    check(same, "the stub builds the same tags, plates and messages as the real Bridge.lua")
+    local function Textures()
+        local t = {}
+        for k = 1, 8 do
+            t[k] = { SetColorTexture = function(self, r, g, b, a)
+                self.rgba = string.format("%.6f %.6f %.6f %.6f", r, g, b, a)
+            end }
+        end
+        return t
+    end
+    for slot = 0, 127, 7 do
+        for row = 0, 5 do
+            local a, b = Textures(), Textures()
+            Bridge.ApplyTag(a, slot, row, slot % 2)
+            R.ApplyTag(b, slot, row, slot % 2)
+            for k = 1, 8 do
+                if a[k].rgba ~= b[k].rgba then
+                    same = false
+                end
+            end
+        end
+    end
+    check(same, "the stub builds the same tags, plates, messages and window tags as the real Bridge.lua")
+    check(R.FLAG_REPLY == Bridge.FLAG_REPLY and R.FLAG_COPY == Bridge.FLAG_COPY and R.FLAGS_MASK == Bridge.FLAGS_MASK
+        and R.BUBBLE_RGB[1] == Bridge.BUBBLE_RGB[1] and R.BUBBLE_RGB[2] == Bridge.BUBBLE_RGB[2]
+        and R.BUBBLE_RGB[3] == Bridge.BUBBLE_RGB[3], "the stub has the real flag and colour constants")
+end
+
+section("bridge: TRANSLATE flags and window tags")
+check(Bridge.FLAG_NOCACHE == 1 and Bridge.FLAG_PLATE == 2 and Bridge.FLAG_REPLY == 4 and Bridge.FLAG_COPY == 8
+    and Bridge.FLAGS_MASK == 15, "flag constants: noCache 1, plate 2, reply 4, copy 8, mask 15")
+check(Bridge.BUBBLE_RGB[1] == 36 and Bridge.BUBBLE_RGB[2] == 30 and Bridge.BUBBLE_RGB[3] == 24
+    and Bridge.PLATE_RGB[1] == 32, "bubble interior (36, 30, 24) beside the plate colour")
+do
+    local function Run()
+        local function FlagsByte(flags)
+            return Parse(Bridge.TranslateMessage(258, 126, 3, flags, "de", "on part dans 5 min ?", {})).flags
+        end
+        local expect = { [0] = 0, [2] = 2, [4] = 4, [6] = 6, [8] = 0, [10] = 2, [12] = 12, [14] = 14, [15] = 15,
+            [16] = 0, [255] = 15, [-3] = 0, [300] = 15 }
+        local okFlags = true
+        for flags, want in pairs(expect) do
+            if FlagsByte(flags) ~= want then
+                okFlags = false
+                out("  flags " .. flags .. " -> " .. tostring(FlagsByte(flags)) .. ", expected " .. want)
+            end
+        end
+        check(okFlags, "builder: flags masked to bits 0-3, copy dropped unless reply, nothing else remapped")
+        local m = Bridge.TranslateMessage(258, 126, 3, 14, "de", "on part dans 5 min ?", {})
+        local hex = m:gsub(".", function(c) return string.format("%02x", c:byte()) end)
+        check(hex == "1001027e030e02646500146f6e20706172742064616e732035206d696e203f00",
+            "the reply example of docs\\BRIDGE.md, byte for byte")
+        local textures = {}
+        for k = 1, 8 do
+            textures[k] = { SetColorTexture = function(self, r, g, b, a)
+                self.r, self.g, self.b, self.a = r, g, b, a
+            end }
+        end
+        local same = true
+        for _, case in ipairs({ { 0, 0, 0 }, { 126, 5, 1 }, { 100, 4, 0 }, { 127, 3, 1 } }) do
+            Bridge.ApplyTag(textures, case[1], case[2], case[3])
+            local colors = Bridge.TagColors(case[1], case[2] % 4, case[3])
+            for k = 1, 8 do
+                local t, c = textures[k], colors[k]
+                if math.abs(t.r * 255 - c[1]) > 1e-9 or math.abs(t.g * 255 - c[2]) > 1e-9
+                    or math.abs(t.b * 255 - c[3]) > 1e-9 or t.a ~= 1 then
+                    same = false
+                end
+            end
+        end
+        check(same, "ApplyTag colours 8 textures like TagColors (row modulo 4), opaque")
+    end
+    Run()
 end
 
 section("saved variables: whitelist purge")
 check(fixtureSize >= 70000, "the telemetry fixture is about 70 KB (" .. fixtureSize .. " bytes)")
-local KEEP = { schema = true, target = true, names = true, glossShow = true, mode = true, glossary = true, helpShown = true }
+local KEEP = { schema = true, target = true, names = true, glossShow = true, mode = true, glossary = true, helpShown = true,
+    display = true, follow = true, replyClipboard = true, convOriginal = true, convText = true, convScale = true,
+    convCombat = true, convFocus = true, convOpenWhisper = true, convPos = true, convTipShown = true }
 local extra = {}
 for key in pairs(db) do
     if not KEEP[key] then
@@ -338,14 +431,17 @@ for key in pairs(db) do
     end
 end
 check(#extra == 0, "only whitelisted keys are left (" .. table.concat(extra, ", ") .. ")")
-check(db.schema == 3 and db.mode == "auto" and db.names == false and db.glossShow == true and db.helpShown == nil,
-    "schema 3, invalid settings back to their defaults")
+check(db.schema == 4 and db.mode == "auto" and db.names == false and db.glossShow == false and db.helpShown == nil,
+    "schema 4, invalid settings back to their defaults (glossary row off by default)")
+check(db.follow == "smart" and db.replyClipboard == "ask" and db.convText == 14 and db.convScale == 100
+    and db.convCombat == "keep" and db.convOriginal == false and db.convFocus == false and db.convOpenWhisper == false
+    and db.convPos == nil and db.convTipShown == nil, "conversation window settings get their defaults")
 check(db.target == (fr and "fr" or "en"), "an unknown target falls back to the client locale")
 check(db.glossary.hot == "Hall of Thanes" and db.glossary.zz == false and db.glossary["été"] == "summer",
     "valid glossary entries kept")
 check(db.glossary["bad key"] == nil and db.glossary.num == nil and db.glossary.long == nil and db.glossary[7] == nil,
     "invalid glossary entries dropped")
-check(db.display == nil, "the dropped display setting (chat tab mode) is purged")
+check(db.display == "window", "an old display = \"tab\" (the dropped chat tab mode) is purged to the window default")
 local wbx = db.glossary.wbx
 local wbxKeys = {}
 for k in pairs(type(wbx) == "table" and wbx or {}) do
@@ -360,6 +456,10 @@ check(type(db.glossary.hidden) == "table" and db.glossary.hidden.fr == "" and db
     "an empty marker is kept next to an every-target meaning, dropped without one")
 db.glossary.hot, db.glossary.zz, db.glossary.wbx, db.glossary.nomeaning = nil, nil, nil, nil
 db.glossary.hidden, db.glossary.lonely = nil, nil
+-- The chat checks below were written for the glossary row on and [T] drawing rows under the
+-- line. Since schema 4 the row is off by default and [T] opens the conversation window, so they
+-- run with those two settings set; harness_conv.lua and harness_reply.lua cover the defaults.
+db.glossShow, db.display = true, "inline"
 
 section("session hygiene")
 local old1 = M.History(ChatFrame1)[1]
@@ -530,11 +630,14 @@ check(#msgs == 1 and msgs[1].reqId > shiftReq and msgs[1].target == "de" and msg
     "a new target restarts the request")
 check(dePairs.lf2m == "looking for 2 more" and dePairs.cheap == nil, "de pairs: English meanings as the pivot")
 slash("target " .. (fr and "fr" or "en"))
-check(Count(EntryFor(ChatFrame1, clicked).message, SUFFIX_START) == K + 2, "rows never duplicated (the rewrite cuts first)")
+-- the glossary row starts with ChatButton.GLOSS_START (its own colour, D11), the others with SUFFIX_START
+check(Count(EntryFor(ChatFrame1, clicked).message, SUFFIX_START) + Count(EntryFor(ChatFrame1, clicked).message,
+    ChatButton.GLOSS_START) == K + 2, "rows never duplicated (the rewrite cuts first)")
 
 section("tooltips")
 EventRegistry:TriggerEvent("ChatFrame.OnHyperlinkEnter", ChatFrame1, ButtonOf(clicked), "[T]")
-check(GameTooltip:IsShown() and GameTooltip.lines[1] == L.TIP_T, "hovering [T] names the helper")
+check(GameTooltip:IsShown() and GameTooltip.lines[1] == L.CONV_TIP_T_INLINE,
+    "hovering [T] names the helper (inline mode: Ctrl-click opens the conversation window)")
 EventRegistry:TriggerEvent("ChatFrame.OnHyperlinkLeave", ChatFrame1)
 check(not GameTooltip:IsShown(), "leaving hides the tooltip")
 EventRegistry:TriggerEvent("ChatFrame.OnHyperlinkEnter", ChatFrame1, "addon:TranslateProbe:x:" .. ns.session .. ":" .. clicked)
@@ -889,17 +992,18 @@ check(main and #S.addOn == 1 and S.addOn[1] == main and main.kind == "vertical" 
 local function Setting(key)
     return S.settings["TranslateProbe_" .. key]
 end
-check(Setting("target") and Setting("glossShow") and Setting("names") and Setting("mode") and Setting("display") == nil,
-    "settings: target, glossary row, names and bridge mode, no display setting")
+check(Setting("target") and Setting("glossShow") and Setting("names") and Setting("mode") and Setting("display"),
+    "settings: target, glossary row, names, bridge mode, then the conversation window (display...)")
 local kinds, targetInit = {}, nil
 for _, init in ipairs(S.initializers) do
-    kinds[#kinds + 1] = init.kind .. ":" .. init.setting.variable:gsub("^TranslateProbe_", "")
+    kinds[#kinds + 1] = init.kind .. ":" .. (init.setting and init.setting.variable:gsub("^TranslateProbe_", "")
+        or init.name)
     if init.setting == Setting("target") then
         targetInit = init
     end
 end
-check(table.concat(kinds, ",") == "dropdown:target,checkbox:glossShow,checkbox:names,dropdown:mode",
-    "controls in order: target dropdown, two checkboxes, bridge mode dropdown")
+check(table.concat(kinds, ",", 1, math.min(4, #kinds)) == "dropdown:target,checkbox:glossShow,checkbox:names,dropdown:mode",
+    "controls in order: target dropdown, two checkboxes, bridge mode dropdown (the conversation section follows)")
 local values, labels = {}, {}
 for i, o in ipairs(targetInit and targetInit.options() or {}) do
     values[i], labels[i] = o.value, o.label
@@ -1213,7 +1317,7 @@ check(#Reserve.View() == 0, "a secret chat rectangle is left out of VIEW")
 M.SetLockdown(false)
 M.SetRectSecret(ChatFrame1, false)
 slash("info")
-check(Printed("1.60.1") and Printed(L.INFO_VERSION:format("0.3.0", 2, ns.sessionId))
+check(Printed("1.60.1") and Printed(L.INFO_VERSION:format("0.4.0", ns.ADDON_BUILD, ns.sessionId))
     and Printed(L.INFO_FRAME:format("ChatFrame1", L.YES, L.YES)), "info prints version, client and chat frames")
 check(Printed(L.INFO_REQUESTS:format(Request.Count(), Reserve.SlotsInUse())), "info prints requests and slots")
 slash("debug")
@@ -1263,7 +1367,7 @@ end
 check(not helpMentionsTab, "the help no longer offers /tpr show tab")
 local showBefore = db.glossShow
 slash("show tab")
-check(db.display == nil and db.glossShow == showBefore, "/tpr show tab changes nothing (show takes on|off)")
+check(db.display == "inline" and db.glossShow == showBefore, "/tpr show tab changes nothing (show takes on|off)")
 local trackedLine = Deliver("CHAT_MSG_SAY", "tab check line for a click", "Tabby")
 M.Tick(1)
 M.Click(ButtonOf(trackedLine))
@@ -1274,14 +1378,18 @@ M.Click("addon:TranslateProbe:x:" .. ns.session .. ":" .. trackedLine)
 
 ---------------------------------------------------------------------------------------------
 section("slots")
+-- chat lines own slots 0..99 (Reserve.CHAT_SLOTS); 100..125 are the conversation window's, 126 its
+-- reply, 127 the TEST message
+check(Reserve.CHAT_SLOTS == 100 and Reserve.WIN_FIRST == 100 and Reserve.WIN_LAST == 125 and Reserve.REPLY_SLOT == 126,
+    "slot ranges: chat 0..99, window 100..125, reply 126")
 local lines = {}
-for k = 1, 127 do
+for k = 1, Reserve.CHAT_SLOTS do
     lines[k] = Deliver("CHAT_MSG_CHANNEL", "selling stuff number " .. k, "Seller" .. k)
 end
 M.Tick(1)
 local slotsSeen, reqOf = {}, {}
 n0 = #sent
-for k = 1, 127 do
+for k = 1, Reserve.CHAT_SLOTS do
     M.Click(ButtonOf(lines[k]))
     local reqId, slot = Request.Get(lines[k])
     reqOf[k] = reqId
@@ -1290,10 +1398,11 @@ for k = 1, 127 do
     end
 end
 local distinct = 0
-for s = 0, 126 do
+for s = 0, 127 do
     distinct = distinct + (slotsSeen[s] and 1 or 0)
 end
-check(Request.Count() == 127 and Reserve.SlotsInUse() == 127 and distinct == 127, "127 requests hold the 127 slots")
+check(Request.Count() == 100 and Reserve.SlotsInUse() == 100 and distinct == 100 and not slotsSeen[100],
+    "100 requests hold the 100 chat slots (0..99)")
 before = Snapshot()
 check(Reserve.Scan() == 0 and Snapshot() == before, "the read-only scan frees nothing in use and changes no entry or timestamp")
 local expiredBefore = Request.Counters().expired
@@ -1304,31 +1413,268 @@ n0 = #sent
 M.Click(ButtonOf(extraLine))
 local cancels = Since(n0, "cancel")
 check(Request.Counters().expired == expiredBefore + 1 and #cancels == 1 and cancels[1].reqId == reqOf[1]
-    and select(2, Request.Get(extraLine)) == expiredSlot, "all 127 on screen: the oldest request expires for the new one")
-for k = 1, 10 do
+    and select(2, Request.Get(extraLine)) == expiredSlot, "all 100 on screen: the oldest request expires for the new one")
+for k = 1, 40 do
     Deliver("CHAT_MSG_CHANNEL", "pushing the old lines out " .. k, "Pusher")
 end
 local last = Deliver("CHAT_MSG_CHANNEL", "a new line after the scroll", "Newbie")
 M.Tick(1)
 local goneActive = 0
-for k = 2, 127 do
+for k = 2, Reserve.CHAT_SLOTS do
     if not EntryFor(ChatFrame1, lines[k]) and not EntryFor(ChatFrame3, lines[k]) then
         goneActive = goneActive + 1
     end
 end
-check(goneActive > 0 and Reserve.SlotsInUse() == 127, "lines that left the chat keep their slot until a scan")
+check(goneActive > 0 and Reserve.SlotsInUse() == 100, "lines that left the chat keep their slot until a scan")
 n0 = #sent
 M.Click(ButtonOf(last))
 cancels = Since(n0, "cancel")
 check(Request.Counters().expired == expiredBefore + 1 and #cancels == goneActive
-    and Reserve.SlotsInUse() == 127 - goneActive + 1 and Request.Count() == 127 - goneActive + 1,
+    and Reserve.SlotsInUse() == 100 - goneActive + 1 and Request.Count() == 100 - goneActive + 1,
     "the scan frees the slots of lines gone from the chat (CANCEL each), nothing expires")
 check(AllOk(Since(0)), "every message sent this session is well formed")
 slash("clear")
 
 ---------------------------------------------------------------------------------------------
+section("mock: conversation window scaffolding")
+-- The mock pieces the window and the reply composer rely on, checked once here so a broken mock
+-- shows up as a mock failure, not as a window failure. (Each block of checks added below runs in
+-- a function of its own: the main chunk is close to Lua's limit of 200 local variables.)
+do
+    local function Run()
+        local fails = {}
+        local function expect(cond, what)
+            if not cond then
+                fails[#fails + 1] = what
+            end
+        end
+        local win = CreateFrame("Frame", "TPMockWin", UIParent, "PortraitFrameTemplate")
+        expect(win.CloseButton and win.TitleContainer.TitleText and win:GetPortrait() and win.NineSlice, "portrait frame parts")
+        win:SetTitle("Title")
+        expect(win:GetTitleText():GetText() == "Title", "SetTitle")
+        win:SetPortraitToClassIcon("MAGE")
+        expect(win:GetPortrait().texCoord ~= nil, "class portrait")
+        expect(not pcall(win.SetPortraitToClassIcon, win, "NOTACLASS"), "unknown class errors as on the client")
+        win:SetSize(440, 540)
+        win:SetPoint("CENTER", UIParent, "CENTER", -300, 60)
+        local inset = CreateFrame("Frame", nil, win, "InsetFrameTemplate")
+        inset:SetPoint("TOPLEFT", win, "TOPLEFT", 8, -76)
+        inset:SetPoint("BOTTOMRIGHT", win, "BOTTOMRIGHT", -8, 94)
+        expect(math.abs(inset:GetWidth() - 424) < 1e-6 and math.abs(inset:GetHeight() - (540 - 76 - 94)) < 1e-6,
+            "two-point anchors set the size")
+        local tabs = {}
+        for k = 1, 3 do
+            tabs[k] = CreateFrame("Button", nil, win, "PanelTopTabButtonTemplate")
+            tabs[k]:SetText("Tab " .. k)
+            tabs[k]:SetID(k)
+        end
+        expect(win.Tabs and #win.Tabs == 3 and win.Tabs[2] == tabs[2], "tabs join their parent's Tabs")
+        PanelTemplates_SetNumTabs(win, 3)
+        PanelTemplates_SetTab(win, 2)
+        expect(not tabs[2]:IsEnabled() and tabs[1]:IsEnabled(), "the selected tab is disabled (no OnClick on it)")
+        local clicked, upped = {}, {}
+        for k = 1, 3 do
+            tabs[k]:RegisterForClicks("LeftButtonUp", "RightButtonUp", "MiddleButtonUp")
+            tabs[k]:SetScript("OnClick", function(_, button) clicked[#clicked + 1] = k .. button end)
+            tabs[k]:SetScript("OnMouseUp", function(_, button) upped[#upped + 1] = k .. button end)
+        end
+        M.ClickButton(tabs[1], "MiddleButton")
+        M.ClickButton(tabs[2], "MiddleButton")
+        expect(clicked[1] == "1MiddleButton" and #clicked == 1 and upped[2] == "2MiddleButton",
+            "middle-click: OnClick on an enabled tab, only OnMouseUp on the selected one")
+        tabs[3]:RegisterForClicks("LeftButtonUp")
+        M.ClickButton(tabs[3], "MiddleButton")
+        expect(#clicked == 1, "a button not registered for a mouse button gets no OnClick")
+        PanelTemplates_TabResize(tabs[1], 0, nil, 72, 130)
+        expect(tabs[1]:GetWidth() >= 72 and tabs[1]:GetWidth() <= 130, "PanelTemplates_TabResize within bounds")
+        M.SetTemplateMissing("TabSystemTopButtonTemplate", true)
+        expect(C_XMLUtil.GetTemplateInfo("TabSystemTopButtonTemplate") == nil
+            and not pcall(CreateFrame, "Button", nil, win, "TabSystemTopButtonTemplate"), "a missing template")
+        M.SetTemplateMissing("TabSystemTopButtonTemplate", false)
+        expect(C_XMLUtil.GetTemplateInfo("PanelTopTabButtonTemplate").height == 32, "template info")
+        -- font objects
+        local font = CreateFont("TPMockConvFont")
+        font:CopyFontObject(ChatFontNormal)
+        local path, size = font:GetFont()
+        expect(path == "Fonts\\ARIALN.TTF" and size == 14, "CreateFont copies ChatFontNormal")
+        local fs = win:CreateFontString(nil, "ARTWORK", "TPMockConvFont")
+        fs:SetText("abcd")
+        font:SetFont(path, 18, "")
+        expect(fs:GetUnboundedStringWidth() == 0.5 * 18 * 4, "a font object change reaches its font strings")
+        -- the reply box: focus, typing, pasting, keys
+        local box = CreateFrame("EditBox", nil, win, "InputBoxInstructionsTemplate")
+        box:SetAutoFocus(false)
+        box:SetMaxBytes(1024)
+        local changes = {}
+        box:SetScript("OnTextChanged", function(self, userInput)
+            InputBoxInstructions_OnTextChanged(self)
+            changes[#changes + 1] = { userInput, IsControlKeyDown(), self:GetText() }
+        end)
+        local chars = 0
+        box:SetScript("OnChar", function() chars = chars + 1 end)
+        expect(box.Instructions:IsShown() and not M.Paste(box, "x"), "no paste without focus")
+        box:SetFocus()
+        expect(M.Focused() == box and M.FocusLog()[#M.FocusLog()].box == box, "focus recorded")
+        M.Type(box, "hé")
+        expect(box:GetText() == "hé" and chars == 2 and #changes == 2 and changes[2][1] == true and changes[2][2] == false
+            and not box.Instructions:IsShown(), "typing: OnTextChanged(true) per character, no Ctrl, OnChar")
+        box:SetText("")
+        expect(changes[3][1] == false, "SetText fires OnTextChanged(false)")
+        M.Paste(box, "Brechen wir auf?")
+        local last = changes[#changes]
+        expect(last[1] == true and last[2] == true and last[3] == "Brechen wir auf?" and chars == 2 and not IsControlKeyDown(),
+            "paste: one OnTextChanged(true) with Ctrl down, no OnChar, Ctrl released")
+        local before = #changes
+        M.Type(box, "abc", { burst = true })
+        expect(#changes == before + 1 and chars == 5, "an IME burst: one OnTextChanged(true), OnChar per character")
+        local pressed = {}
+        box:SetScript("OnEnterPressed", function() pressed[#pressed + 1] = "enter" end)
+        box:SetScript("OnArrowPressed", function(_, key) pressed[#pressed + 1] = key end)
+        box:SetScript("OnTabPressed", function() pressed[#pressed + 1] = IsShiftKeyDown() and "shift-tab" or "tab" end)
+        M.Key(box, "ENTER")
+        M.Key(box, "UP")
+        M.Key(box, "TAB", { shift = true })
+        expect(table.concat(pressed, ",") == "enter,UP,shift-tab", "keys: Enter, arrows, Shift+Tab")
+        win:Hide()
+        expect(M.Focused() == nil, "hiding the window takes the focus away from its box")
+        win:Show()
+        -- sending, echoes, blocked sends
+        M.SetChannels({ [2] = "Trade - City" })
+        expect(GetChannelName("Trade - City") == 2 and GetChannelName("Trade") == 2 and GetChannelName(5) == 0,
+            "channels by name, base name and number")
+        local send = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
+        send:SetText(SAY)
+        send:SetScript("OnClick", function() C_ChatInfo.SendChatMessage("hi", "CHANNEL", nil, GetChannelName("Trade")) end)
+        local nSent = #M.SentChat()
+        send:Click()
+        local rec = M.SentChat()[nSent + 1]
+        expect(rec and rec.blocked and not rec.hardware, "a channel send outside a hardware event is blocked")
+        M.ClickButton(send)
+        rec = M.SentChat()[nSent + 2]
+        expect(rec and not rec.blocked and rec.hardware and rec.target == 2, "a channel send from a click goes out")
+        local seen = {}
+        local echoFrame = CreateFrame("Frame")
+        echoFrame:RegisterEvent("CHAT_MSG_CHANNEL")
+        echoFrame:RegisterEvent("CHAT_MSG_WHISPER_INFORM")
+        echoFrame:RegisterEvent("CHAT_MSG_SYSTEM")
+        echoFrame:SetScript("OnEvent", function(_, event, text, _, _, _, _, _, _, index, _, _, _, guid)
+            seen[#seen + 1] = { event = event, text = text, index = index, guid = guid }
+        end)
+        M.EchoSent(rec)
+        expect(seen[1] and seen[1].event == "CHAT_MSG_CHANNEL" and seen[1].guid == UnitGUID("player") and seen[1].index == 2,
+            "the echo comes back from the player on the channel")
+        C_ChatInfo.SendChatMessage("hello", "WHISPER", nil, "Neco-OtherRealm")
+        M.EchoSent()
+        M.PlayerNotFound("Neco-OtherRealm")
+        expect(seen[2].event == "CHAT_MSG_WHISPER_INFORM" and seen[3].event == "CHAT_MSG_SYSTEM"
+            and seen[3].text == ERR_CHAT_PLAYER_NOT_FOUND_S:format("Neco-OtherRealm"), "whisper echo, player not found")
+        echoFrame:UnregisterAllEvents()
+        local bnLine = M.Deliver("CHAT_MSG_BN_WHISPER", "bn line", "|Kq1|k", nil, true, { bnID = 7 })
+        expect(C_ChatInfo.GetChatLineSenderGUID(bnLine) == nil, "a Battle.net line has no player GUID")
+        local chanLine = M.Deliver("CHAT_MSG_CHANNEL", "chan line", "Brunhilde-Realm", "Player-1-0042", true,
+            { channelString = "2. Trade - City", channelIndex = 2, channelBase = "Trade - City", class = "PRIEST" })
+        expect(select(2, GetPlayerInfoByGUID("Player-1-0042")) == "PRIEST" and chanLine > bnLine, "sender class by GUID")
+        M.SetLockdown(true)
+        C_BattleNet.SendWhisper(7, "x")
+        M.SetLockdown(false)
+        expect(M.SentChat()[#M.SentChat()].blocked, "sends during the chat lockdown are blocked")
+        -- combat, groups, sounds, tooltips, pixels, atlases, nine-slice
+        local regen = {}
+        echoFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+        echoFrame:SetScript("OnEvent", function(_, event) regen[#regen + 1] = event end)
+        M.SetCombat(true)
+        expect(InCombatLockdown() and regen[1] == "PLAYER_REGEN_DISABLED", "combat start")
+        M.SetCombat(false)
+        echoFrame:UnregisterAllEvents()
+        M.SetGroup({ party = true, guild = true })
+        expect(IsInGroup() and not IsInRaid() and IsInGuild() and not C_GuildInfo.IsGuildOfficer(), "group state")
+        M.SetGroup({ party = false, guild = false })
+        PlaySound(SOUNDKIT.IG_CHARACTER_INFO_TAB)
+        expect(M.Sounds()[#M.Sounds()] == SOUNDKIT.IG_CHARACTER_INFO_TAB, "sounds recorded")
+        send:SetMotionScriptsWhileDisabled(true)
+        send:Disable()
+        send.tooltipText = "why"
+        M.Hover(send)
+        expect(GameTooltip:IsOwned(send) and GameTooltip.lines[1] == "why", "a disabled button with motion scripts shows its tooltip")
+        M.Leave()
+        expect(not GameTooltip:IsShown(), "leaving hides it")
+        local _, physH = GetPhysicalScreenSize()
+        expect(math.abs(PixelUtil.GetNearestPixelSize(1, 1) - Round(physH / 768) * 768 / physH) < 1e-9,
+            "PixelUtil rounds to physical pixels")
+        expect(C_Texture.GetAtlasInfo("ChatBubble-Tail") and C_Texture.GetAtlasInfo("no-such-atlas") == nil, "atlas info")
+        local bubble = CreateFrame("Frame", nil, win)
+        NineSliceUtil.ApplyLayoutByName(bubble, "ChatBubble")
+        expect(bubble.TopLeftCorner and bubble.Center and bubble.TopLeftCorner:GetAtlas() == "ChatBubble-NineSlice-CornerTopLeft",
+            "the ChatBubble nine-slice layout")
+        M.SetLayoutMissing("ChatBubble", true)
+        expect(NineSliceUtil.GetLayout("ChatBubble") == nil and not pcall(NineSliceUtil.ApplyLayoutByName, bubble, "ChatBubble"),
+            "a missing layout")
+        M.SetLayoutMissing("ChatBubble", false)
+        -- scrolling, dragging, resizing
+        local scroll = CreateFrame("ScrollFrame", nil, inset)
+        scroll:SetPoint("TOPLEFT", inset, "TOPLEFT", 6, -6)
+        scroll:SetPoint("BOTTOMRIGHT", inset, "BOTTOMRIGHT", -22, 6)
+        local child = CreateFrame("Frame", nil, scroll)
+        child:SetSize(396, 1000)
+        scroll:SetScrollChild(child)
+        local row = child:CreateTexture(nil, "ARTWORK")
+        row:SetSize(10, 16)
+        row:SetPoint("TOPLEFT", child, "TOPLEFT", 0, -100)
+        local _, top0 = row:GetRect()
+        scroll:SetVerticalScroll(40)
+        local _, top1 = row:GetRect()
+        expect(math.abs((top1 - top0) - 40) < 1e-6 and scroll:GetVerticalScrollRange() > 0, "scrolling moves the child up")
+        win:SetMovable(true)
+        win:RegisterForDrag("LeftButton")
+        win:SetScript("OnDragStart", win.StartMoving)
+        win:SetScript("OnDragStop", win.StopMovingOrSizing)
+        local x0 = select(4, win:GetPoint())
+        M.Drag(win, 25, -10)
+        expect(select(4, win:GetPoint()) == x0 + 25, "dragging moves the window")
+        win:SetResizable(true)
+        win:SetResizeBounds(380, 440, 760, 900)
+        local grip = CreateFrame("Button", nil, win, "PanelResizeButtonTemplate")
+        grip:Init(win, 380, 440, 760, 900)
+        M.MouseDown(grip)
+        M.Resize(win, 2000, 100)
+        M.MouseUp(grip)
+        expect(win:GetWidth() == 760 and win:GetHeight() == 440 and not win.sizing, "resizing is clamped to the bounds")
+        win:Hide()
+        M.SetChannels({})
+        expect(type(UISpecialFrames) == "table" and Constants.ChatFrameConstants.MaxChatChannels == 20
+            and (fr and SAY == "Dire" or not fr and SAY == "Say"), "globals: UISpecialFrames, constants, localized SAY")
+        check(#fails == 0, "conversation window mock pieces (" .. table.concat(fails, "; ") .. ")")
+    end
+    Run()
+end
+
+---------------------------------------------------------------------------------------------
+-- tests\harness_*.lua: the window and reply checks of their own work packages
+local privateStrings = {}
+do
+    local H = {
+        check = check, section = section, out = out, M = M, ns = ns, L = L, db = db, fr = fr, stubBridge = stubBridge,
+        sent = sent, Parse = Parse, Since = Since, AllOk = AllOk, Deliver = Deliver, slash = slash, ButtonOf = ButtonOf,
+        EntryFor = EntryFor, EntryWith = EntryWith, Printed = Printed, CountPrinted = CountPrinted, Snapshot = Snapshot,
+        Lines = Lines, Base = Base, LinksIn = LinksIn, SUFFIX_START = SUFFIX_START,
+        Private = function(text)
+            privateStrings[#privateStrings + 1] = text
+        end,
+    }
+    for _, file in ipairs(HARNESS_FILES or {}) do
+        section("file " .. file)
+        local chunk, err = load(HARNESS_SOURCES[file], "@tests/" .. file)
+        local ok = chunk ~= nil
+        if ok then
+            ok, err = pcall(chunk, H)
+        end
+        check(ok, file .. " ran to the end" .. (ok and "" or (": " .. tostring(err))))
+    end
+end
+
+---------------------------------------------------------------------------------------------
 section("privacy and errors")
--- Nothing a player typed, no sender and no glossary hit may reach the saved variables.
+-- Nothing a player typed, no sender, no GUID and no glossary hit may reach the saved variables.
 local hits = { "lf2m", "cheap", "skull", "strat", "Linen Cloth", "pull in 5" }
 local leaks = {}
 local function Walk(v, pathName, inGlossary)
@@ -1348,6 +1694,21 @@ local function Walk(v, pathName, inGlossary)
                 leaks[#leaks + 1] = pathName
             end
         end
+        for _, g in ipairs(deliveredGuid) do
+            if v:find(g, 1, true) then
+                leaks[#leaks + 1] = pathName
+            end
+        end
+        for _, t in ipairs(privateStrings) do
+            if #t >= 4 and v:find(t, 1, true) then
+                leaks[#leaks + 1] = pathName
+            end
+        end
+        for _, rec in ipairs(M.SentChat()) do
+            if type(rec.text) == "string" and #rec.text >= 4 and v:find(rec.text, 1, true) then
+                leaks[#leaks + 1] = pathName
+            end
+        end
         if not inGlossary then
             for _, h in ipairs(hits) do
                 if v:lower():find(h:lower(), 1, true) then
@@ -1358,7 +1719,8 @@ local function Walk(v, pathName, inGlossary)
     end
 end
 Walk(db, "TranslateProbeDB", false)
-check(#leaks == 0, "no text, sender or glossary hit in the saved variables (" .. table.concat(leaks, ", ") .. ")")
+check(#leaks == 0, "no text, sender, GUID, sent text or glossary hit in the saved variables ("
+    .. table.concat(leaks, ", ") .. ")")
 local glossKeys = {}
 for k in pairs(db.glossary) do
     glossKeys[#glossKeys + 1] = k
