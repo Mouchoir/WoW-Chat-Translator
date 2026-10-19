@@ -1,12 +1,15 @@
 # TranslateProbe: design as built
 
 TranslateProbe puts a [T] link after each readable player line in the WoW Forever chat. A click
-reserves a few rows under the line and asks **TranslateProbe Helper**, a Windows app running beside
-the game, to translate the line with a local AI model (llama.cpp and Qwen3 4B). The Helper draws the
-translation on those rows. Nothing leaves the PC, and the Helper never touches the game process:
-the addon and the Helper talk through pixels only.
+opens the line in the **conversation window** (one tab per sender; since 2026-10-19, section K), or,
+with Ctrl held, reserves a few rows under the line (inline mode), and asks **TranslateProbe Helper**,
+a Windows app running beside the game, to translate the line with a local AI model (llama.cpp and
+Qwen3 4B). The Helper draws the translation on the reserved rows, in the chat or in the window's
+bubbles. From the window the player can also reply: the Helper translates the reply and puts it in
+the clipboard, the player pastes it and clicks the channel. Nothing leaves the PC, and the Helper
+never touches the game process: the addon and the Helper talk through pixels only.
 
-This file is the design as it was built (addon 0.3.0, Helper 0.2.0). The detailed specs, the
+This file is the design as it was built (addon 0.4.0, Helper 0.3.0). The detailed specs, the
 measurements behind them and every deviation from the original plan are in:
 
 | File | Part |
@@ -16,7 +19,7 @@ measurements behind them and every deviation from the original plan are in:
 | `docs\ENGINE.md` | the translation engine: discovery, llama-server lifecycle, prompt, evaluations |
 | `docs\HELPER.md` | the Helper app: threads, capture, overlay, CLI, diagnostics, CPU measurements |
 | `tests\e2e\README.md` | the end-to-end rig (fakewow) and its checks |
-| `docs\IN-GAME-CHECKS.md` | what only the real client can show (G1-G10) |
+| `docs\IN-GAME-CHECKS.md` | what only the real client can show (G1-G18) |
 
 ---
 
@@ -45,8 +48,10 @@ Ollama store.
 - Fallback: GDI `BitBlt` from the screen, used when WGC is unsupported, or after WGC delivered no
   fresh frame for 3 s with the game in front and one session re-creation did not help. In GDI
   mode the overlay windows are excluded from capture (`WDA_EXCLUDEFROMCAPTURE`).
-- Never: a handle to the game process, memory reads, input injection, or WinEvent hooks (the
-  foreground window is polled).
+- Never: a handle to the game process, memory reads or input injection. Since 2026-10-19 the
+  Helper sets two out-of-context WinEvent hooks (foreground change, minimize start and end) so its
+  overlay's z-order follows the game window at once (section K, D12); before, the foreground window
+  was only polled.
 
 **3. Bridge protocol v2 (addon to Helper)** - spec in `docs\BRIDGE.md`
 - A 4 px strip of 2x2 blocks at the client's top-left: 8 calibration greys, then the frame bytes.
@@ -77,8 +82,9 @@ Ollama store.
 - A display curve between the game and the capture (the game's Gamma setting, contrast) is
   measured on the strip's calibration blocks; when it is not linear, the scan area is linearized
   before the tag scan and the cards.
-- Overlay windows are layered, topmost, click-through and never activate; one per chat view,
-  hidden when empty.
+- Overlay windows are layered, click-through and never activate; one per view, hidden when empty.
+  They are topmost while the game window is in front, and sit right above the game window in the
+  z-order otherwise, so another application's window always hides them (section K, D12).
 
 **5. llama-server lifecycle and resources** - details in `docs\ENGINE.md`
 - Started on the first translation request only; hidden, below-normal priority, in a
@@ -173,17 +179,30 @@ Ollama store.
 
 ```
 Locales.lua      ns.L (English base, frFR override)
-Core.lua         saved variables (whitelist purge), session id, print helpers, inits under pcall
-Bridge.lua       strip encoder, message builders, tag and plate markup
+ConvLocales.lua  the conversation window's strings and key binding names (en, frFR)
+ReplyLocales.lua the reply composer's strings (en, frFR)
+Core.lua         saved variables (whitelist purge, schema 4), session id, print helpers, inits under pcall
+Bridge.lua       strip encoder, message builders, tag and plate markup, ApplyTag, BUBBLE_RGB
 Glossary.lua     Describe, Extract, PromptText, VisibleText, PlainText, Romanize
 Lang.lua         TARGETS, NAMES, DefaultTarget, Script, TargetScript
-Reserve.lua      metrics, row estimate, reserved rows, slots, VIEW collector and watcher, old-session cleanup
-ChatButton.lua   filter, [T] decoration, Track, SetSuffix, CutRows, ShownLines, link clicks, tooltips
-Request.lua      click flow, request ids, active requests (memory only)
+LangData.lua     trigram profiles (restored from 8b7750e)
+LangDetect.lua   the sender's language (writing system, trigrams, chat words, "unknown" rule, votes)
+Reserve.lua      metrics, row estimate, reserved rows, slots (chat and window), VIEW collector and watcher, window metrics
+ChatButton.lua   filter, [T] decoration and routing, Track, LineInfo, SetSuffix, CutRows, ShownLines, tooltips
+Request.lua      click flow, request ids, active requests (memory only), window bubbles' TRANSLATE
 Restriction.lua  restriction watcher, deferred clicks, secret arrivals, reprint
+Popup.lua        the window's own popup menu
+Conversations.lua conversations, messages, following, closed tabs, memory bounds (memory only)
+Bubble.lua       bubbles, the reply card, TranslateProbeConvFont
+Channels.lua     the reply's channel buttons, wire text, sending, echoes
+Consent.lua      the in-game clipboard consent dialog
+Composer.lua     the reply composer (states, paste detection, checks, reply TRANSLATE and CANCEL)
+ConvFrame.lua    the window: tabs, header, thread, slot manager, per-row visibility, VIEW 200, position
 Commands.lua     slash commands
 Options.lua      options panel (game settings) and its glossary page
 ```
+
+`Bindings.xml` (loaded from the addon folder) declares the two key bindings of the window.
 
 ### C.2 Data flow
 
@@ -210,7 +229,8 @@ Helper: capture -> strip decode -> reassemble -> TRANSLATE -> engine -> status /
   0.8, default 1.3). The width ratio is not rounded up first, so a short line reserves one row.
   The tag's row field has 2 bits: rows 4 and 5 carry 0 and 1 again, and the Helper numbers a
   card's rows on from its first visible tag.
-- **Slots** 0..126 (127 is the `/tpr test rows` slot) come from a free list. A slot is freed when
+- **Slots** 0..99 for chat lines since 2026-10-19 (0..126 before; 100..125 are the window's
+  bubbles, 126 the reply, 127 the `/tpr test rows` slot) come from a free list. A slot is freed when
   its rows are removed, or by the read-only scan once its line has left every chat frame. The scan
   is a `TransformMessages` predicate that records our row links and always returns false, so no
   entry is ever repackaged (no new timestamp, no un-fade). It runs at most every 15 s from the
@@ -310,10 +330,10 @@ and `docs\ENGINE.md` section 1.
   | In front, nothing pending | 10 Hz |
   | In front, strip seen in the last 2 s | 20 Hz |
   | In front, card visible | `captureHzActive` (20-60, default 30) |
-  | Not in front | 5 Hz, tags only |
+  | Not in front | 5 Hz, 20 Hz while the strip is active (strip and tags since 2026-10-19; the cards stay, D12) |
 
-  Each tick reads the window geometry, grabs the strip (client rows 0..8) and the scan area (the
-  union of the VIEW rectangles, or a discovery area at 2 Hz while no VIEW is known), decodes,
+  Each tick reads the window geometry, grabs the strip (client rows 0..8) and the scan regions (one
+  per VIEW rectangle, merged only when cheap, or a discovery area at 2 Hz while no VIEW is known), decodes,
   reassembles, feeds the engine, scans tags (only rows where the sync relation can hold; bands
   whose tags did not change keep their readings), builds cards (kept when the scan area is
   pixel-identical), runs the covering test (at most 10 Hz per card) and publishes the scene when
@@ -352,7 +372,8 @@ and `docs\ENGINE.md` section 1.
 - CLI: `[--runtime DIR] [--model FILE] [--backend auto|cpu|vulkan|cuda] [--capture auto|wgc|gdi]
   [--translator llama|echo] [--wow-class CLASS] [--diag] [--diag-json FILE] [--log-dir DIR]
   [--no-tray] [--exit-after SECS] [--selftest]`, plus the test flags `--no-overlay`,
-  `--assume-foreground` and `--overlay-probe`.
+  `--assume-foreground`, `--overlay-probe` and `--no-clipboard` (implied by `--no-overlay`), and the
+  hidden `--instance-name NAME` and `--assume-background`.
 - Development: `scripts\helper.ps1 -Build | -Test | -Run | -Diag [-RuntimeDir DIR]`. The runtime
   folder comes from `-RuntimeDir`, `$LlamaRuntimeDir` in the gitignored `scripts\dev.local.ps1`,
   or `TPROBE_LLAMA_RUNTIME`; no personal path is committed.
@@ -384,13 +405,16 @@ and `docs\ENGINE.md` section 1.
 | `cargo test --offline` in `helper\bridge`, `helper\engine`, `helper\app`, `helper\testkit` | unit and integration tests (one cargo at a time) |
 | `cargo test --offline --release -- --ignored` in `helper\bridge` | 200 000 corrupted strips, per-call cost |
 | `cargo test --offline --test window_pipeline -- --ignored` in `helper\app` | the real exe against a small window at the bottom of the z-order |
+| `python -I tests\e2e\check.py --selftest --truth <truth>` | check.py on synthetic diags: a perfect one passes, a shifted one fails (and, for `conv`, a broken window fails `window_fill`) |
 
 ### E.2 End to end, without the game
 
 `python -I tests\e2e\run.py --all --capture wgc` plays every scenario (basic, scroll, fade, cover,
-tabs, altz, dropped, late_start, gamma22) in fakewow, placed off every monitor, with the Helper
-on the echo translator and `--no-overlay` (no window is ever shown), then checks latency, band
-positions, hiding, masks, "Not received", completion and the Helper's CPU use. `--capture gdi`
+tabs, altz, dropped, late_start, gamma22, and since 2026-10-19 conv: a synthetic conversation
+window with three bubbles, a reply card and its lane) in fakewow, placed off every monitor, with
+the Helper on the echo translator and `--no-overlay --no-clipboard` (no window is ever shown, the
+clipboard is never touched), then checks latency, band positions, hiding, masks, "Not received",
+completion and the Helper's CPU use, plus the window checks for conv. `--capture gdi`
 needs fakewow on screen and runs only when no game client is running. The real model runs with
 `python -I tests\e2e\run.py --scenario basic --translator llama --helper-arg=--backend=cpu --helper-arg=--runtime=<runtime folder> --fakewow-arg=--tail-ms --fakewow-arg=20000 --done-within-s 60`
 (the 20 s tail keeps the scene up while the translator starts on the CPU).
@@ -403,8 +427,9 @@ See section I.
 
 ## F. In-game checks
 
-`docs\IN-GAME-CHECKS.md` lists the setup (close the game, deploy, build and start the Helper) and
-the checks G1 (bridge and capture) to G8 (colourblind filter), with what to report.
+`docs\IN-GAME-CHECKS.md` lists the setup (deploy, build and start the Helper) and the checks G1
+(bridge and capture) to G10 (native look) for inline mode, then G11 (client facts) to G18
+(clipboard end to end) for the conversation window and replies, with what to report.
 
 ---
 
@@ -457,7 +482,9 @@ Each is recorded with its evidence in the component docs; the main ones:
   discovery, edge pixels only where fractional, sample hysteresis, font cell cap), rows 1..6 and
   an exit on `WM_CLOSE` from any window (`taskkill` without /F).
 - **E2E rig** (`tests\e2e\README.md`): fakewow off-screen as a layered window (WGC cannot capture a
-  normal off-screen window); `run.py`; check.py waits for the VIEW and compares rows modulo 4.
+  normal off-screen window); `run.py`; check.py waits for the VIEW and compares rows modulo 4;
+  since 2026-10-19 a window layer (scenario `conv`) and the window checks.
+- **Conversation window** (2026-10-19): see section K.4.
 
 ---
 
@@ -609,3 +636,187 @@ llama-server older than 60 s (it never had to act):
 - Second run with `--fakewow-arg=--tail-ms=25000` (model files warm): all three reached their
   final state ("Already in English") 4.8, 4.4 and 6.5 s after their TRANSLATE; every check passed
   (CPU 2.13%). llama-server ended with the Helper both times; `tasklist` showed none afterwards.
+
+---
+
+## K. The conversation window and replies (2026-10-19)
+
+Built from the conversation design of 2026-10-19 in four work packages (P protocol, A window, R
+reply and settings, H Helper), then integrated and reviewed. The component docs hold the details:
+`docs\ADDON.md` ("Conversation window", "Reply and send", decisions 24-51), `docs\BRIDGE.md`
+(section 3, section 8c), `docs\HELPER.md` ("Conversation window", "Game window in the
+background", deviations 35-42), `tests\e2e\README.md` (scenario `conv`) and
+`docs\IN-GAME-CHECKS.md` (G11-G18).
+
+### K.1 User decisions
+
+| # | Decision |
+|---|---|
+| D1 | Enter never sends; only a click on a channel button does |
+| D2 | The Helper empties the clipboard as soon as a consented reply request arrives (the consent dialog says so) |
+| D3 | Following new messages is "smart": whispers and conversations the player replied to are translated while visible; a first contact in a public channel is added untranslated, one click translates it |
+| D4 | [T] opens the conversation window; Ctrl-click keeps the rows under the line; Shift still means "without the cache" |
+| D5 | The original is hidden under each bubble, with an "Original" link |
+| D6 | The Helper's tray switch "Copy translated replies to the clipboard" is on by default (the in-game consent is the approval) |
+| D7 | Phase A (the window) and Phase B (replies with the clipboard) in one round |
+| D8 | Translated text in bubbles uses the Helper's light blue (#A8D8FF) |
+| D9 | One guarded live test of the real clipboard path, by the integration step only; unit tests use a fake clipboard, every E2E run `--no-clipboard` |
+| D10 | Each tab has a close cross (on hover and on the selected tab) and closes on middle-click; closing keeps the history in memory and a later translated message reopens the tab with it; 30 conversations of 100 messages, the least recently active closed one evicted first; at most 10 tabs shown, the rest behind "+N"; never saved |
+| D11 | The inline glossary row has its own colour (pale gold `e6cc80`) and is off by default (saved variables schema 4 turns an old "on" off once) |
+| D12 | After an Alt-Tab the Helper keeps painting where the game window is visible and never over another application: the overlay leaves the topmost band and sits right above the game window; hidden only when the game is minimized, the cards fully covered, or the UI hidden |
+
+### K.2 How it works
+
+- **Addon:** `ConvFrame` (a `PortraitFrameTemplate` window, top tabs, a header with the sender's
+  language, a scrolling thread of bubbles, the composer at the bottom). Each incoming bubble is an
+  opaque `BUBBLE_RGB` (36, 30, 24) fill under Blizzard's ChatBubble border, with K rows of a tag and
+  a plate like the inline rows; rows not fully inside the visible thread are hidden. Bubbles get
+  window slots 100..125 when they come within a page of the view (a freed slot waits 2 s before
+  reuse); the reply card uses slot 126. One VIEW entry, id 200, covers the bubble column from the
+  thread's top to the reply card's bottom, so the Helper's native-look samples land in the bubble
+  fill and the painted tags and plates disappear into it.
+- **Protocol:** TRANSLATE gains the flags reply (4) and copy (8): copy needs reply, reply needs the
+  plate flag, 2..6 rows (row 0 is the Helper's status) and an explicit target code. `ADDON_BUILD`
+  is 3 (build 2 already shipped rows 1..6); the Helper serves builds 2 and 3 without a toast.
+- **Reply:** Enter in the composer (or "Translate to XX") sends TRANSLATE on slot 126 with the
+  player's draft. With consent (the in-game dialog, or a remembered "allow") the copy bit is set;
+  the Helper empties the clipboard at once, translates the reply as an urgent job, paints grey
+  "Translating..." on row 0 and the text below, writes the final text to the clipboard only when
+  nobody copied anything since its empty (kept out of the Win+V history and the cloud clipboard),
+  and then paints green "Ready - Ctrl+V to paste" ("Ready (not copied)" in amber otherwise). The
+  player pastes into the box (the addon shows "Pasted"), the paste checks run, and a click on a
+  channel button sends; CANCEL then lets the Helper empty the clipboard if it still holds its own
+  text. A hint lane under the card ("No status above? Start or update TranslateProbe Helper.") is
+  painted over by the Helper, so it shows exactly when no Helper paints.
+- **Helper in the background (D12):** the overlay windows are topmost only with the game in front;
+  otherwise they sit right above the game window, so other windows hide them pixel for pixel. The
+  strip and the tags are read in the background too (5 Hz, 20 Hz while the strip is active), so a
+  followed whisper's TRANSLATE or a CANCEL sent while the player is Alt-Tabbed is not lost.
+- **Privacy:** conversations, drafts, replies and sent texts live in Lua tables and Helper memory
+  only, lost on /reload, logout or Helper exit; the saved variables keep the window's settings
+  only; the Helper never reads the clipboard's content (sequence numbers only), and its logs and
+  diag records of the reply flow are names and numbers.
+
+### K.3 What is shown in each state (window)
+
+| State | Bubble | Reply card |
+|---|---|---|
+| Helper not running | coloured tags and navy plates in the bubble, the original under it | tags, plates and the lane hint |
+| Helper started late | "Not received - click the bubble" (each click asks again) | "Not received - click Translate again" |
+| Waiting, starting, translating | grey statuses | the same on row 0, stepper "2 Paste (Ctrl+V)" |
+| Done | the translation in light blue, or "Already in French" | green "Ready - Ctrl+V to paste" and the text |
+| Not copied | - | amber, with the reason (consent refused, switch off, copied meanwhile, clipboard busy) |
+| Failed | "Translation failed - Shift-click the bubble" | red "Translation failed - click Translate again" |
+| Untranslated (follow add, or a public first contact in smart mode) | the original in the bubble and a Translate button | - |
+| Pasted, warning | - | "Pasted" in green, or an orange warning and "click again to send" |
+| Sending, sent, not confirmed, offline, blocked | my bubble's meta line | - |
+| Chat locked | a banner | stepper in red with the manual path; send buttons greyed; the clipboard is kept |
+| Helper older than the addon | chat-style wording in bubbles | the reply is dropped ("Not received"), the lane hint and the "Helper is older" toast |
+
+### K.4 Deviations from the conversation design
+
+The main ones (each with its evidence in the component docs):
+- `ADDON_BUILD` 3 instead of 2, served with 2 (build 2 shipped rows 1..6 the day before).
+- Chat slots 0..99 (were 0..126); the thread keeps 100 messages (the design said 60) and 30
+  conversations (the design said 10) with closed tabs kept (D10).
+- A pick in the [Other] popup puts the channel on button 3 instead of sending (D1);
+  `Channels.Wire` also turns line breaks into spaces; two extra commands (`/tpr conv reset`,
+  `/tpr test paste`).
+- A channel button uses the old channel number only when the channel there has exactly the
+  sender's channel name (review fix; the design's "else arg8" sent to another channel after a zone
+  change).
+- The consent dialog leaves Enter to the game instead of swallowing it (review fix: a swallowed
+  key before combat left every key swallowed in combat).
+- `Action::ReplyStart` carries the request's text (the "Already in" and "Nothing to translate"
+  results copy the player's own text); three extra reply statuses for those results.
+- A capture that decodes a different VIEW skips its tag scan; the strip is read in the background
+  (review fix); a reply card's lane has its own covering test (review fix).
+- The E2E `conv` window is synthetic (drawn by the rig with the real tag colours through the
+  addon's own `Bridge.Send`), not the addon's window modules.
+
+### K.5 Integration review findings
+
+| Finding (severity) | Status |
+|---|---|
+| A channel button could send to another channel after a zone change or a channel swap (critical) | fixed: name match required, harness checks for both cases (ADDON.md decision 47); G13 records arg9 on the client |
+| Enter in the consent dialog, then combat: every key swallowed (major) | fixed: only Escape is swallowed and it hides the dialog in the same call (decision 48) |
+| A bubble click asked the Helper again only the first time (major) | fixed: every click sends a new TRANSLATE (decision 51) |
+| The Helper did not read the strip in the background, so TRANSLATE and CANCEL sent while Alt-Tabbed were lost (major) | fixed: the strip is part of every capture, 20 Hz in the background while it is active (HELPER.md deviation 38) |
+| A popup opened over another put the window back in the Escape list (minor) | fixed: generation counter (decision 49) |
+| The consent dialog stayed open when the window hid (minor) | fixed: `Consent.Cancel()` from the window's `OnHide` (decision 50) |
+| clipprobe: unreadable text treated as no text, then emptied (minor) | fixed: skipped (HELPER.md deviation 42) |
+| clipprobe: two sequence windows between save, empty, write and restore (minor) | fixed: guarded `begin`, restore only over the probe's own last change |
+| clipprobe: length and hash of the saved text on a child's command line (minor) | fixed: the child prints its reading on its stdout pipe, the parent compares |
+| `Iterator::all` skipped the other exclusion formats after a failure (minor) | fixed: `clip::set_every_exclusion` (deviation 41) |
+| The `capture` diag record said `scan: true` for a VIEW-skip capture, making the conv `bands` check flaky (minor) | fixed: written after the decode, `viewSkip` field (deviation 39) |
+| The reply lane was not in the covering test (minor) | fixed: its own test, a covered lane is dropped (deviation 40) |
+| check.py window checks had blind spots and no negative self-test (minor) | fixed: `window_fill` fails on a window card with no sample; `--selftest` on a conv truth checks a perfect and a broken window diag. Not done: an E2E variant driving the real `ConvFrame`/`Bubble` modules through the mock (deferred: the rig's synthetic window tests the Helper against the protocol; the real modules are covered by the harness) |
+
+### K.6 Integration results (2026-10-19)
+
+Same PC. No WoW client ran during these runs. The user's Helper was stopped before the release
+build (`taskkill` without /F; it exited within about 1 s, and no llama-server was left) and left
+stopped. The display went to sleep (the 60-minute idle timeout) at about 04:14, during the WGC
+E2E set: from `late_start` on, WGC delivered about 4 fresh frames a second instead of about 30
+and GDI ran 2 to 4 capture ticks a second. The previous build measured the same in an A/B run, so
+those figures describe the sleeping display, not this build.
+
+**Offline suites**
+
+| Command | Result |
+|---|---|
+| `npm test` (enUS, frFR, bridge) | enUS 562/562, frFR 562/562; bridge byte identity: 30 traces, 16,892 ticks, 1,066 frames, 1,024 tags, 46 builder vectors + 6 parser-only, 29 API checks, all passed |
+| `node tests\run.js enUS --stub-bridge` / `frFR --stub-bridge` | 562/562 each |
+| `luacheck addon` | 0 warnings, 0 errors in 22 files |
+| `python -I tools\bridge\make_vectors.py <dir>` | 30 traces, 1,066 frames, 387 messages, 1,024 tags, 52 message vectors, 36 strips; byte-identical to `tests\vectors` |
+| `python -I tools\bridge\sim.py all` | 4/4 pass: nominal P99 126 ms, stress20 135 ms, w1366 170 ms (99.965% within 300 ms), mono_mix 298 ms (99.927% within 600 ms); 0 undetected frames or messages (7 min) |
+| `python -I tools\bridge\crc_mc.py 2000000 1` | 1,883,513 caught by the CRC-32, 72,257 decoded as the true frame, 0 undetected |
+| `cargo test --offline`, `helper\bridge` | 62 passed, 2 ignored; `--release -- --ignored`: 2 passed (200,000 corrupted strips, 0 undetected; at 1080p strip decode 10.8 us, view scan 266.5 us, cards 239.0 us) |
+| `cargo test --offline`, `helper\engine` | 99 + 5 passed, 3 ignored; `real_server_cpu_smoke` (`--ignored`, CPU, 4 threads): passed, server ready in 2.6 s, first result 6.3 s; `selftest_on_this_machine`: passed |
+| `cargo test --offline`, `helper\app` | lib 138, clipprobe 4, graceful_exit 2, native_look 5, sentinel 2, tagscan_equiv 5: 156 passed, 5 ignored; `window_pipeline --ignored`: 2 passed; release timings: render 0.626 ms, candidates 0.096 ms, `sample_card` 347 us |
+| `cargo test --offline`, `helper\testkit` | 17 passed |
+| `scripts\helper.ps1 -Build` | `TranslateProbeHelper.exe` 1,287,680 bytes, no warning |
+| `python -I tests\e2e\check.py --selftest` | basic, cover: pass; conv: pass (the perfect diag passes every check, the shifted one fails bands and lane, the broken window fails window_fill) |
+
+**End to end, echo translator, WGC, `--no-overlay --no-clipboard`**
+
+| Scenario | TRANSLATE P99 ms | band failures / checks | hidden | masks | missing | done | window checks | CPU whole run % | CPU after 2 s % |
+|---|---|---|---|---|---|---|---|---|---|
+| basic | 166.4 | 0 / 3509 | pass | pass | pass (0) | 3/3 | - | 3.54 | 1.78 |
+| scroll | 116.5 | 0 / 3190 | pass | pass | pass (0) | 3/3 | - | 2.96 | 1.83 |
+| fade | 191.4 | 0 / 1321 | pass | pass | pass (0) | 2/2 | - | 2.59 | 1.66 |
+| cover | 66.8 | 0 / 3960 | pass | pass | pass (0) | 2/2 | - | 2.75 | 1.55 |
+| tabs | 69.1 | 0 / 1996 | pass | pass | pass (0) | 2/2 | - | 2.99 | 1.78 |
+| altz | 69.2 | 0 / 2782 | pass | pass | pass (0) | 2/2 | - | 2.68 | 1.36 |
+| dropped | 70.8 | 0 / 1365 | pass | pass | pass (1) | 2/2 | - | 2.87 | 1.50 |
+| late_start (display asleep) | 226.4 | 0 / 252 | pass | pass | pass (3) | 1/1 | - | 2.78 | 0.62 |
+| gamma22 (display asleep) | 261.6 | 0 / 424 | pass | pass | pass (0) | 3/3 | - | 2.24 | 0.53 |
+| conv (display asleep) | 258.5 | 0 / 341 | pass | pass | pass (0) | 4/4 | pass | 2.28 | 0.67 |
+
+- Every functional check passes in all 10 scenarios. The CPU rule (3% of one core over the whole
+  run) fails in basic only (3.54%); conv passes `cpu` and `cpu_vs_i2`, but at the sleeping
+  display's frame rate. conv: 106 window background samples, all within 6 levels of `BUBBLE_RGB`,
+  no unsampled card; the reply card final with the outcome "off"; the lane found where the truth
+  has it and painted; the half-out bubble's hidden row never got a band; no slot shown twice and no
+  `strip_delay`; no capture skipped its scan for a new VIEW in this run.
+- **Background:** `run.py --scenario conv --helper-arg=--assume-background` (every capture with
+  `fg: false`, the strip read in each): all 4 TRANSLATE decoded and done 4/4, no "Not received",
+  bands 0 / 336. Latency (P99 379.5 ms) and `partial_rows` (one band on the hidden row in the first
+  record after the scroll) failed at the sleeping display's 4 frames a second, where the
+  background scene keeps its cards between frames. Before the fix the strip was never read with
+  the game in the background.
+- **GDI:** deferred. WoW was not running, but with the display asleep the GDI capture ran 2 to 4
+  ticks a second: `basic` passed every check except latency (P99 332 ms). The previous build
+  failed the same latency check under WGC at that point (313 ms).
+- **Real model on the CPU:** `run.py --scenario basic --translator llama --helper-arg=--backend=cpu
+  --helper-arg=--runtime=<dev runtime> --fakewow-arg=--tail-ms --fakewow-arg=25000 --done-within-s 60`,
+  Qwen3-4B Q4_K_M, 4 threads, a watchdog killing any llama-server older than 60 s (it never had to
+  act): every check passed; the three cards reached "Already in English" 13.5, 13.4 and 15.5 s
+  after their TRANSLATE on a cold start (the translator loading from 4.4 s of the run, busy from 16.5 s);
+  CPU 1.76%. llama-server ended with the Helper; `tasklist` showed none afterwards.
+- **D9 live clipboard test: skipped.** Before touching anything, the clipboard's format names were
+  listed (names only): Bitmap, PNG, `CanUploadToCloudClipboard`, `CanIncludeInClipboardHistory`,
+  an image. As decision D9 says for anything other than plain text, `clipprobe live` was not run,
+  so the user's image was never at risk. The real clipboard path is checked in game (G18).
+- Log sentinel grep (the scenarios' chat words and sender names, "ZZSENTINELZZ") over 123 output
+  files of `tests\e2e\out`: 0 hits.

@@ -19,13 +19,17 @@ reads its memory: it only looks at the window's pixels.
 | `src\capture\{mod,wgc,gdi}.rs` | Windows.Graphics.Capture (primary) and GDI `BitBlt` (fallback) |
 | `src\tagscan.rs` | Tag search of one capture around `tags::scan` (candidate rows, unchanged tags) and the card cache |
 | `src\perf.rs` | Stage timers and process/thread CPU times for the `perf` diag record |
-| `src\scene.rs` | Pure state machine: messages and cards in, scene out |
+| `src\scene.rs` | Pure state machine: messages and cards in, scene out (replies, view kinds, the background rule) |
+| `src\clip.rs` | Clipboard of translated replies: `ReplyClip` (begin, finish, release), `ClipOs` with the real `WinClip` and the tests' `FakeClip`, `one_line_255` |
+| `src\reply.rs` | The UI thread's replies: one `ReplyBook` per reply request (clipboard state, the request's own text), memory only |
+| `src\lane.rs` | The reply card's hint lane: `find_lane` in a capture |
 | `src\backdrop.rs` | The chat background around each card's rows, sampled in the current capture (native look) |
 | `src\overlay\{mod,window,render,fit,fonts}.rs` | Layered windows, pixel composition, wrapping, fonts |
 | `src\toast.rs`, `src\tray.rs` | Bridge toast, notification-area icon |
 | `src\app.rs` | Process: UI thread, capture thread, engine wiring |
 | `src\bin\capprobe.rs` | Capture self-check on its own window |
-| `tests\sentinel.rs` | Log sentinel test |
+| `src\bin\clipprobe.rs` | The one live check of the real clipboard path (decision D9), run by hand, never by the tests |
+| `tests\sentinel.rs` | Log sentinel tests (chat request, and the reply flow with a fake clipboard) |
 | `tests\tagscan_equiv.rs` | The tag search and the card cache give exactly what `tags::scan` and `cards::build` give |
 | `tests\window_pipeline.rs` | Window-level smoke tests of the whole pipeline (ignored by default) |
 | `tests\native_look.rs` | Pixel test: a synthetic capture through tag scan, cards, background sampling and painting; the reserved rows disappear into the ground |
@@ -41,8 +45,8 @@ The translator runtime folder comes from `-RuntimeDir`, else `$LlamaRuntimeDir` 
 TranslateProbeHelper.exe [--runtime DIR] [--model FILE] [--backend auto|cpu|vulkan|cuda] [--capture auto|wgc|gdi]
   [--translator llama|echo] [--wow-class CLASS] [--diag] [--diag-json FILE] [--log-dir DIR] [--no-tray]
   [--exit-after SECS] [--selftest]
-test flags: [--no-overlay] [--assume-foreground] [--overlay-probe]   other: [--help] [--version]
-hidden test flag: [--instance-name NAME] (not in --help)
+test flags: [--no-overlay] [--assume-foreground] [--overlay-probe] [--no-clipboard]   other: [--help] [--version]
+hidden test flags: [--instance-name NAME] [--assume-background] (not in --help)
 ```
 
 - `--selftest` prints the engine's discovery, flags, VRAM, RAM and backend decision as JSON and
@@ -52,6 +56,9 @@ hidden test flag: [--instance-name NAME] (not in --help)
   `--diag-json`; no window is ever created. It implies `--assume-foreground` and skips the
   `WindowFromPoint` covering test (see Deviations).
 - `--assume-foreground`: the game window counts as foreground (the E2E window never takes focus).
+- `--no-clipboard`: the clipboard is never touched; a reply shows "Ready (not copied - off in the
+  Helper menu)", as with the tray switch off. `--no-overlay` implies it, so no automated run ever
+  touches the user's clipboard; `tests\e2e\run.py` gives it anyway.
 - `--overlay-probe`: no capture; one synthetic 2-row test card (376 x 52 px, bottom right of the
   primary monitor's work area, at most 5 s) checks that `WindowFromPoint` at the card centre never
   returns the overlay and that the foreground window does not change. Prints one JSON line, exit
@@ -59,6 +66,10 @@ hidden test flag: [--instance-name NAME] (not in --help)
 - `--instance-name NAME` (tests only, 1-32 ASCII letters, digits, '-' or '_'): the
   single-instance mutex becomes `Local\TranslateProbeHelper.NAME`, so a test Helper can run next
   to the one the user is running.
+- `--assume-background` (tests only): the capture thread treats the game window as not in front
+  whatever Windows says (background rate, background covering rule); it wins over
+  `--assume-foreground` and the one `--no-overlay` implies, so an E2E run can check that the strip
+  is read while the game is in the background (review fix, deviation 38).
 - Exit codes: 0 normal, 1 failed start or failed probe, 2 another instance is running
   (`Local\TranslateProbeHelper`), 64 bad arguments.
 - Stopping: the tray's Exit, `--exit-after`, or `taskkill /IM TranslateProbeHelper.exe` without
@@ -68,21 +79,27 @@ hidden test flag: [--instance-name NAME] (not in --help)
 
 ## Threads
 
-- **UI thread**: hidden window `TPHelperMain` (a plain top-level window, never shown), tray icon,
-  overlay windows (`TPHelperOverlay`, one per VIEW id) and the toast (`TPHelperToast`, created
-  hidden at start unless `--no-overlay`). `WM_CLOSE` on any of these windows exits like the tray's
+- **UI thread**: hidden window `TPHelperMain` (a plain top-level window, never shown, also the
+  clipboard owner of replies), tray icon, overlay windows (`TPHelperOverlay`, one per VIEW id) and
+  the toast (`TPHelperToast`, created hidden at start unless `--no-overlay`). With overlay windows
+  it sets two out-of-context WinEvent hooks (foreground change, minimize start/end) so that the
+  overlay's z-order follows the game window at once (decision D12, below). `WM_CLOSE` on any of these windows exits like the tray's
   Exit (see "Measured facts" for why every window needs it). It handles `WM_APP_SCENE`,
   `WM_APP_RESULT`, `WM_APP_STATE` and `WM_APP_EVENT`, renders only on change (once for a burst of
   scene and status messages), and runs a 10 Hz timer only while a status is animated (queued,
   loading, translating). Each view keeps its canvas; only the dirty rectangle is cleared, copied
   and handed to `UpdateLayeredWindowIndirect`; wrapped lines and rasterized text are cached.
 - **Capture thread** (MTA): finds the window (`FindWindowEx` on the class, every 2 s while absent),
-  grabs the strip (client rows 0..8, full width, only with the game in front) and the scan area
-  (union of the VIEW rectangles, or the discovery area at 2 Hz), decodes, reassembles, feeds the
-  engine, scans tags, builds cards, runs the covering test (at most 10 Hz per card) and publishes
-  the scene when it changed. The Helper speaks `STATUS.addonBuild` 2 (`scene::ADDON_BUILD`; 2:
-  TRANSLATE rows 1..6, since 2026-10-18): a strip frame from another build shows the
-  "addon is older" or "Helper is older" toast once per session.
+  grabs the strip (client rows 0..8, full width, in front and in the background) and the scan
+  regions (one per VIEW rectangle, two merged only when their union is at most 1.3 times their
+  total area, window views first; or the discovery area at 2 Hz), decodes, reassembles, feeds the
+  engine, scans tags (one tag search and one card cache per region; a tag read in two overlapping
+  views is kept once, in the first), builds cards, finds a reply card's lane, runs the covering
+  test (at most 10 Hz per card) and publishes the scene when it changed. The Helper speaks
+  `STATUS.addonBuild` 3 (`scene::ADDON_BUILD`; 3: TRANSLATE reply and copy bits, the conversation
+  window, 2026-10-19; 2: rows 1..6, 2026-10-18) and serves builds 2 and 3 without a toast
+  (`scene::ADDON_BUILD_MIN`): a strip frame from another build shows the "addon is older" or
+  "Helper is older" toast once per session.
 
   | State | Rate |
   |---|---|
@@ -91,7 +108,8 @@ hidden test flag: [--instance-name NAME] (not in --help)
   | In front, nothing pending (no strip seen for 2 s, no card visible) | 10 Hz |
   | In front, strip seen in the last 2 s | 20 Hz |
   | In front, card visible | `captureHzActive` (20-60, default 30) |
-  | Not in front | 5 Hz, tags only (no strip) |
+  | Not in front, strip not seen for 2 s | 5 Hz, strip and tags; the cards stay (decision D12) |
+  | Not in front, strip seen in the last 2 s | 20 Hz |
 
   The tag scan runs on every capture only while a request of this session is known, the last
   scan found tags, a card is shown or the strip is active; otherwise (and for discovery) at 2 Hz.
@@ -193,6 +211,93 @@ translation looks like ordinary chat text sitting on the chat background.
 - `--diag` draws 1 px outlines around tags (yellow) and text rectangles (cyan) and logs at debug
   level. Without `--diag` no outline is drawn (render tests check both).
 
+## Conversation window (Phase B, 2026-10-19)
+
+The addon's conversation window (design A.4 and A.6, `docs\BRIDGE.md` section 8c) shows its
+bubbles and its reply card in VIEW id 200 (`scene::ViewKind::Window`; ids 200..255 are addon
+windows, 1..199 chat frames).
+
+- **Bubbles:** opaque `BUBBLE_RGB` fill, rows touching at the row pitch. The VIEW rectangle is the
+  bubble column, so the native-look samples (`backdrop.rs`, unchanged) land in the fill and the
+  painted tag and plate merge into the bubble. In a window view a line starts at the tag's left
+  edge + 2 px and may use the tag's pixels as well as the visible plate pixels
+  (`overlay::window_card`), since the tag is painted over. "Not received" reads "Not received -
+  click the bubble", and a failure "Translation failed - Shift-click the bubble".
+- **Reply card** (TRANSLATE with the reply bit, slot 126, rows 2..6): row 0 is the Helper's status,
+  rows 1..K-1 the translation (`overlay::Content::Reply`). The status is in the player's language
+  (the latest chat request's target, else the Windows UI language: a reply's target is the other
+  player's language, so replies never set it):
+
+  | Colour | When | Text (en) |
+  |---|---|---|
+  | grey 0.6 (153) | waiting | "Waiting (N ahead)...", "Starting the translator...", "Translating..." (also while a partial result streams; partial text is shown, never copied) |
+  | green, `GREEN_FONT_COLOR` (25, 255, 25) | the clipboard holds it | "Ready - Ctrl+V to paste", "... (shortened to 255 bytes)", "Already in German - Ctrl+V to paste", "Nothing to translate - Ctrl+V to paste" |
+  | amber, `NORMAL_FONT_COLOR` (255, 209, 0) | not copied | "Ready (not copied)" (no consent), "Ready (not copied - off in the Helper menu)" (tray switch off or `--no-clipboard`), "Not copied - you copied something else. Click Translate again", "Not copied - clipboard busy. Click Translate again" |
+  | red, `RED_FONT_COLOR` (255, 25, 25) | failed | "Translation failed - click Translate again", "Not received - click Translate again" (an unknown slot 126), low memory, translator files not found |
+
+  Green is painted only after the clipboard write succeeded. The text rows show what went to the
+  clipboard (one line, cut at a word boundary to 255 wire bytes, `|` counted as 2); "Already in"
+  and "Nothing to translate" copy and show the player's own text.
+- **Clipboard** (`clip.rs`, `reply.rs`, decisions D2, D6, D9): only a reply request with the copy
+  bit (the player allowed it in the game's consent dialog) while the tray item "Copy translated
+  replies to the clipboard" is on (default on) and `--no-clipboard` is not given:
+  1. the request arrives (`Action::ReplyStart`, handled on the UI thread before any engine update
+     of the job): the clipboard is emptied at once, so a Ctrl+V pressed too early pastes nothing;
+  2. the final result: written as `CF_UNICODETEXT` plus `CanIncludeInClipboardHistory` = 0,
+     `CanUploadToCloudClipboard` = 0 and `ExcludeClipboardContentFromMonitorProcessing` (kept out
+     of the Win+V history and the cloud clipboard), with `TPHelperMain` as the owner, only when the
+     clipboard sequence number is still the one of that empty (or the one before it when the empty
+     failed); 3 tries 30 ms apart to open it;
+  3. CANCEL, a new reply on the slot, CLEAR, an addon session change and a graceful exit release
+     it: the clipboard is emptied only when it still holds the Helper's own write.
+  The Helper never reads the clipboard's content (sequence numbers only). Tray item "Sound when a
+  reply is copied" (default off): `MessageBeep(MB_OK)` after a write.
+- **Hint lane** (`lane.rs`): one fill row under the reply card's last row with the addon's "No
+  status above?" hint. `find_lane` looks for it at `row0.yTop + K * rowPx` (+-2 px), samples the
+  fill under the tag column and passes a column when its top and bottom 2 rows are that colour (a
+  tooltip breaks them); with at least 60% of the columns passing, the overlay paints the passing
+  columns flat with that colour, so the hint shows exactly when nothing is painted.
+- **Engine:** a reply is an urgent job (`Job.urgent`): it waits ahead of the chat requests
+  (`docs\ENGINE.md` section 5).
+- **Capture:** one region per VIEW rectangle with its own tag search and card cache; the window
+  view comes first, and a tag the chat frame's view under the window reads again (same slot, row,
+  x0 and top) is dropped (`app::dedup_hits`), so the window and a chat frame never show one card
+  twice. A capture whose strip brings a different VIEW skips its tag scan (its regions were
+  planned with the previous VIEW, so a window's new rows, shown together with the VIEW that
+  covers them, would be read against the chat view under them for one capture); the next
+  capture scans with the new VIEW, and the previous cards stay meanwhile.
+
+## Game window in the background (decision D12)
+
+Before: the overlay was topmost and a card under any other window was dropped, so after an
+Alt-Tab to a window over part of the chat the translations vanished and the raw tags and the
+dark plate showed. Now:
+
+- With the game window in front the overlay windows are topmost, as before, and a card under any
+  other window is dropped (a topmost overlay would draw over it).
+- With another window in front the overlay windows sit right above the game window in the
+  z-order (`SetWindowPos` after the first window above the game window that is not ours,
+  `SWP_NOACTIVATE`; `HWND_NOTOPMOST` when that window is topmost), which also takes the topmost
+  status away: every window above the game window hides the overlay pixel for pixel, so a card is
+  never drawn over another application, and the parts of the chat that stay visible keep their
+  translations. A card is dropped only when every point of its covering grid is another window
+  (`wow::rect_fully_covered`). The capture runs at 5 Hz, and at 20 Hz while the strip is active;
+  the strip is read in the background too (review fix, deviation 38): the conversation window
+  keeps sending TRANSLATE and CANCEL while the game is not in front (a followed whisper, a slot
+  given back), and a missed message left a bubble "Not received", or painted another request's
+  text on a reused slot.
+- Hidden: the game window minimized or gone; every card fully covered; the UI hidden (Alt-Z: no
+  tags, no cards).
+- The z-order follows the foreground at once: the UI thread reads it live on every render and on
+  every WinEvent (foreground change, minimize start and end; a minimized game window hides the
+  overlay at once); the capture thread's scene also carries the state (`Scene::foreground`, part
+  of the fingerprint), so a focus change republishes the scene. A window is shown and placed in
+  one `SetWindowPos(.., SWP_SHOWWINDOW)` call, so it never appears topmost first.
+- Tests: `scene::tests::background_keeps_cards_while_the_game_is_visible` (unfocused but visible
+  keeps the cards; fully covered hides; minimized hides; back in front is topmost again) and
+  `overlay::window::tests::z_order_right_above_the_game_window` (hidden windows of the test only:
+  nothing is shown and the focus never changes).
+
 ## `--diag-json` (JSON Lines, `t` = Unix epoch ms, never any text)
 
 Design D.6 records, with extra fields and events:
@@ -200,17 +305,21 @@ Design D.6 records, with extra fields and events:
 ```
 {"t":..,"ev":"frame","ok":true,"mode":"dense","margin":42,"session":1234,"seq":7,"chunks":2}
 {"t":..,"ev":"frame","ok":false,"why":"torn|rejected"}
-{"t":..,"ev":"msg","kind":"translate","req":5,"slot":3,"rows":2,"bytes":48,"pairs":1,"noCache":false,"plate":true}
+{"t":..,"ev":"msg","kind":"translate","req":5,"slot":3,"rows":2,"bytes":48,"pairs":1,"noCache":false,"plate":true,"reply":false,"copy":false}
 {"t":..,"ev":"msg","kind":"cancel","req":5,"slot":3} / {"kind":"clear"} / {"kind":"test","nonce":9}
 {"t":..,"ev":"msg","kind":"view","n":1,"views":[[id,x,y,w,h,fontPx,rowPx]]}
 {"t":..,"ev":"tags","view":1,"hits":[{"slot":3,"row":0,"x":20,"y":1200,"w":46,"h":14,"alpha":1.0,"block":6.0,"plate":true}]}
 {"t":..,"ev":"cards","hidden":null|"no_wow"|"minimized"|"stale","cards":[{"slot":3,"req":5,"view":1,
    "kind":"request|test|missing|pending","rows":[0,1],"bands":[[x,y,w,h],..],"tags":[[x,y,w,h],..],
    "gaps":[[x,y,w,h]],"maskPx":1234,"masks":[{"rect":[x,y,w,h],"runs":[[y,x0,x1],..]}|null,..],
-   "alpha":1.0,"plate":true,"textWidth":297,"state":"sent|queued|loading|translating|partial|done|same|nothing|failed|lowmem|notinstalled|test|missing|pending","covered":false}]}
-{"t":..,"ev":"overlay","view":1,"shown":true,"rect":[x,y,w,h],"window":false,"px":13240,"textPx":1812,"tagPx":1536,"fillPx":0}
+   "alpha":1.0,"plate":true,"textWidth":297,"state":"sent|queued|loading|translating|partial|done|same|nothing|failed|lowmem|notinstalled|test|missing|pending","covered":false,
+   "reply":false,"clip":null|"copied|copied_cut|changed|busy|not_allowed|off","bg":[[[r,g,b]|null,[r,g,b]|null],..],
+   "lane":null|{"rect":[x,y,w,h],"rgb":[r,g,b],"cols":528,"pass":528}}],"fg":true}
+{"t":..,"ev":"overlay","view":1,"shown":true,"rect":[x,y,w,h],"window":false,"px":13240,"textPx":1812,"tagPx":1536,"fillPx":0,"lanePx":0}
+{"t":..,"ev":"clip","req":904,"what":"begin|finish|release","outcome":"emptied|busy|not_allowed|copied|copied_cut|changed|off","cut":false,"excluded":true}
+{"t":..,"ev":"z","mode":"topmost|above","moved":true}
 {"t":..,"ev":"engine","req":5,"session":1234,"status":"done","ms":200}
-{"t":..,"ev":"capture","fresh":true,"method":"wgc","fg":true,"strip":true,"scan":true}
+{"t":..,"ev":"capture","fresh":true,"method":"wgc","fg":true,"strip":true,"scan":true,"viewSkip":false}
 {"t":..,"ev":"wow","found":true,"w":1920,"h":1080,"x":0,"y":0} / {"ev":"wow","found":false}
 {"t":..,"ev":"session","old":1,"new":2}   {"t":..,"ev":"state","state":"ready_cpu"}
 {"t":..,"ev":"tone","linear":false,"exp":[0.453,0.453,0.453]}
@@ -228,7 +337,8 @@ written when the scene changes or a card's status changes; `overlay` when a view
 moved or repainted with a different painted or text pixel count (the native look paints the plate
 before any text, so a status appearing leaves the painted count unchanged; text pixels are
 counted before the alpha, so a pulsing status does not repeat the record); `capture` once per
-capture tick.
+capture tick, after the strip decode: `scan` is true only when the tag scan really ran on that
+capture, and `viewSkip` true when it was skipped because the strip brought a different VIEW.
 
 `perf` is written once a second: process CPU (`cpuMs`), capture-thread and UI-thread CPU
 (`GetProcessTimes` / `GetThreadTimes`: the clock interrupt samples them, so per-second values are
@@ -242,9 +352,13 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
 
 ## Settings, logs, privacy
 
-- `%APPDATA%\TranslateProbe\settings.json` (design D.6 fields). Invalid values fall back to their
-  defaults (each fix is logged by field name); an unreadable file is left untouched and the
-  defaults are used.
+- `%APPDATA%\TranslateProbe\settings.json` (design D.6 fields, plus `replyClipboard` (true) and
+  `replySound` (false), the two tray items of the conversation window). Invalid values fall back
+  to their defaults (each fix is logged by field name); an unreadable file is left untouched and
+  the defaults are used. A tray switch is saved to the file at once (not when the file was
+  unreadable: the switch then lasts until the Helper exits).
+- Replies (their text, translation and clipboard state) live in memory only, like the
+  translations; the log and diag records of the clipboard flow are names and numbers.
 - `%LOCALAPPDATA%\TranslateProbe\logs\helper.log` (or `--log-dir`): lifecycle, capture method,
   per-minute capture/decode/tag counters, message kinds with reqId/slot/byte counts, engine events.
 - The logger only accepts `AppEvent` and `tp_engine::EngineEvent` (numbers, enums, fixed names).
@@ -256,11 +370,14 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
 | Command | What |
 |---|---|
 | `cargo test --offline` (helper\app) | unit tests: CLI (incl. the hidden `--instance-name`), settings round trip, validation and the old default colour, i18n completeness, fit (shrink to the largest size down to 80%, then "...", 6 rows), render (canvas and DIB: mask, alpha, full-opacity shadow, gap fill, tag cover, no-plate, background gradient over tag, plate, edges and gaps, no outline without `--diag`, dirty-rectangle reuse), background sampling (gradient, text-like pixels, borrowed sides, blended edges only at partial tag rows and at a consistent end column, no right sample for a card cut on the right, discovery spans, a borderless panel next to a plate, sample hysteresis), the 80% shrink with real fonts, the font cell cap (a French line with accents and descenders loses at most 1.5% of its ink at bands of 12-22 px), scene state machine (missing after 1.5 s, covered, stale 500 ms, minimized, session change, messages, weak signal, row counts, background in the fingerprint), diag records, candidate rows (SSE2 against scalar), GDI double buffers, WM_CLOSE on a hidden layered window quits the UI loop; `tests\sentinel.rs`; `tests\tagscan_equiv.rs` (the tag search finds exactly what `tags::scan` finds on 400 synthetic panels, and kept cards equal a new `cards::build`); `tests\native_look.rs` (plates sized as the addon sizes them; alpha 1.0 over a 70-level gradient, alpha 1.0 and 0.6 over a 35-level one: every pixel of the reserved rows within 6 levels of the ground, no plate colour; a tooltip over a plate is never painted, its outer rows included; a frame over the right end of every row of a 1- or 2-row card, parchment or tooltip coloured, leaves the visible plate within 6 levels of the chat; discovery with the game world on both sides of the chat: within 6 levels; a borderless panel in WoW's tooltip colour right under a plate is never painted; an ignored timing test); `tests\graceful_exit.rs` (a spawned Helper, own mutex, echo, no tray, no game window, hidden windows only: `taskkill` without /F through the hidden toast window and, with `--no-overlay`, through the main window; exit code 0 within 8 s and the log's Exit record) |
+| `cargo test --offline` (2026-10-19 additions) | clipboard flow on a fake clipboard (empty on receipt, copy when unchanged, Changed, Busy after 3 tries, a busy empty still copies when nothing changed, release only when own, no consent and switch off touch nothing, `one_line_255` with UTF-8, word boundaries and pipes); replies (start, finish only on a final result, Same and Nothing copy the player's text, failures write nothing, exit releases); the lane (clean, under a tooltip, absent); scene (reply start, replace and end, urgent, never the language; build 2 and 3 without a toast; lanes on reply cards only; the background rule of D12); overlay (row 0 colours and texts per outcome, window wording, status on row 0 and text below in pixels, window text origin, lane painted on passing columns only); z-order with hidden windows; region planning and duplicate tags; settings, CLI, tray ids; `tests\tagscan_equiv.rs` overlapping views (each tag once, the window's reading equal to a full scan); `tests\sentinel.rs` reply flow |
+| `cargo test --offline` (integration review fixes) | the capture period in and out of front (`app::tests::the_strip_is_read_at_its_own_rate_in_the_background_too`), the hidden `--assume-background` flag, every exclusion format tried after a failure (`clip::tests::every_exclusion_format_is_tried_even_after_a_failure`), `ReplyClip::own_write`, clipprobe's skip rules (`unreadable_text_is_never_touched`) and its parent-side comparison of a child's reading |
 | `cargo test --offline --release --lib -- --ignored --nocapture render_cost candidate_cost` | render and candidate-row timings |
 | `cargo test --offline --release --test native_look -- --ignored --nocapture` | background sampling cost of a 6-row card |
 | `cargo test --offline --test window_pipeline -- --ignored` | real exe against a 400 x 260 window at the bottom of the z-order: strip, VIEW, TRANSLATE, echo translation, card, in-memory rendering; and a late start (discovery, "missing") |
 | `target\release\capprobe.exe` | WGC and GDI read a known pattern exactly (popup and captioned windows), plus WGC on an off-screen window and on a window at the bottom of the z-order (informational) |
 | `TranslateProbeHelper.exe --overlay-probe --diag --exit-after 5 --no-tray` | click-through and focus check |
+| `clipprobe.exe live` (by hand, once, decision D9) | the real clipboard path: skipped when the clipboard holds anything but plain text, when its text is listed but cannot be read, or when something is copied between the save and the empty; else saves the text in memory (never printed, never on a command line), runs `ReplyClip` on `WinClip` with a synthetic sentence, has a child process read it back and check the history exclusion formats (the child prints a length and a hash on its stdout pipe; the parent compares), then puts the saved text back (kept out of the history) only over the probe's own last change, and has a child check it; prints verdicts only, never clipboard text |
 | `TranslateProbeHelper.exe --selftest` | discovery JSON |
 
 ## Measured facts
@@ -312,6 +429,38 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
     the first 2 s, captures with cards went from 9.0% to 1.35%, the strip active from 8.3% to
     1.4%, idle with the game from 4.9% to 0.4%; no game window 0.03% in both. The first 2 s of a
     run cost about 0.3 s of CPU (the D3D11 device), which is 1-2% of a 15-35 s E2E run.
+
+- **Conversation window E2E (2026-10-19, `tests\e2e` scenario `conv`, echo, WGC, fakewow off
+  screen, `--no-overlay --no-clipboard`; a WoW client and the user's own Helper were running):**
+  every functional check passes: latency P99 107 ms; bands 0 failures in 3009 checks (window rows
+  included); hidden, masks, missing, done 4/4; every background sample of a window card within 6
+  levels of `BUBBLE_RGB` (136 samples) and the tags painted; the reply card done with the outcome
+  "off"; the lane found where the truth has it with 528 of 528 columns passing and painted; the
+  half-out bubble's hidden row never got a band and its visible row did; no slot shown twice. The
+  only window-slot card in the chat view was one capture where the strip decoded the VIEW in the
+  same tick (before the VIEW skip above); with the skip that tick scans nothing.
+- **CPU, same conditions:** conv 4.8 to 5.9% of one core over the whole run, 2.75 to 2.93% after
+  the first 2 s (the merged window and chat region is 1.5 times the chat area and holds 4 cards of
+  9 rows; scan 10.0 and cards 6.9 ms per second against 5.0 and 4.1 for basic). The 9 earlier
+  scenarios: 2.6 to 4.9% whole, 1.5 to 2.1% after 2 s, functional checks all passing (cover failed 2
+  of 3959 band checks in one capture of a first run, the plates uncovered 33 ms before a capture
+  whose WGC frame was older; two reruns 0 of 3954). A/B on basic against the previous build
+  (1,225,216 bytes, 2026-10-18), interleaved, exact cycle counts after the first 2 s: 58.4 and
+  60.3 Mcycles/s (this build) against 59.1 and 50.5 (previous): no difference beyond the
+  run-to-run spread. The CPU rule (3%) and the conv check "within 10% of DESIGN.md I.2" fail on
+  this machine state for both builds (the previous build: 2.94 and 3.92% on basic).
+- **Integration run after the review fixes (2026-10-19, this build, no WoW client):** the 10 echo
+  scenarios pass every functional check under WGC; whole-run CPU 2.24 to 3.54% (only basic over
+  3%), 1.36 to 1.83% after the first 2 s in the 7 runs made before the display went to sleep.
+  From then on (the 60-minute idle timeout) WGC delivered about 4 fresh frames a second and GDI ran
+  2 to 4 ticks a second, for this build and for the previous one alike (A/B on basic), so the
+  later figures and the GDI runs are not comparable (`docs\DESIGN.md` K.6). With
+  `--assume-background` the conv scenario decoded all 4 TRANSLATE with the game treated as not in
+  front (done 4/4, no "Not received").
+- **`window_pipeline` (`--ignored`), 2026-10-19:** passed in 3 of 5 runs; each failure was the
+  test's own "focus never moves" check (the foreground window changed between two windows of other
+  applications during the 6 s run, while the PC was in use); the Helper runs there with
+  `--no-overlay` and owns no visible window.
 
 ## Deviations from the design
 
@@ -455,3 +604,63 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
     the rest of the fade the plate and the tags show at 30% contrast or less, for a plate
     (32, 40, 64) over (15, 15, 15) about (20, 23, 30), a faint slab where the reader saw only the
     translation before. Before the native look the plate was visible during the whole fade.
+35. **Conversation window (2026-10-19, design B.3 H2-H10).**
+    - `Action::ReplyStart` also carries the request's own text (the design lists `{ key, copy }`):
+      "Already in German - Ctrl+V to paste" copies the player's text, which the UI thread does not
+      otherwise have. It stays in `ChatText` and in memory.
+    - `addonBuild` 3, served with 2 (`ADDON_BUILD_MIN`), not 2 with 1..2: build 2 already shipped
+      rows 1..6 (`docs\BRIDGE.md` section 3, WP-P deviation 1).
+    - The reply statuses add "Already in {language} (not copied)", "Nothing to translate - Ctrl+V to
+      paste" and "Nothing to translate (not copied)" for the Same and Nothing results, which the
+      design table does not list.
+    - `SetWinEventHook`, `UnhookWinEvent` and `MessageBeep` are declared directly (user32) instead
+      of enabling the large `Win32_UI_Accessibility` and `Win32_System_Diagnostics_Debug` features
+      of the windows crate; the clipboard uses the design's `Win32_System_DataExchange` and
+      `Win32_System_Memory`.
+    - The `cards` diag record gains `reply`, `clip`, `bg` and `lane`, the `overlay` record `lanePx`,
+      and two records are new: `clip` and `z` (names and numbers only).
+    - A capture that decodes a different VIEW skips its tag scan (above, "Capture"). Fact: in the
+      first `conv` run the reply card's rows were read against the chat view for one capture.
+    - `src\bin\clipprobe.rs` (the D9 live check) is new; nothing runs it automatically.
+36. **Background rule (decision D12).** A card is dropped in the background only when it is fully
+    covered (any cover in front, as before), and the overlay leaves the topmost band while the game
+    window is not in front. Fact: with a topmost overlay and the any-cover rule, a window over part
+    of the chat after an Alt-Tab dropped those cards and left their tags and plates visible.
+37. **E2E rig: a window layer.** The `conv` scenario draws a synthetic conversation window
+    (`tests\e2e\scenario_lib.lua`, `E2E.Window`) as a fakewow layer of opaque rectangles with the
+    real tag colours (`Bridge.TagColors`), and sends its VIEW and TRANSLATE messages through the
+    addon's own `Bridge.Send`. The addon's window modules are not used (they were written in
+    parallel, and the rig checks the Helper against the protocol). `helper\testkit` (fakewow) gained
+    the `layer` scenario event and the `layers` truth record; it was not in the work package's file
+    list, but nothing else owns the rig.
+38. **The strip is read in the background too (integration review fix, 2026-10-19).** Before, the
+    strip was grabbed only with the game in front ("5 Hz, tags only"). Fact (review): with smart
+    following (D3) the addon sends TRANSLATE for a followed whisper and CANCEL for a slot it gives
+    back while the player is Alt-Tabbed, and a strip message stays on screen about 0.4-0.5 s, so
+    those messages were lost: the new bubble read "Not received", or, with a window slot reused
+    after its 2 s quarantine, showed the old request's translation. The strip (8 client rows) is
+    now part of every capture, and the background rate goes from 5 Hz to 20 Hz while the strip is
+    active (`app::capture_period_ms`). The hidden `--assume-background` flag lets the E2E rig run a
+    whole scenario as if the game were in the background.
+39. **The `capture` diag record is written after the decode (integration review fix).** It said
+    `scan: true` for a capture whose tag scan was skipped because the strip brought a new VIEW
+    (deviation 35), so check.py counted that capture and the `conv` E2E `bands` check failed
+    whenever the window's new rows were already visible in it (reproduced by the review: 3 of 3014).
+    `scan` now says whether the scan ran, and `viewSkip` tells the skip.
+40. **The reply card's lane has its own covering test (integration review fix).** The lane is
+    painted opaque under the card's last row, outside `overlay::card_bounds`, so in front a foreign
+    topmost window over the lane row alone was painted over with the bubble fill. The lane's
+    rectangle is now tested with the same rule as the cards (any cover in front, a full cover in the
+    background, cached 100 ms) and a covered lane is dropped; the card stays.
+41. **Every exclusion format is set even after a failure (integration review fix).** `Iterator::all`
+    stopped at the first format it could not set, so a failed `CanIncludeInClipboardHistory` also
+    left out `CanUploadToCloudClipboard` and `ExcludeClipboardContentFromMonitorProcessing`.
+    `clip::set_every_exclusion` tries all three and still reports the failure.
+42. **clipprobe hardening before the one live run (integration review fixes).** It skips (exit 3)
+    when the clipboard lists text it cannot read (a delayed rendering whose owner does not answer:
+    it used to empty it and "restore" an empty clipboard, and report a pass), and when something
+    is copied between its save and its empty (the sequence number read with the clipboard open is
+    checked again when `begin` opens it). It restores only over its own last change (its write, or
+    its empty when nothing was written), checked with the clipboard open. The saved text's length
+    and hash no longer go on the child's command line: the child prints its reading on its stdout
+    pipe and the parent compares.

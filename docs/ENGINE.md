@@ -28,6 +28,8 @@ let json = tp_engine::selftest::run(&cfg);   // --selftest, never loads the mode
   submit, without a model call.
 - Re-submitting a key that is still waiting or in flight is ignored (it keeps its place). After
   it finished, the same request is served from the cache; `no_cache` skips the cache read.
+- `Job.urgent` (2026-10-19, the conversation window's reply card): the player waits for that
+  translation to paste it, so it waits ahead of every job that is not urgent (section 5).
 - `Failed` kinds: `Timeout` (request deadline or 30 s in the queue), `ServerDied` (start failure,
   crash, or the Error state), `BadOutput`, `Http`, `Overloaded` (pushed out of a full queue).
 - `EngineState`: `NotInstalled`, `Unloaded`, `Loading`, `ReadyGpu`, `ReadyCpu`, `Busy`, `Error`.
@@ -136,6 +138,11 @@ free, the session switches to CPU (unload after the request in flight).
 - FIFO: one job in flight (from server start to result), 8 waiting. A ninth waiting job pushes the
   oldest waiting one out with `Failed(Overloaded)`. Waiting jobs older than 30 s get
   `Failed(Timeout)`.
+- Urgent jobs (`Job.urgent`, replies): `Queue::push` puts them after the waiting urgent jobs and
+  ahead of every waiting job that is not urgent; they never interrupt the job in flight. A full
+  queue drops its oldest job that is not urgent first. A waiting job that an urgent key merges
+  into (same cache key) becomes urgent and moves forward. Every key whose position changed gets a
+  new `Queued{ahead}`.
 - Same cache key as a waiting job or the job in flight: merged, every key gets the same updates.
 - Cancel and clear remove waiting keys; a key in flight gets nothing more, the request finishes
   and its result is still cached. A flight whose keys were all cancelled before any work started
@@ -251,7 +258,7 @@ From `helper\engine`:
 
 | Command | What |
 |---|---|
-| `cargo test --offline` | 96 unit tests in the library (2 ignored: the child process of the job-object test, and `selftest_on_this_machine`, which may run `llama-server --help`), 5 in `evalprompt`, 1 ignored integration test |
+| `cargo test --offline` | 99 unit tests in the library (2 ignored: the child process of the job-object test, and `selftest_on_this_machine`, which may run `llama-server --help`), 5 in `evalprompt`, 1 ignored integration test |
 | `cargo test --offline --test real_server -- --ignored --nocapture` (env `TPROBE_LLAMA_RUNTIME`) | the public Engine API against the real llama-server on CPU, 60 s watchdog |
 | `cargo run --offline --release --bin evalprompt -- --runtime %TPROBE_LLAMA_RUNTIME% --cpu --threads 4 --out ..\..\tests\eval\out\report.json` | E1 with the shipped tuning (`--tuning v0`, `v1+v3+v4`... for the others; `--samples ..\..\tests\eval\echo_samples.tsv` for the echo set) |
 
@@ -273,7 +280,9 @@ HTTP stub: echo translator, CPU happy path (command line, key file, warm-up, bod
 as text, a French echo answered Same), placeholder retry, bad output and HTTP errors, GPU start
 hang with CPU fallback, Vulkan marker, CPU start failure with the 60 s retry window, 3 crashes and
 the Error hold, request timeout with lazy restart, 2 GPU failures, idle unload and `keep_loaded`,
-WoW gone, VRAM guard and `set_backend`, queue overload, cancel, clear and merge, `NotInstalled`,
+WoW gone, VRAM guard and `set_backend`, queue overload, cancel, clear and merge, urgent jobs (ahead
+of the waiting ones, in order, never dropped first by an overload, moving a shared entry forward),
+`NotInstalled`,
 `LowMemory`, shortcuts, and shutdown under 2 s with a hanging request. `evalprompt` tests parse
 both corpora, check the expectation grammar, and check that every pair the corpora mark
 must-use or keep-allowed is classified the same way by `prompt::keep_allowed`.
@@ -444,6 +453,11 @@ lines, not stored):
     engine and integration steps start llama-server. `selftest::run_with` takes the discovery; the
     unit test passes an empty one, and the real-machine variant `selftest_on_this_machine` is
     `#[ignore]`.
+
+22. **Urgent jobs (2026-10-19, conversation window, design B.3 H9).** `Job` gained `urgent`, and
+    `worker.rs` passes it to the queue entry (`Entry::urgent`); that one line in `worker.rs` is
+    outside the files the work package listed (`lib.rs`, `queue.rs`), because the worker builds
+    the entries.
 
 ## 12. M0 skeleton notes (kept)
 
