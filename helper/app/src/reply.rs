@@ -180,10 +180,21 @@ mod tests {
         for st in [Status::Same, Status::Nothing] {
             let mut os = FakeClip::new();
             let mut r = Replies::new();
-            r.start(&mut os, key(2), true, true, text("\u{2}[Linen Cloth]\u{3} ok"));
+            r.start(&mut os, key(2), true, true, text("\u{2}\u{4}FFFFFF[Linen Cloth]\u{3} ok"));
             assert_eq!(r.on_status(&mut os, &key(2), &st), Some(ClipEvent::Finish(ClipOutcome::Copied { cut: false })));
-            assert_eq!(os.text.as_deref(), Some("[Linen Cloth] ok"), "link marks removed");
+            assert_eq!(os.text.as_deref(), Some("[Linen Cloth] ok"), "link marks and colour removed");
         }
+    }
+
+    #[test]
+    fn a_coloured_translation_is_copied_as_plain_text() {
+        // L3: the engine writes a coloured link back as a mark; the clipboard gets the name only
+        let mut os = FakeClip::new();
+        let mut r = Replies::new();
+        r.start(&mut os, key(3), true, true, text("wts \u{2}\u{4}0070DD[Linen Cloth]\u{3}"));
+        let ev = r.on_status(&mut os, &key(3), &Status::Done(text("Vends \u{2}\u{4}0070DD[Linen Cloth]\u{3}")));
+        assert_eq!(ev, Some(ClipEvent::Finish(ClipOutcome::Copied { cut: false })));
+        assert_eq!(os.text.as_deref(), Some("Vends [Linen Cloth]"));
     }
 
     #[test]

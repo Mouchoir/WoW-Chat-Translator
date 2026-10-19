@@ -87,7 +87,7 @@ hidden test flags: [--instance-name NAME] [--assume-background] (not in --help)
   `--assume-foreground` and the one `--no-overlay` implies, so an E2E run can check that the strip
   is read while the game is in the background (review fix, deviation 38).
 - `--help` starts with the app's name and the download page; `--version` prints
-  "Translate Companion 0.4.0".
+  "Translate Companion 0.5.0" (0.4.0 at the rename, 0.5.0 since the link colours and the verbatim tokens of 2026-10-19).
 - Exit codes: 0 normal, 1 failed start or failed probe, 2 another instance is running
   (`Local\TranslateProbeHelper`, also taken by an old `TranslateProbeHelper.exe`), 64 bad arguments.
 - Stopping: the tray's Exit, `--exit-after`, or `taskkill /IM WoWTranslateCompanion.exe` without
@@ -98,7 +98,7 @@ hidden test flags: [--instance-name NAME] [--assume-background] (not in --help)
 ## Threads
 
 - **UI thread**: hidden window `TPHelperMain` (a plain top-level window, never shown, also the
-  clipboard owner of replies), tray icon (tooltip "Translate Companion 0.4.0 - <translator state>";
+  clipboard owner of replies), tray icon (tooltip "Translate Companion 0.5.0 - <translator state>";
   menu: Unload translator now, Get updates (opens `RELEASES_URL` in the default browser with
   `ShellExecuteW`, on the user's own click only; logged as `TrayUpdates`), Open log folder, the two
   reply switches, Exit), overlay windows (`TPHelperOverlay`, one per VIEW id) and
@@ -117,11 +117,16 @@ hidden test flags: [--instance-name NAME] [--assume-background] (not in --help)
   engine, scans tags (one tag search and one card cache per region; a tag read in two overlapping
   views is kept once, in the first), builds cards, finds each card's hint lane (and the orphan
   lanes at the top of a chat), runs the covering test (at most 10 Hz per card) and publishes the
-  scene when it changed. The Helper speaks `STATUS.addonBuild` 4 (`scene::ADDON_BUILD`; 4: a hint
-  lane under every card, 2026-10-19; 3: TRANSLATE reply and copy bits, the conversation window,
-  2026-10-19; 2: rows 1..6, 2026-10-18) and serves builds 2 to 4 without a toast
-  (`scene::ADDON_BUILD_MIN`): a strip frame from another build shows the "addon is older" or
-  "app is older" toast once per session.
+  scene when it changed. The Helper speaks `STATUS.addonBuild` 5 (`scene::ADDON_BUILD`; 5: the
+  link colours, a COLOURS message right before the TRANSLATE, 2026-10-19, user request L3; 4: a
+  hint lane under every card, 2026-10-19; 3: TRANSLATE reply and copy bits, the conversation
+  window, 2026-10-19; 2: rows 1..6, 2026-10-18) and serves builds 2 to 5 without a toast
+  (`scene::ADDON_BUILD_MIN`): a strip frame from another build shows the "addon is older" or "app
+  is older" toast once per session. A Helper of build 4 drops COLOURS as an unknown message
+  (`reasm` counts a parse error), paints the link names in the translation's colour as before,
+  and shows "app is older" for an addon of build 5. The colours never reach it as text: the
+  TRANSLATE carries no 0x04 (`docs\BRIDGE.md` section 3b; a first design with the colour in the
+  text made a build-4 Helper paint "0070DD" before each name, integration review).
 
   | State | Rate |
   |---|---|
@@ -228,6 +233,21 @@ translation looks like ordinary chat text sitting on the chat background.
 - Colours: text `textColor` (default #A8D8FF, a soft light blue that reads as a translation; a
   settings file still holding the old default #9FD4FF gets the new one), statuses in a muted grey
   #A0A0A0, failures (failed, low memory, files not found) #E08080.
+- **Link colours** (2026-10-19, user request L3): the addon sends the colours of a TRANSLATE's
+  link names in a COLOURS message right before it; the scene keeps the last 8 by (session, reqId)
+  and writes them into the TRANSLATE's marks (`marks::with_colours`, `docs\BRIDGE.md` section 3b),
+  so the engine gets `0x02 0x04 RRGGBB name 0x03` spans. A translation (and a streamed partial,
+  and a reply card's text) holds each link name with a colour as that coloured mark
+  (`tp_bridge::marks`, `docs\BRIDGE.md` "Marked spans").
+  `fit` parses the marks first: wrapping, the shrink to 80% and the "..." cut measure the
+  visible text only, and each fitted line keeps its coloured byte runs (`fit::Run`, a name
+  wrapped over two lines is coloured on both; the dots are in the text colour). The overlay turns
+  each run into pixel columns (`ColorSpan`, from the advance of the text before it,
+  `Fonts::advance_px`, rounded to the nearest pixel) and draws those glyph pixels in the link's
+  colour; coverage, shadow (black), mask, card alpha and pixel counts are the same as for the
+  plain line. The line cache keys on the marked text, the coverage cache on the visible text. The
+  clipboard and the reply card's cut text use `clip::one_line_255`, which removes the marks and
+  colour codes first (`marks::plain`), so a pasted reply never holds a colour code.
 - Display affinity: `WDA_NONE` under WGC unless `hideFromRecordings`; `WDA_EXCLUDEFROMCAPTURE`
   under GDI.
 - `--diag` draws 1 px outlines around tags (yellow) and text rectangles (cyan) and logs at debug
@@ -497,6 +517,7 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
 | `cargo test --offline` (helper\app) | unit tests: CLI (incl. the hidden `--instance-name`), settings round trip, validation and the old default colour, i18n completeness, fit (shrink to the largest size down to 80%, then "...", 6 rows), render (canvas and DIB: mask, alpha, full-opacity shadow, gap fill, tag cover, no-plate, background gradient over tag, plate, edges and gaps, no outline without `--diag`, dirty-rectangle reuse), background sampling (gradient, text-like pixels, borrowed sides, blended edges only at partial tag rows and at a consistent end column, no right sample for a card cut on the right, discovery spans, a borderless panel next to a plate, sample hysteresis), the 80% shrink with real fonts, the font cell cap (a French line with accents and descenders loses at most 1.5% of its ink at bands of 12-22 px), scene state machine (missing after 1.5 s, covered, stale 500 ms, minimized, session change, messages, weak signal, row counts, background in the fingerprint), diag records, candidate rows (SSE2 against scalar), GDI double buffers, WM_CLOSE on a hidden layered window quits the UI loop; `tests\sentinel.rs`; `tests\tagscan_equiv.rs` (the tag search finds exactly what `tags::scan` finds on 400 synthetic panels, and kept cards equal a new `cards::build`); `tests\native_look.rs` (plates sized as the addon sizes them; alpha 1.0 over a 70-level gradient, alpha 1.0 and 0.6 over a 35-level one: every pixel of the reserved rows within 6 levels of the ground, no plate colour; a tooltip over a plate is never painted, its outer rows included; a frame over the right end of every row of a 1- or 2-row card, parchment or tooltip coloured, leaves the visible plate within 6 levels of the chat; discovery with the game world on both sides of the chat: within 6 levels; a borderless panel in WoW's tooltip colour right under a plate is never painted; an ignored timing test); `tests\graceful_exit.rs` (a spawned Helper, own mutex, echo, no tray, no game window, hidden windows only: `taskkill` without /F through the hidden toast window and, with `--no-overlay`, through the main window; exit code 0 within 8 s and the log's Exit record) |
 | `cargo test --offline` (2026-10-19 additions) | clipboard flow on a fake clipboard (empty on receipt, copy when unchanged, Changed, Busy after 3 tries, a busy empty still copies when nothing changed, release only when own, no consent and switch off touch nothing, `one_line_255` with UTF-8, word boundaries and pipes); replies (start, finish only on a final result, Same and Nothing copy the player's text, failures write nothing, exit releases); the lane (clean, under a tooltip, absent); scene (reply start, replace and end, urgent, never the language; build 2 and 3 without a toast; lanes on reply cards only, every card since the hint lanes below; the background rule of D12); overlay (row 0 colours and texts per outcome, window wording, status on row 0 and text below in pixels, window text origin, lane painted on passing columns only); z-order with hidden windows; region planning and duplicate tags; settings, CLI, tray ids; `tests\tagscan_equiv.rs` overlapping views (each tag once, the window's reading equal to a full scan); `tests\sentinel.rs` reply flow |
 | `cargo test --offline` (integration review fixes) | the capture period in and out of front (`app::tests::the_strip_is_read_at_its_own_rate_in_the_background_too`), the hidden `--assume-background` flag, every exclusion format tried after a failure (`clip::tests::every_exclusion_format_is_tried_even_after_a_failure`), `ReplyClip::own_write`, clipprobe's skip rules (`unreadable_text_is_never_touched`) and its parent-side comparison of a child's reading |
+| `cargo test --offline` (2026-10-19, link colours L3) | fit: the marks and colour codes are never measured, the runs follow wrapping (a name over two lines), UTF-8 and the "..." cut (dots in the text colour), the same lines and size as the plain text; render: a colour span changes the glyph colour only (alpha, black shadow, pixel counts unchanged); overlay: a coloured link name drawn in its colour between text-coloured words, the same coverage as the plain line; fonts: the advance of "Vends " lands within 1 px of the first ink of the next glyph; clipboard and replies: a colour code never reaches the clipboard (`one_line_255`, a coloured Done, Same and Nothing); scene: build 5 served, builds 2 to 4 without a toast, build 6 told to update the app; COLOURS (integration review): written into the next TRANSLATE of its reqId and session only, used once, the newest 8 kept, dropped on CLEAR and on a session change (`scene::tests::colours_go_into_the_next_translate_of_their_request`) |
 | `cargo test --offline --release --lib -- --ignored --nocapture render_cost candidate_cost` | render and candidate-row timings |
 | `cargo test --offline --release --test native_look -- --ignored --nocapture` | background sampling cost of a 6-row card |
 | `cargo test --offline` (2026-10-19, integration review) | `lane`: no window lane under a bubble whose last row is hidden or on a tooltip's body, the card's own fill, the hint's glyphs at the lane's edges; chat lanes over a +-6 to +-30 texture (+-40: 270 of 300 columns at least), a feature 20 to 45 levels off the gradient, a tooltip edge in the middle rows (3 positions), the addon's print under the test rows, a last row cut by the top; orphan lanes followed whole and cut by the top, over a texture, and never on the next message, a blank line, the glossary row or where the card could be seen; `scene::lanes_for` per build and for the test slot; addon build 4; toast widths; `hint_lane::a_chat_lane_over_a_busy_world_disappears` (pixel level) |

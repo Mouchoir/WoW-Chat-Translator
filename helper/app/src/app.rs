@@ -365,6 +365,10 @@ pub fn msg_json(m: &Message) -> (Value, AppEvent) {
                    "views": v.iter().map(|x| [x.id as i32, x.x as i32, x.y as i32, x.w as i32, x.h as i32, x.font_px as i32, x.row_px as i32]).collect::<Vec<_>>()}),
             AppEvent::Message { kind: "view", req: 0, slot: 0, rows: v.len() as u8, bytes: 0, pairs: 0 },
         ),
+        Message::Colours { req_id, spans } => (
+            json!({"ev": "msg", "kind": "colours", "req": req_id, "n": spans.len()}),
+            AppEvent::Message { kind: "colours", req: *req_id, slot: 0, rows: spans.len().min(255) as u8, bytes: 0, pairs: 0 },
+        ),
     }
 }
 

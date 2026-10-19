@@ -2,7 +2,8 @@
 //! cards to draw out. The capture thread feeds it; the UI thread draws the published [`Scene`].
 //!
 //! - TRANSLATE/CANCEL/CLEAR/TEST/VIEW update the slot map and produce [`Action`]s for the engine
-//!   and the UI.
+//!   and the UI. COLOURS (the link colours of the next TRANSLATE with the same reqId) is kept
+//!   until that TRANSLATE, whose text gets the colours in its marks (`marks::with_colours`).
 //! - A card whose slot is unknown in this session shows "Not received" once its plate has been
 //!   seen for 1.5 s.
 //! - With the game in front and no new frame for 500 ms, every card is hidden; nothing is shown
@@ -25,6 +26,7 @@ use std::collections::{HashMap, VecDeque};
 
 use tp_bridge::cards::{Card, TAG_ROWS};
 use tp_bridge::image::Rect;
+use tp_bridge::marks;
 use tp_bridge::msg::{ChatText, Message, View};
 use tp_bridge::strip::Mode;
 use tp_bridge::tags::{TagHit, TEST_SLOT};
@@ -39,10 +41,15 @@ pub const STALE_AFTER_MS: u64 = 500;
 pub const MIN_ALPHA: f32 = 0.3;
 /// The overlay never covers client rows 0..15 (the strip lives there).
 pub const OVERLAY_TOP: i32 = 16;
-/// `STATUS.addonBuild` this helper speaks (4: a hint lane under every card, 2026-10-19, user
+/// `STATUS.addonBuild` this helper speaks (5: the link colours, a COLOURS message right before
+/// the TRANSLATE, 2026-10-19, user request L3; 4: a hint lane under every card, 2026-10-19, user
 /// request U1; 3: TRANSLATE reply and copy bits, the conversation window, 2026-10-19; 2: rows
-/// 1..6, 2026-10-18).
-pub const ADDON_BUILD: u16 = 4;
+/// 1..6, 2026-10-18). A Helper of build 4 drops COLOURS as an unknown message and paints the link
+/// names in the translation's colour; it shows its "older than the addon" toast for build 5.
+pub const ADDON_BUILD: u16 = 5;
+/// COLOURS kept for TRANSLATEs still to come. The addon sends each right before its TRANSLATE,
+/// so one is enough; a few cover messages queued in a burst.
+pub const MAX_PENDING_COLOURS: usize = 8;
 /// The first addon build that draws a hint lane under every card (bubbles and inline rows). An
 /// older addon draws one under the reply card only: under its other cards the row after the last
 /// tag is the next chat line or bubble fill, so no lane is searched there.
@@ -426,7 +433,13 @@ pub struct SceneMachine {
     gaps: VecDeque<f32>,
     weak_since: Option<u64>,
     weak_warned: bool,
+    /// COLOURS received for TRANSLATEs still to come, the newest last, at most
+    /// `MAX_PENDING_COLOURS` (numbers only).
+    colours: VecDeque<PendingColours>,
 }
+
+/// A COLOURS waiting for its TRANSLATE: (session, reqId, (span index, RGB) list).
+type PendingColours = (u16, u16, Vec<(u8, [u8; 3])>);
 
 impl Default for SceneMachine {
     fn default() -> Self {
@@ -451,6 +464,7 @@ impl SceneMachine {
             gaps: VecDeque::new(),
             weak_since: None,
             weak_warned: false,
+            colours: VecDeque::new(),
         }
     }
 
@@ -551,17 +565,29 @@ impl SceneMachine {
         self.slots.clear();
         self.views.clear();
         self.unknown_seen.clear();
+        self.colours.clear();
         self.last_target = None;
         out.push(Action::ClearSession(old));
         out
+    }
+
+    /// The COLOURS sent for (session, reqId), taken out of the pending list.
+    fn take_colours(&mut self, session: u16, req_id: u16) -> Option<Vec<(u8, [u8; 3])>> {
+        let at = self.colours.iter().rposition(|(s, r, _)| *s == session && *r == req_id)?;
+        self.colours.remove(at).map(|(_, _, spans)| spans)
     }
 
     pub fn on_message(&mut self, session: u16, m: Message) -> Vec<Action> {
         self.session = Some(session);
         let mut out = Vec::new();
         match m {
-            Message::Translate(t) => {
+            Message::Translate(mut t) => {
                 let key = JobKey { session, req_id: t.req_id };
+                // the link colours the addon sent right before (COLOURS): written into the
+                // marks, the form the engine and the overlay read (docs\BRIDGE.md section 3b)
+                if let Some(spans) = self.take_colours(session, t.req_id) {
+                    t.text = ChatText::new(marks::with_colours(t.text.as_str(), &spans));
+                }
                 let mut repeat = false;
                 if let Some(old) = self.slots.get(&t.slot) {
                     if old.key != key {
@@ -599,7 +625,15 @@ impl SceneMachine {
             Message::Clear => {
                 self.end_replies(&mut out);
                 self.slots.clear();
+                self.colours.clear();
                 out.push(Action::ClearSession(session));
+            }
+            Message::Colours { req_id, spans } => {
+                self.colours.retain(|(s, r, _)| !(*s == session && *r == req_id));
+                self.colours.push_back((session, req_id, spans));
+                while self.colours.len() > MAX_PENDING_COLOURS {
+                    self.colours.pop_front();
+                }
             }
             Message::Test { .. } => {
                 out.push(Action::Toast(ToastKind::BridgeOk { mode: self.last_mode, margin: self.last_margin }));
@@ -893,6 +927,48 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// The text of the only Submit in `acts`.
+    fn submitted(acts: &[Action]) -> String {
+        let texts: Vec<String> = acts.iter().filter_map(|a| if let Action::Submit(j) = a { Some(j.text.as_str().to_string()) } else { None }).collect();
+        assert_eq!(texts.len(), 1);
+        texts[0].clone()
+    }
+
+    fn marked(req_id: u16, text: &str) -> Message {
+        let Message::Translate(mut t) = translate(req_id, 5, "fr") else { unreachable!() };
+        t.text = ChatText::new(text.into());
+        Message::Translate(t)
+    }
+
+    #[test]
+    fn colours_go_into_the_next_translate_of_their_request() {
+        // docs\BRIDGE.md 3b: COLOURS right before its TRANSLATE; the job gets the coloured marks
+        let wire = "wts \u{2}[Lattice Leggings]\u{3} \u{2}{skull}\u{3}";
+        let mut m = SceneMachine::new();
+        assert!(m.on_message(42, Message::Colours { req_id: 7, spans: vec![(0, [0, 0x70, 0xDD])] }).is_empty());
+        let acts = m.on_message(42, marked(7, wire));
+        assert_eq!(submitted(&acts), "wts \u{2}\u{4}0070DD[Lattice Leggings]\u{3} \u{2}{skull}\u{3}");
+        // used once: the same request again (Shift-click without COLOURS) gets the wire text
+        assert_eq!(submitted(&m.on_message(42, marked(7, wire))), wire);
+        // another request, another session, or after CLEAR: not applied
+        m.on_message(42, Message::Colours { req_id: 8, spans: vec![(0, [1, 2, 3])] });
+        assert_eq!(submitted(&m.on_message(42, marked(9, wire))), wire);
+        assert_eq!(submitted(&m.on_message(43, marked(8, wire))), wire);
+        m.on_message(42, Message::Colours { req_id: 10, spans: vec![(0, [1, 2, 3])] });
+        m.on_message(42, Message::Clear);
+        assert_eq!(submitted(&m.on_message(42, marked(10, wire))), wire);
+        // a burst: each TRANSLATE finds its own; only the newest MAX_PENDING_COLOURS are kept
+        for r in 0..(MAX_PENDING_COLOURS as u16 + 2) {
+            m.on_message(42, Message::Colours { req_id: 100 + r, spans: vec![(0, [r as u8, 0, 0])] });
+        }
+        assert_eq!(submitted(&m.on_message(42, marked(100, wire))), wire, "the oldest was dropped");
+        assert_eq!(submitted(&m.on_message(42, marked(105, wire))), "wts \u{2}\u{4}050000[Lattice Leggings]\u{3} \u{2}{skull}\u{3}");
+        // a session change forgets them
+        m.on_message(42, Message::Colours { req_id: 11, spans: vec![(0, [1, 2, 3])] });
+        m.on_session_change(42, 44);
+        assert_eq!(submitted(&m.on_message(42, marked(11, wire))), wire);
+    }
+
     #[test]
     fn reply_start_replace_and_end() {
         let mut m = SceneMachine::new();
@@ -973,9 +1049,11 @@ pub(crate) mod tests {
             assert!(m.lanes_for(slot, kind), "slot {slot} {kind:?}");
         }
         assert!(!m.lanes_for(TEST_SLOT, ViewKind::Chat), "the test rows have no lane: the addon's print follows them");
-        // addon build 4 (this one): the same
-        m.on_frame(&f(4), 0);
-        assert!(m.lanes_for(5, ViewKind::Chat) && m.lanes_for(9, ViewKind::Window) && !m.lanes_for(TEST_SLOT, ViewKind::Window));
+        // addon builds 4 and 5 (this one): the same
+        for build in [4, 5] {
+            m.on_frame(&f(build), 0);
+            assert!(m.lanes_for(5, ViewKind::Chat) && m.lanes_for(9, ViewKind::Window) && !m.lanes_for(TEST_SLOT, ViewKind::Window));
+        }
         // an addon of build 3 draws the reply card's lane only
         m.on_frame(&f(3), 0);
         assert!(m.lanes_for(REPLY_SLOT, ViewKind::Window));
@@ -1119,13 +1197,14 @@ pub(crate) mod tests {
     fn addon_build_mismatch_toasts_once_per_session() {
         let mut m = SceneMachine::new();
         let f = |session, build| FrameInfo { session, mode: Mode::Dense, addon_build: build, min_gap: 40.0, white: [255.0; 3], black: [0.0; 3] };
-        assert_eq!(ADDON_BUILD, 4);
+        assert_eq!(ADDON_BUILD, 5);
         assert!(m.on_frame(&f(5, ADDON_BUILD), 0).is_empty());
-        // build 2 (rows 1..6, no reply bit) and build 3 (no lanes but the reply's) are served
-        // without a toast
+        // build 2 (rows 1..6, no reply bit), build 3 (no lanes but the reply's) and build 4 (no
+        // link colours) are served without a toast
         assert!(m.on_frame(&f(5, 2), 0).is_empty());
         assert!(m.on_frame(&f(5, 3), 0).is_empty());
-        assert!(build_served(2) && build_served(3) && build_served(4) && !build_served(1) && !build_served(5));
+        assert!(m.on_frame(&f(5, 4), 0).is_empty());
+        assert!(build_served(2) && build_served(3) && build_served(4) && build_served(5) && !build_served(1) && !build_served(6));
         assert!(matches!(m.on_frame(&f(5, ADDON_BUILD + 1), 0).as_slice(), [Action::Toast(ToastKind::HelperOld)]));
         assert!(m.on_frame(&f(5, ADDON_BUILD + 1), 0).is_empty());
         // the build before rows 1..6 (b8a3e23) is told to update

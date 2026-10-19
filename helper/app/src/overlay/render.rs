@@ -57,6 +57,15 @@ impl Coverage {
     }
 }
 
+/// Columns `x0..x1` of a text line (px from the line's left edge, the coverage's x origin) are
+/// drawn in `rgb` instead of the line's colour: a link name in its own colour (L3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColorSpan {
+    pub x0: i32,
+    pub x1: i32,
+    pub rgb: [u8; 3],
+}
+
 /// One text line to draw into a band.
 pub struct TextDraw<'a> {
     /// Index into `card.bands`.
@@ -65,6 +74,14 @@ pub struct TextDraw<'a> {
     pub rgb: [u8; 3],
     /// Extra opacity (the status pulse); 1.0 normally.
     pub alpha_mul: f32,
+    /// Parts of the line in another colour (link names); usually empty.
+    pub spans: &'a [ColorSpan],
+}
+
+/// The colour of column `x` of a line: the span's that holds it, else the line's.
+#[inline]
+fn color_at(spans: &[ColorSpan], x: i32, base: [u8; 3]) -> [u8; 3] {
+    spans.iter().find(|s| x >= s.x0 && x < s.x1).map_or(base, |s| s.rgb)
 }
 
 /// Pixel counts painted by one card (for `--diag-json`).
@@ -459,7 +476,8 @@ pub fn paint_card(c: &mut Canvas, card: &Card, bg: &CardBg, texts: &[TextDraw], 
                 let inv = 255 - sa;
                 let i = crow + (x - c.rect.x) as usize * 4;
                 let p = &mut c.px[i..i + 4];
-                for (ch, src) in [(0usize, t.rgb[2]), (1, t.rgb[1]), (2, t.rgb[0])] {
+                let rgb = if t.spans.is_empty() { t.rgb } else { color_at(t.spans, x - ox, t.rgb) };
+                for (ch, src) in [(0usize, rgb[2]), (1, rgb[1]), (2, rgb[0])] {
                     let s = (u32::from(src) * tc * a8 + 32512) / 65025;
                     p[ch] = (s + (u32::from(p[ch]) * inv + 127) / 255).min(255) as u8;
                 }
@@ -577,7 +595,7 @@ mod tests {
         let k = card(vec![band(0, 5, Some(Mask { rect: rect(57, 5, 50, 10), bits }))], 1.0, true);
         let cov = solid(40, 10);
         let mut c = Canvas::new(rect(0, 0, 200, 40));
-        let st = paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0 }], false);
+        let st = paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0, spans: &[] }], false);
         assert_eq!(st.text_px, 20 * 10, "text only on x 60..79");
         assert_eq!(c.pixel(70, 9).unwrap().1, 255);
         assert_eq!(c.pixel(85, 9).unwrap().1, 0, "covered part untouched");
@@ -589,7 +607,7 @@ mod tests {
         let k = card(vec![band(0, 5, Some(full_mask(5)))], 0.5, true);
         let cov = Coverage { w: 40, h: 10, a: { let mut a = vec![0; 400]; a[5 * 40 + 5] = 255; a } };
         let mut c = Canvas::new(rect(0, 0, 200, 40));
-        paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [200, 100, 50], alpha_mul: 1.0 }], false);
+        paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [200, 100, 50], alpha_mul: 1.0, spans: &[] }], false);
         // Glyph at text-rect (5,5) = client (65,10); band text_rect.h == cov.h so no vertical offset.
         let (rgb, a) = c.pixel(65, 10).unwrap();
         assert_eq!(a, 128);
@@ -601,14 +619,14 @@ mod tests {
         let k = card(vec![band(0, 5, Some(full_mask(5)))], 1.0, true);
         let cov = Coverage { w: 40, h: 10, a: { let mut a = vec![0; 400]; a[2 * 40 + 3] = 255; a } };
         let mut c = Canvas::new(rect(0, 0, 200, 40));
-        paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0 }], false);
+        paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0, spans: &[] }], false);
         assert_eq!(c.pixel(63, 7), Some(([255, 255, 255], 255)), "glyph");
         assert_eq!(c.pixel(64, 8), Some(([0, 0, 0], 255)), "opaque black shadow, like WoW chat");
         assert_eq!(c.pixel(62, 6).unwrap().1, 0);
         // half-covered glyph pixel over a full shadow: still opaque, half the colour
         let cov2 = Coverage { w: 40, h: 10, a: { let mut a = vec![0; 400]; a[2 * 40 + 3] = 255; a[3 * 40 + 4] = 128; a } };
         let mut c2 = Canvas::new(rect(0, 0, 200, 40));
-        paint_card(&mut c2, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov2, rgb: [255, 255, 255], alpha_mul: 1.0 }], false);
+        paint_card(&mut c2, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov2, rgb: [255, 255, 255], alpha_mul: 1.0, spans: &[] }], false);
         assert_eq!(c2.pixel(64, 8), Some(([128, 128, 128], 255)));
     }
 
@@ -663,11 +681,34 @@ mod tests {
     }
 
     #[test]
+    fn colour_spans_change_the_glyph_colour_only() {
+        // L3: columns 10..20 of the line are a link name; the shadow stays black, the alpha and
+        // the mask are unchanged
+        let k = card(vec![band(0, 5, Some(full_mask(5)))], 0.5, true);
+        let cov = Coverage { w: 40, h: 10, a: { let mut a = vec![0; 400]; for x in [5, 12, 25] { a[2 * 40 + x] = 255; } a } };
+        let spans = [ColorSpan { x0: 10, x1: 20, rgb: [0, 112, 221] }];
+        let mut c = Canvas::new(rect(0, 0, 200, 40));
+        let st = paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0, spans: &spans }], false);
+        // the text rect starts at x 60, row 5 + 2
+        assert_eq!(c.pixel(65, 7), Some(([128, 128, 128], 128)), "before the span: the line colour");
+        assert_eq!(c.pixel(72, 7), Some(([0, 56, 111], 128)), "in the span: the link colour at the same alpha");
+        assert_eq!(c.pixel(85, 7), Some(([128, 128, 128], 128)), "after the span");
+        assert_eq!(c.pixel(73, 8), Some(([0, 0, 0], 128)), "the shadow stays black");
+        // the same pixel count as without spans
+        let mut c2 = Canvas::new(rect(0, 0, 200, 40));
+        let st2 = paint_card(&mut c2, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0, spans: &[] }], false);
+        assert_eq!(st, st2);
+        assert_eq!(color_at(&spans, 9, [1, 2, 3]), [1, 2, 3]);
+        assert_eq!(color_at(&spans, 19, [1, 2, 3]), [0, 112, 221]);
+        assert_eq!(color_at(&spans, 20, [1, 2, 3]), [1, 2, 3]);
+    }
+
+    #[test]
     fn text_is_vertically_centred() {
         let k = card(vec![band(0, 5, Some(full_mask(5)))], 1.0, true);
         let cov = solid(4, 4); // 4 px tall in a 10 px band: rows 8..11
         let mut c = Canvas::new(rect(0, 0, 200, 40));
-        paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0 }], false);
+        paint_card(&mut c, &k, &CardBg::default(), &[TextDraw { band: 0, cov: &cov, rgb: [255, 255, 255], alpha_mul: 1.0, spans: &[] }], false);
         assert_eq!(c.pixel(61, 7).unwrap().1, 0);
         assert_eq!(c.pixel(61, 8).unwrap().1, 255);
         assert_eq!(c.pixel(61, 11).unwrap().1, 255);

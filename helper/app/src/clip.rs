@@ -266,12 +266,13 @@ fn wire_len(c: char) -> usize {
     }
 }
 
-/// One chat line of at most 255 wire bytes: line breaks and tabs become spaces, other control
-/// characters (the 0x02/0x03 link marks among them) are removed, runs of spaces collapse and the
-/// ends are trimmed; a longer text is cut at the last word boundary that fits (or at a character
-/// boundary when one word is longer than that). `|` counts 2 bytes (the addon doubles it). The
-/// bool is true when the text was cut.
+/// One chat line of at most 255 wire bytes: the link marks and their colour codes are removed
+/// (`tp_bridge::marks::plain`), line breaks and tabs become spaces, other control characters are
+/// removed, runs of spaces collapse and the ends are trimmed; a longer text is cut at the last
+/// word boundary that fits (or at a character boundary when one word is longer than that). `|`
+/// counts 2 bytes (the addon doubles it). The bool is true when the text was cut.
 pub fn one_line_255(text: &str) -> (String, bool) {
+    let text = tp_bridge::marks::plain(text);
     let mut s = String::with_capacity(text.len().min(1024));
     let mut space = false;
     for c in text.chars() {
@@ -672,6 +673,8 @@ mod tests {
     fn one_line_255_rules() {
         assert_eq!(one_line_255("  Salut,\r\nça va ?\tOui  "), ("Salut, ça va ? Oui".to_string(), false));
         assert_eq!(one_line_255("\u{2}[Linen Cloth]\u{3} x20"), ("[Linen Cloth] x20".to_string(), false));
+        // a coloured link (addon build 5, L3): the colour code never reaches the clipboard
+        assert_eq!(one_line_255("Vends \u{2}\u{4}0070DD[Linen Cloth]\u{3} x20"), ("Vends [Linen Cloth] x20".to_string(), false));
         assert_eq!(one_line_255("\n\n"), (String::new(), false));
         // exactly 255 bytes fits
         let a = "a".repeat(255);

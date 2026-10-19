@@ -91,7 +91,7 @@ fn run(alpha: f32, span: f32, cover: Option<[f64; 4]>, text: bool) -> Out {
     assert!(bg.bands.iter().all(|b| b.left.is_some()), "{bg:?}");
     let mut canvas = Canvas::new(area);
     let cov = Coverage { w: 200, h: card.bands[0].text_rect.h, a: vec![255; (200 * card.bands[0].text_rect.h) as usize] };
-    let texts: Vec<TextDraw> = if text { vec![TextDraw { band: 1, cov: &cov, rgb: [168, 216, 255], alpha_mul: 1.0 }] } else { Vec::new() };
+    let texts: Vec<TextDraw> = if text { vec![TextDraw { band: 1, cov: &cov, rgb: [168, 216, 255], alpha_mul: 1.0, spans: &[] }] } else { Vec::new() };
     let st = paint_card(&mut canvas, card, &bg, &texts, false);
     let mut out = Vec::with_capacity((W * H) as usize);
     for y in 0..H {

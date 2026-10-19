@@ -151,7 +151,7 @@ fn run_scenario(picture: Vec<u8>) -> Vec<serde_json::Value> {
     // Its own single-instance mutex: a Helper the user is running keeps the default one.
     let instance = format!("pipeline-test-{}", std::process::id());
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_WoWTranslateCompanion"))
-        .args(["--wow-class", "TPMiniWow", "--no-overlay", "--no-tray", "--translator", "echo", "--capture", "wgc", "--exit-after", "6"])
+        .args(["--wow-class", "TPMiniWow", "--no-overlay", "--no-clipboard", "--no-tray", "--translator", "echo", "--capture", "wgc", "--exit-after", "6"])
         .args(["--instance-name", &instance])
         .arg("--diag-json")
         .arg(&diag)

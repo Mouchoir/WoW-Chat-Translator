@@ -178,6 +178,15 @@ impl Fonts {
         (self.measure_raw(face, size, text) + SS - 1) / SS
     }
 
+    /// Advance in px of `text` at `size` supersampled pixels, rounded to the nearest pixel: where
+    /// the next character starts in a line drawn by [`Fonts::coverage_ss`] (link colour runs).
+    pub fn advance_px(&mut self, face: Face, size: i32, text: &str) -> i32 {
+        if text.is_empty() {
+            return 0;
+        }
+        (self.measure_raw(face, size, text) + SS / 2) / SS
+    }
+
     fn measure_raw(&mut self, face: Face, px: i32, text: &str) -> i32 {
         let f = self.font(face, px);
         let wide: Vec<u16> = text.encode_utf16().collect();
@@ -315,5 +324,21 @@ mod tests {
         let cjk = f.coverage(Face::ZhHans, 16, "你好", 40, 20);
         assert!(cjk.a.iter().filter(|a| **a > 128).count() > 10);
         assert!(f.coverage(Face::Latin, 16, "", 10, 10).a.iter().all(|a| *a == 0));
+    }
+
+    #[test]
+    fn advance_marks_where_the_next_glyph_starts() {
+        // L3: a run starting after "Vends " starts at the first ink column of "[" in the
+        // coverage of the whole line (within a pixel)
+        let mut f = Fonts::new();
+        let size = 16 * SS;
+        assert_eq!(f.advance_px(Face::Latin, size, ""), 0);
+        let prefix = "Vends ";
+        let x = f.advance_px(Face::Latin, size, prefix);
+        assert!((f.measure_ss(Face::Latin, size, prefix) - x).abs() <= 1);
+        let line = f.coverage_ss(Face::Latin, size, "Vends [Linen]", 200, 24);
+        let alone = f.coverage_ss(Face::Latin, size, "Vends ", 200, 24);
+        let first_new = (0..200).find(|&cx| (0..24).any(|y| line.at(cx, y) > 0 && alone.at(cx, y) == 0)).unwrap();
+        assert!((first_new - x).abs() <= 1, "first ink of [ at {first_new}, advance {x}");
     }
 }

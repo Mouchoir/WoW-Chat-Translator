@@ -48,7 +48,7 @@ use crate::reply::ReplyBook;
 use crate::scene::{CardKind, Scene, SceneCard, SceneView, ViewKind, REPLY_SLOT};
 use fit::Fitted;
 use fonts::{face_for_target, Face, Fonts, SS};
-use render::{paint_card, Canvas, Coverage, PaintStats, TextDraw};
+use render::{paint_card, Canvas, ColorSpan, Coverage, PaintStats, TextDraw};
 use window::{changed_region, Dib, LayeredWindow, ZMode, OVERLAY_CLASS};
 
 /// Status lines ("Translating..." and the like): a muted grey, distinct from the translation.
@@ -307,6 +307,25 @@ pub struct OverlayManager {
     z: ZMode,
 }
 
+/// One fitted line to draw: its band, text, face, supersampled size, colour, alpha multiplier
+/// and link colour runs.
+struct LineDraw {
+    band: usize,
+    text: String,
+    face: Face,
+    size: i32,
+    rgb: [u8; 3],
+    mul: f32,
+    runs: Vec<fit::Run>,
+}
+
+impl LineDraw {
+    /// A line without link colours (statuses).
+    fn plain(band: usize, text: String, face: Face, size: i32, rgb: [u8; 3], mul: f32) -> LineDraw {
+        LineDraw { band, text, face, size, rgb, mul, runs: Vec::new() }
+    }
+}
+
 /// No reply state (chat-only callers and tests).
 fn no_replies() -> &'static HashMap<JobKey, ReplyBook> {
     static EMPTY: std::sync::OnceLock<HashMap<JobKey, ReplyBook>> = std::sync::OnceLock::new();
@@ -470,6 +489,16 @@ impl OverlayManager {
         f
     }
 
+    /// The pixel columns of a line's link colour runs (L3): each run starts and ends at the
+    /// advance of the text before it, rounded to the nearest pixel (the coverage is drawn from
+    /// x 0 with the same font and size).
+    fn color_spans(&mut self, face: Face, size: i32, line: &str, runs: &[fit::Run]) -> Vec<ColorSpan> {
+        runs.iter()
+            .filter(|r| r.start < r.end && line.is_char_boundary(r.start) && r.end <= line.len() && line.is_char_boundary(r.end))
+            .map(|r| ColorSpan { x0: self.fonts.advance_px(face, size, &line[..r.start]), x1: self.fonts.advance_px(face, size, &line[..r.end]), rgb: r.rgb })
+            .collect()
+    }
+
     /// Font size for a card in supersampled pixels: VIEW.fontPx (the chat font) x fontScale,
     /// capped so that the cell of `face` fits the band height plus `FONT_CELL_SLACK`.
     fn font_size(&mut self, view: &SceneView, card: &Card, face: Face) -> i32 {
@@ -512,8 +541,7 @@ impl OverlayManager {
         let content = card_content_in(sc, status, reply, view.kind, fallback);
         let size = self.font_size(view, card, Face::Latin);
         let width = if card.text_width_px > 0 { card.text_width_px } else { card.bands.iter().map(|b| b.text_rect.w).max().unwrap_or(0) };
-        // (band index, line, face, supersampled size, colour, alpha multiplier)
-        let mut lines: Vec<(usize, String, Face, i32, [u8; 3], f32)> = Vec::new();
+        let mut lines: Vec<LineDraw> = Vec::new();
         if size >= 6 * SS && width > 0 {
             match content {
                 Content::Empty => {}
@@ -523,7 +551,8 @@ impl OverlayManager {
                     let fitted = self.fitted(face, size, &text, rows, width);
                     for (i, line) in fitted.lines.into_iter().enumerate() {
                         if let Some(bi) = card.bands.iter().position(|b| usize::from(b.row) == i) {
-                            lines.push((bi, line, face, fitted.size, self.text_rgb, 1.0));
+                            let runs = fitted.runs.get(i).cloned().unwrap_or_default();
+                            lines.push(LineDraw { band: bi, text: line, face, size: fitted.size, rgb: self.text_rgb, mul: 1.0, runs });
                         }
                     }
                 }
@@ -535,14 +564,14 @@ impl OverlayManager {
                     let fitted = self.fitted(Face::Latin, size, &text, 1, width);
                     let first = card.bands.iter().enumerate().min_by_key(|(_, b)| b.row).map(|(i, _)| i);
                     if let (Some(bi), Some(line)) = (first, fitted.lines.into_iter().next()) {
-                        lines.push((bi, line, Face::Latin, fitted.size, rgb, if animated { pulse_mul } else { 1.0 }));
+                        lines.push(LineDraw::plain(bi, line, Face::Latin, fitted.size, rgb, if animated { pulse_mul } else { 1.0 }));
                     }
                 }
                 Content::PerBand(list) => {
                     for (bi, text) in list {
                         let fitted = self.fitted(Face::Latin, size, &text, 1, width);
                         if let Some(line) = fitted.lines.into_iter().next() {
-                            lines.push((bi, line, Face::Latin, fitted.size, STATUS_RGB, 1.0));
+                            lines.push(LineDraw::plain(bi, line, Face::Latin, fitted.size, STATUS_RGB, 1.0));
                         }
                     }
                 }
@@ -554,7 +583,7 @@ impl OverlayManager {
                         }
                         let fitted = self.fitted(Face::Latin, size, &status.text, 1, width);
                         if let Some(line) = fitted.lines.into_iter().next() {
-                            lines.push((bi, line, Face::Latin, fitted.size, self.tone_rgb(status.tone), if status.animated { pulse_mul } else { 1.0 }));
+                            lines.push(LineDraw::plain(bi, line, Face::Latin, fitted.size, self.tone_rgb(status.tone), if status.animated { pulse_mul } else { 1.0 }));
                         }
                     }
                     // rows 1..K-1: the text, in the reply's script
@@ -564,21 +593,25 @@ impl OverlayManager {
                         let fitted = self.fitted(face, fsize, &text, rows, width);
                         for (i, line) in fitted.lines.into_iter().enumerate() {
                             if let Some(bi) = card.bands.iter().position(|b| usize::from(b.row) == i + 1) {
-                                lines.push((bi, line, face, fitted.size, self.text_rgb, 1.0));
+                                let runs = fitted.runs.get(i).cloned().unwrap_or_default();
+                                lines.push(LineDraw { band: bi, text: line, face, size: fitted.size, rgb: self.text_rgb, mul: 1.0, runs });
                             }
                         }
                     }
                 }
             }
         }
-        let covs: Vec<(usize, Rc<Coverage>, [u8; 3], f32)> = lines
+        // rasterized lines with their link colour columns
+        let covs: Vec<(LineDraw, Rc<Coverage>, Vec<ColorSpan>)> = lines
             .into_iter()
-            .map(|(bi, line, face, lsize, rgb, mul)| {
-                let tr = card.bands[bi].text_rect;
-                (bi, self.coverage(face, lsize, &line, tr.w, tr.h), rgb, mul)
+            .map(|l| {
+                let tr = card.bands[l.band].text_rect;
+                let spans = self.color_spans(l.face, l.size, &l.text, &l.runs);
+                let cov = self.coverage(l.face, l.size, &l.text, tr.w, tr.h);
+                (l, cov, spans)
             })
             .collect();
-        let texts: Vec<TextDraw> = covs.iter().map(|(bi, cov, rgb, mul)| TextDraw { band: *bi, cov: cov.as_ref(), rgb: *rgb, alpha_mul: *mul }).collect();
+        let texts: Vec<TextDraw> = covs.iter().map(|(l, cov, spans)| TextDraw { band: l.band, cov: cov.as_ref(), rgb: l.rgb, alpha_mul: l.mul, spans }).collect();
         let mut st = paint_card(canvas, card, &sc.bg, &texts, self.diag_outlines);
         // the card's hint lane: its passing columns get the bubble fill (flat) or the chat
         // background (the gradient between its samples), opaque
@@ -808,6 +841,54 @@ mod tests {
         assert_eq!(gone.len(), 1);
         assert!(!gone[0].shown);
         assert!(m.memory_pixels(0).is_none());
+    }
+
+    #[test]
+    fn link_names_are_drawn_in_their_colour() {
+        // L3: the engine's coloured mark draws "[Linen Cloth]" in the link's blue; the rest of
+        // the line keeps the text colour; nothing of the colour code is drawn
+        let text_rgb = [0x9F, 0xD4, 0xFF];
+        let blue = [0x00, 0x70, 0xDD];
+        let mut results = HashMap::new();
+        results.insert(JobKey { session: 9, req_id: 1 }, Status::Done(ChatText::new("Vends \u{2}\u{4}0070DD[Linen Cloth]\u{3} pas cher".into())));
+        let mut m = OverlayManager::new(true, false, text_rgb, 1.0);
+        let r = m.render(&scene_with(vec![req(3, 1, "fr")]), &results, 1.0, Lang::En);
+        let bits = m.memory_pixels(0).unwrap();
+        // glyph pixels by column (premultiplied BGRA): the text colour has red, the link's blue
+        // has none (the shadow is black)
+        let cols = |is_link: bool| -> Vec<i32> {
+            let mut v: Vec<i32> = (900..914)
+                .flat_map(|y| (60..400).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let i = (((y - 16) * 400 + x) * 4) as usize;
+                    let (r, b) = (bits[i + 2], bits[i]);
+                    if is_link {
+                        r == 0 && b > 40
+                    } else {
+                        r > 40
+                    }
+                })
+                .map(|(x, _)| x)
+                .collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let (base, link) = (cols(false), cols(true));
+        assert_eq!(blue[0], 0);
+        assert!(!link.is_empty() && !base.is_empty(), "{r:?}");
+        // "Vends " before the link, "pas cher" after it, the link in between
+        let (l0, l1) = (link[0], *link.last().unwrap());
+        assert!(base.iter().any(|&x| x < l0) && base.iter().any(|&x| x > l1), "base {base:?} link {l0}..{l1}");
+        assert!(!base.iter().any(|&x| x > l0 + 1 && x < l1 - 1), "no text colour inside the link name");
+        // the width is the plain text's: the same line without colour ends at the same column
+        let mut plain = HashMap::new();
+        plain.insert(JobKey { session: 9, req_id: 1 }, Status::Done(ChatText::new("Vends [Linen Cloth] pas cher".into())));
+        let mut m2 = OverlayManager::new(true, false, text_rgb, 1.0);
+        m2.render(&scene_with(vec![req(3, 1, "fr")]), &plain, 1.0, Lang::En);
+        let bits2 = m2.memory_pixels(0).unwrap();
+        let alpha = |b: &[u8]| -> Vec<u8> { b.chunks_exact(4).map(|p| p[3]).collect() };
+        assert_eq!(alpha(&bits), alpha(&bits2), "same glyph coverage with and without the colour");
     }
 
     #[test]
