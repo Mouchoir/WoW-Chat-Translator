@@ -44,8 +44,9 @@ end
 local function Help()
     ns.Print(L.HELP_HEADER)
     for _, key in ipairs({ "HELP_OPTIONS", "HELP_INFO", "HELP_TARGET", "HELP_NAMES", "HELP_SHOW", "HELP_MODE",
-        "HELP_TRANSLIT", "HELP_GLOSS", "HELP_TEST", "HELP_TEST_ROWS", "HELP_TEST_LOCKDOWN", "HELP_CLEAR", "HELP_APP",
-        "HELP_DEBUG", "HELP_HELP", "HELP_CLICK" }) do
+        "RPL_HELP_CONV", "RPL_HELP_DISPLAY", "RPL_HELP_CLIP", "HELP_TRANSLIT", "HELP_GLOSS", "HELP_TEST",
+        "HELP_TEST_ROWS", "HELP_TEST_LOCKDOWN", "RPL_HELP_TEST_PASTE", "HELP_CLEAR", "HELP_APP", "HELP_DEBUG",
+        "HELP_HELP", "HELP_CLICK" }) do
         ns.Print(L[key])
     end
 end
@@ -198,6 +199,49 @@ end
 
 local MODES = { auto = true, dense = true, robust = true, mono = true }
 
+-- Forgets every conversation (open and closed), the drafts, the pending reply (CANCEL) and the
+-- sends waiting for their echo. Memory only: nothing of it was ever saved. silent = true right
+-- after a CLEAR (the Helper forgot every card): window slots are freed without a CANCEL each.
+local function ClearConversations(silent)
+    if ns.Composer and ns.Composer.Reset then
+        ns.Composer.Reset()
+    end
+    if ns.Channels and ns.Channels.Clear then
+        ns.Channels.Clear()
+    end
+    if ns.Conv and type(ns.Conv.Clear) == "function" then
+        ns.Conv.Clear(silent)
+    end
+end
+
+-- /tpr conv [clear|reset]
+local function Conversation(arg)
+    arg = arg:lower()
+    if arg == "clear" then
+        ClearConversations(false)
+        ns.Print(L.RPL_CONV_CLEARED)
+    elseif arg == "reset" then
+        ns.Options.ResetConvPosition()
+        ns.Print(L.RPL_CONV_RESET)
+    elseif ns.ConvFrame and type(ns.ConvFrame.Toggle) == "function" then
+        ns.ConvFrame.Toggle()
+    else
+        ns.Print(L.RPL_CONV_NA)
+    end
+end
+
+-- /tpr clip ask|allow|never and /tpr display window|inline: set when given, then print.
+local function Choice(key, arg, help)
+    arg = arg:lower()
+    if arg ~= "" then
+        if ns.Options.SetChoice(key, arg) then
+            ns.Options.Changed(key)
+        else
+            ns.Print(help)
+        end
+    end
+end
+
 local function OnOff(arg, key, onText, offText)
     arg = arg:lower()
     if arg == "on" or arg == "off" then
@@ -252,13 +296,25 @@ local handlers = {
             TestRows()
         elseif arg == "lockdown" then
             TestLockdown()
+        elseif arg == "paste" then
+            ns.Print(ns.Composer.ToggleProbe() and L.RPL_PROBE_ON or L.RPL_PROBE_OFF)
         else
             TestPipeline()
         end
     end,
     clear = function()
         ns.Request.ClearAll()
+        ClearConversations(true)
         ns.Print(L.CLEARED)
+    end,
+    conv = Conversation,
+    clip = function(arg)
+        Choice("replyClipboard", arg, L.RPL_HELP_CLIP)
+        ns.Print(L["RPL_CLIP_" .. ns.db.replyClipboard:upper() .. "_IS"])
+    end,
+    display = function(arg)
+        Choice("display", arg, L.RPL_HELP_DISPLAY)
+        ns.Print(ns.db.display == "window" and L.RPL_DISPLAY_WINDOW or L.RPL_DISPLAY_INLINE)
     end,
     app = function()
         for _, key in ipairs({ "APP_1", "APP_2", "APP_3", "APP_4" }) do
@@ -273,6 +329,9 @@ local handlers = {
         ns.Printf(L.DEBUG_BRIDGE, ns.Bridge.ModeName(), Yes(ns.Bridge.IsBusy()), Yes(ns.Reserve.IsWatching()))
         ns.Printf(L.DEBUG_RESTRICTION, Yes(x.active), x.secret, x.dropped, x.waiting, x.batches, x.reprinted,
             x.deferred, x.ran)
+        local c, ch = ns.Composer.Counters(), ns.Channels.Counters()
+        ns.Printf(L.RPL_DEBUG, Yes(c.pending), ch.sent, ch.confirmed, ch.unconfirmed, ch.offline, ch.blocked,
+            ch.refused + c.refused, c.pasted, c.warned)
     end,
 }
 

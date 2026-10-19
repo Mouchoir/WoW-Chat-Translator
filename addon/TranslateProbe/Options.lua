@@ -1,13 +1,19 @@
 -- Options panel in the game settings (Esc > Options > AddOns > TranslateProbe), built with the
 -- 12.x Settings API (Blizzard_Settings_Shared\Blizzard_Settings.lua):
--- * the main page (vertical layout): target language, glossary row, romanized names and the
---   bridge mode;
+-- * the main page (vertical layout): target language, glossary row (off by default, user
+--   decision D11), romanized names and the bridge mode; then the "Conversation window" section:
+--   what [T] opens, following new messages, the clipboard consent, originals, text size,
+--   window scale, focus, whispers, combat, and a button that resets the window position;
 -- * a "Glossary" subpage (canvas layout): every abbreviation with its meaning for the current
 --   target, editable; user entries can be deleted, built-in ones disabled; new entries added.
 -- Every setting is a proxy on TranslateProbeDB, so the /tpr commands and the panel always agree
 -- (the commands call the same setters). When the Settings API is missing, nothing is
 -- registered and /tpr prints the command list instead.
--- luacheck: read globals Settings
+-- The new section uses no native dropdown: SkillUp records a Forever crash in it
+-- (skillup-forever UI\Settings.lua). Settings with a few values are discrete stock sliders with
+-- labels, as SkillUp does (G17 checks the round-3 dropdowns).
+-- luacheck: read globals Settings MinimalSliderWithSteppersMixin CreateSettingsButtonInitializer
+-- luacheck: read globals CreateSettingsListSectionHeaderInitializer geterrorhandler
 local addonName, ns = ...
 local L = ns.L
 
@@ -19,11 +25,54 @@ local MODE_LABELS = { auto = "OPT_MODE_AUTO", dense = "OPT_MODE_DENSE", robust =
 local ROWS = 12            -- glossary rows shown at once (mouse wheel and buttons scroll)
 local ROW_HEIGHT = 26
 
+-- Labels of the choice sliders, in slider order (Core.lua's ns.CHOICES holds the valid values).
+local FOLLOW_ORDER = { "off", "add", "smart", "translate" }
+local FOLLOW_LABELS = { off = "RPL_OPT_FOLLOW_OFF", add = "RPL_OPT_FOLLOW_ADD", smart = "RPL_OPT_FOLLOW_SMART",
+    translate = "RPL_OPT_FOLLOW_TRANSLATE" }
+local CLIP_ORDER = { "ask", "allow", "never" }
+local CLIP_LABELS = { ask = "RPL_OPT_CLIP_ASK", allow = "RPL_OPT_CLIP_ALLOW", never = "RPL_OPT_CLIP_NEVER" }
+-- Settings the conversation window redraws for.
+local WINDOW_KEYS = { convText = true, convScale = true, convOriginal = true }
+
 local category              -- the main settings category once registered
 local page                  -- glossary page: { frame, built, rows, offset, entries, ... }
+local listeners = {}        -- functions called with the key of a changed setting
 
 local function Var(key)
     return addonName .. "_" .. key
+end
+
+-- fn(key) runs after any setting changed, from the panel or a command (for the window).
+function Options.OnChanged(fn)
+    listeners[#listeners + 1] = fn
+end
+
+-- A setting changed: the composer and the conversation window follow it.
+local function Notify(key)
+    for _, fn in ipairs(listeners) do
+        local ok, err = pcall(fn, key)
+        if not ok then
+            geterrorhandler()(err)
+        end
+    end
+    if WINDOW_KEYS[key] then
+        if ns.Composer and ns.Composer.ApplySettings then
+            ns.Composer.ApplySettings()
+        end
+        local F = ns.ConvFrame
+        if F and type(F.ApplySettings) == "function" then
+            pcall(F.ApplySettings, key)
+        elseif F and type(F.Relayout) == "function" then
+            pcall(F.Relayout)
+            if type(F.SyncView) == "function" then
+                pcall(F.SyncView, true)
+            end
+        end
+    elseif key == "replyClipboard" or key == "target" then
+        if ns.Composer and ns.Composer.Refresh then
+            ns.Composer.Refresh()
+        end
+    end
 end
 
 ---------------------------------------------------------------------------- setters
@@ -44,6 +93,37 @@ function Options.SetMode(value)
     end
 end
 
+-- A choice setting (display, follow, replyClipboard, convCombat). Invalid values are ignored;
+-- returns true when the value is valid. Like SetTarget, it does not notify: the panel's own
+-- setters notify the window, commands call Options.Changed.
+function Options.SetChoice(key, value)
+    if not ns.IsChoice(key, value) then
+        return false
+    end
+    ns.db[key] = value
+    return true
+end
+
+-- A numeric setting (convText, convScale), rounded and clamped. True when value is a number.
+function Options.SetNumber(key, value)
+    local v = ns.ClampSetting(key, value)
+    if not v then
+        return false
+    end
+    ns.db[key] = v
+    return true
+end
+
+-- Forgets the saved window position; an open window goes back to the default place and size.
+function Options.ResetConvPosition()
+    ns.db.convPos = nil
+    local F = ns.ConvFrame
+    if F and type(F.ResetPosition) == "function" then
+        pcall(F.ResetPosition)
+    end
+    Notify("convPos")
+end
+
 -- A command changed a value: the panel shows it at once.
 function Options.Changed(key)
     if key == "target" or key == "glossary" then
@@ -52,6 +132,7 @@ function Options.Changed(key)
     if key ~= "glossary" and type(Settings) == "table" and type(Settings.NotifyUpdate) == "function" then
         pcall(Settings.NotifyUpdate, Var(key))
     end
+    Notify(key)
 end
 
 ---------------------------------------------------------------------------- glossary page
@@ -320,6 +401,115 @@ function Options.Page()
     return page
 end
 
+---------------------------------------------------------------------------- conversation window section
+local function HasSliders()
+    return type(Settings.CreateSlider) == "function" and type(Settings.CreateSliderOptions) == "function"
+        and type(MinimalSliderWithSteppersMixin) == "table" and type(MinimalSliderWithSteppersMixin.Label) == "table"
+end
+
+local function AddInitializer(cat, init)
+    if type(Settings.RegisterInitializer) == "function" and init then
+        Settings.RegisterInitializer(cat, init)
+    end
+end
+
+local function IndexOf(list, value)
+    for i, v in ipairs(list) do
+        if v == value then
+            return i
+        end
+    end
+end
+
+-- The "Conversation window" section of the main page. Checkboxes are proxy settings on
+-- TranslateProbeDB; settings with a few values are discrete sliders with a label on the right
+-- (no native dropdown); the reset button and the section header are added when the client has
+-- their initializers (SkillUp and Target In Combat use them on Forever).
+function Options.RegisterConversation(cat, types)
+    local BOOLEAN, NUMBER = types.BOOLEAN, types.NUMBER
+    if type(CreateSettingsListSectionHeaderInitializer) == "function" then
+        AddInitializer(cat, CreateSettingsListSectionHeaderInitializer(L.RPL_OPT_SECTION))
+    end
+
+    local function Checkbox(key, name, tooltip, default, get, set)
+        local setting = Settings.RegisterProxySetting(cat, Var(key), BOOLEAN, name, default, get, function(value)
+            set(value == true)
+            Notify(key)
+        end)
+        Settings.CreateCheckbox(cat, setting, tooltip)
+    end
+    local function Flag(key, name, tooltip)
+        Checkbox(key, name, tooltip, false, function()
+            return ns.db[key] == true
+        end, function(value)
+            ns.db[key] = value
+        end)
+    end
+    -- order: values in slider order; labels: value -> L key
+    local function Choice(key, name, tooltip, order, labels)
+        if not HasSliders() then
+            return
+        end
+        local default = IndexOf(order, ns.CHOICES[key][1])
+        local setting = Settings.RegisterProxySetting(cat, Var(key), NUMBER, name, default, function()
+            return IndexOf(order, ns.db[key]) or default
+        end, function(value)
+            local v = order[value]
+            if v and Options.SetChoice(key, v) then
+                Notify(key)
+            end
+        end)
+        local options = Settings.CreateSliderOptions(1, #order, 1)
+        options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right, function(value)
+            local v = order[value]
+            return v and L[labels[v]] or ""
+        end)
+        Settings.CreateSlider(cat, setting, options, tooltip)
+    end
+    local function Number(key, name, tooltip, step, format)
+        if not HasSliders() then
+            return
+        end
+        local r = ns.RANGES[key]
+        local setting = Settings.RegisterProxySetting(cat, Var(key), NUMBER, name, r[3], function()
+            return ns.db[key]
+        end, function(value)
+            if Options.SetNumber(key, value) then
+                Notify(key)
+            end
+        end)
+        local options = Settings.CreateSliderOptions(r[1], r[2], step)
+        options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right, function(value)
+            return format and format:format(value) or tostring(value)
+        end)
+        Settings.CreateSlider(cat, setting, options, tooltip)
+    end
+
+    Checkbox("display", L.RPL_OPT_DISPLAY, L.RPL_OPT_DISPLAY_TIP, true, function()
+        return ns.db.display == "window"
+    end, function(value)
+        Options.SetChoice("display", value and "window" or "inline")
+    end)
+    Choice("follow", L.RPL_OPT_FOLLOW, L.RPL_OPT_FOLLOW_TIP, FOLLOW_ORDER, FOLLOW_LABELS)
+    Choice("replyClipboard", L.RPL_OPT_CLIP, L.RPL_OPT_CLIP_TIP, CLIP_ORDER, CLIP_LABELS)
+    Flag("convOriginal", L.RPL_OPT_ORIGINAL, L.RPL_OPT_ORIGINAL_TIP)
+    Number("convText", L.RPL_OPT_TEXT, L.RPL_OPT_TEXT_TIP, 1)
+    Number("convScale", L.RPL_OPT_SCALE, L.RPL_OPT_SCALE_TIP, 5, L.RPL_PERCENT)
+    Flag("convFocus", L.RPL_OPT_FOCUS, L.RPL_OPT_FOCUS_TIP)
+    Flag("convOpenWhisper", L.RPL_OPT_WHISPER, L.RPL_OPT_WHISPER_TIP)
+    Checkbox("convCombat", L.RPL_OPT_COMBAT, L.RPL_OPT_COMBAT_TIP, false, function()
+        return ns.db.convCombat == "hide"
+    end, function(value)
+        Options.SetChoice("convCombat", value and "hide" or "keep")
+    end)
+    if type(CreateSettingsButtonInitializer) == "function" then
+        local reset = type(HUD_EDIT_MODE_RESET_POSITION) == "string" and HUD_EDIT_MODE_RESET_POSITION
+            or L.RPL_OPT_RESET
+        AddInitializer(cat, CreateSettingsButtonInitializer(L.RPL_OPT_RESET, reset, Options.ResetConvPosition,
+            L.RPL_OPT_RESET_TIP, true))
+    end
+end
+
 ---------------------------------------------------------------------------- registration
 local function HasSettingsAPI()
     if type(Settings) ~= "table" then
@@ -341,6 +531,7 @@ local function Register()
     local cat = Settings.RegisterVerticalLayoutCategory(addonName)
     local varType = type(Settings.VarType) == "table" and Settings.VarType or {}
     local STRING, BOOLEAN = varType.String or "string", varType.Boolean or "boolean"
+    local NUMBER = varType.Number or "number"
 
     local function Dropdown(key, name, tooltip, default, fill, set)
         local setting = Settings.RegisterProxySetting(cat, Var(key), STRING, name, default, function()
@@ -366,13 +557,14 @@ local function Register()
             container:Add(code, ns.Lang.NATIVE[code] or code)
         end
     end, Options.SetTarget)
-    Checkbox("glossShow", L.OPT_GLOSS_ROW, L.OPT_GLOSS_ROW_TIP, true)
+    Checkbox("glossShow", L.OPT_GLOSS_ROW, L.OPT_GLOSS_ROW_TIP, false)
     Checkbox("names", L.OPT_NAMES, L.OPT_NAMES_TIP, false)
     Dropdown("mode", L.OPT_MODE, L.OPT_MODE_TIP, "auto", function(container)
         for _, mode in ipairs(MODES) do
             container:Add(mode, L[MODE_LABELS[mode]])
         end
     end, Options.SetMode)
+    Options.RegisterConversation(cat, { BOOLEAN = BOOLEAN, NUMBER = NUMBER })
 
     if type(Settings.RegisterCanvasLayoutSubcategory) == "function" then
         local frame = CreateFrame("Frame")
