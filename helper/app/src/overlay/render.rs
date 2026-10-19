@@ -90,8 +90,6 @@ pub struct PaintStats {
     pub tag_px: usize,
     pub fill_px: usize,
     pub text_px: usize,
-    /// Pixels of a reply card's hint lane painted with the bubble fill.
-    pub lane_px: usize,
 }
 
 fn mask_bit(m: &Mask, x: i32, y: i32) -> bool {

@@ -10,6 +10,7 @@
   "status.lowmem": "Not enough free memory for the translator",
   "status.notinstalled": "Translator files not found - see the Translate Companion tray icon",
   "status.overlay_ok": "Overlay OK (row {row}, block {block} px)",
+  "presence.detected": "Translate Companion detected",
   "reply.ready": "Ready - Ctrl+V to paste",
   "reply.ready_cut": "Ready - Ctrl+V to paste (shortened to 255 bytes)",
   "reply.same": "Already in {language} - Ctrl+V to paste",

@@ -5,8 +5,13 @@
 //!   [--translator llama|echo] [--wow-class CLASS] [--diag] [--diag-json FILE] [--log-dir DIR] [--no-tray]
 //!   [--exit-after SECS] [--selftest]
 //! test flags: [--no-overlay] [--assume-foreground] [--overlay-probe] [--no-clipboard]
-//! hidden test flags: [--instance-name NAME] [--assume-background] (not in --help)
+//! hidden test flags: [--instance-name NAME] [--assume-background] [--status-root DIR]
+//!   [--no-status-file] (not in --help)
 //! ```
+//! The status file (`status_file`) is written only by a normal run: never by a test run
+//! (`--instance-name`, `--no-overlay`, `--wow-class`, `--assume-foreground`, `--assume-background`,
+//! `--overlay-probe`) unless `--status-root` names the folder to use, and never with
+//! `--no-status-file`.
 //! Values are given as `--flag VALUE` or `--flag=VALUE`.
 
 use std::path::PathBuf;
@@ -128,6 +133,12 @@ pub struct Cli {
     /// --assume-foreground and the one implied by --no-overlay, so an E2E run can check that the
     /// strip is decoded while the game is in the background.
     pub assume_background: bool,
+    /// Hidden test flag: the status file goes under this WoW folder only (a "World of Warcraft"
+    /// folder or one flavour folder), never under the user's installs; it also turns the status
+    /// file on for a test run.
+    pub status_root: Option<PathBuf>,
+    /// Hidden flag: never write the status file.
+    pub no_status_file: bool,
     pub help: bool,
     pub version: bool,
 }
@@ -153,6 +164,8 @@ impl Default for Cli {
             no_clipboard: false,
             instance_name: None,
             assume_background: false,
+            status_root: None,
+            no_status_file: false,
             help: false,
             version: false,
         }
@@ -168,6 +181,18 @@ impl Cli {
     /// True when the clipboard must never be touched (`--no-clipboard`, implied by `--no-overlay`).
     pub fn clipboard_off(&self) -> bool {
         self.no_clipboard || self.no_overlay
+    }
+
+    /// True for a test run (a second instance, a stand-in game window, no overlay, an assumed
+    /// window state or the overlay probe): it must leave the user's WoW folders alone.
+    pub fn test_run(&self) -> bool {
+        self.instance_name.is_some() || self.no_overlay || self.wow_class.is_some() || self.assume_foreground || self.assume_background || self.overlay_probe
+    }
+
+    /// True when the status file is written: a normal run, or a test run with `--status-root`;
+    /// never with `--no-status-file`.
+    pub fn status_file_on(&self) -> bool {
+        !self.no_status_file && (self.status_root.is_some() || !self.test_run())
     }
 }
 
@@ -215,6 +240,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--log-dir",
     "--exit-after",
     "--instance-name",
+    "--status-root",
 ];
 
 /// A valid `--instance-name`: 1-32 ASCII letters, digits, '-' or '_'.
@@ -246,6 +272,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, CliError> {
                     "--overlay-probe" => cli.overlay_probe = true,
                     "--no-clipboard" => cli.no_clipboard = true,
                     "--assume-background" => cli.assume_background = true,
+                    "--no-status-file" => cli.no_status_file = true,
                     "--help" | "-h" | "/?" => cli.help = true,
                     "--version" => cli.version = true,
                     _ => return Err(CliError::Unknown(arg)),
@@ -275,6 +302,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, CliError> {
             "--wow-class" => cli.wow_class = Some(value),
             "--diag-json" => cli.diag_json = Some(PathBuf::from(value)),
             "--log-dir" => cli.log_dir = Some(PathBuf::from(value)),
+            "--status-root" => cli.status_root = Some(PathBuf::from(value)),
             "--instance-name" => {
                 if !valid_instance_name(&value) {
                     return Err(CliError::BadValue(flag));
@@ -396,6 +424,32 @@ mod tests {
         assert!(c.assume_background && c.no_overlay && !c.foreground_assumed() && c.clipboard_off());
         assert!(!USAGE.contains("--assume-background"), "hidden from --help");
         assert!(!Cli::default().assume_background);
+    }
+
+    #[test]
+    fn the_status_file_is_written_by_normal_runs_only() {
+        // a normal run writes it; every test run leaves the user's WoW folders alone
+        assert!(Cli::default().status_file_on());
+        assert!(p(&["--backend", "cpu", "--diag", "--no-tray", "--exit-after", "5"]).unwrap().status_file_on());
+        for args in [
+            &["--instance-name", "e2e"][..],
+            &["--no-overlay"],
+            &["--wow-class", "TPFakeWow"],
+            &["--assume-foreground"],
+            &["--assume-background"],
+            &["--overlay-probe"],
+        ] {
+            let c = p(args).unwrap();
+            assert!(c.test_run() && !c.status_file_on(), "{args:?}");
+        }
+        // a test run with its own folder writes there; --no-status-file always wins
+        let c = p(&["--instance-name", "exit-test", "--status-root", "C:\\tmp\\World of Warcraft"]).unwrap();
+        assert_eq!(c.status_root, Some(PathBuf::from("C:\\tmp\\World of Warcraft")));
+        assert!(c.status_file_on());
+        assert!(!p(&["--no-status-file"]).unwrap().status_file_on());
+        assert!(!p(&["--status-root=D:\\x", "--no-status-file"]).unwrap().status_file_on());
+        assert_eq!(p(&["--status-root"]), Err(CliError::MissingValue("--status-root")));
+        assert!(!USAGE.contains("--status-root") && !USAGE.contains("--no-status-file"), "hidden from --help");
     }
 
     #[test]

@@ -161,6 +161,9 @@ fn run_scenario(picture: Vec<u8>) -> Vec<serde_json::Value> {
         .env("LOCALAPPDATA", dir.join("localappdata"))
         .spawn()
         .unwrap();
+    let child_pid = child.id();
+    // every foreground window seen during the run: none may belong to this test or the Helper
+    let mut fg_seen: Vec<isize> = vec![fg_before];
     let t0 = Instant::now();
     let mut code = None;
     while t0.elapsed() < Duration::from_secs(20) {
@@ -171,6 +174,10 @@ fn run_scenario(picture: Vec<u8>) -> Vec<serde_json::Value> {
                 DispatchMessageW(&msg);
             }
         }
+        let fg = tp_helper::wow::foreground_root();
+        if !fg_seen.contains(&fg) {
+            fg_seen.push(fg);
+        }
         if let Some(c) = child.try_wait().unwrap() {
             code = Some(c);
             break;
@@ -180,10 +187,25 @@ fn run_scenario(picture: Vec<u8>) -> Vec<serde_json::Value> {
     if code.is_none() {
         let _ = child.kill();
     }
+    // reaped in every case (at once when it already exited)
+    let _ = child.wait();
     unsafe {
         let _ = DestroyWindow(hwnd);
     }
-    assert_eq!(tp_helper::wow::foreground_root(), fg_before, "focus never moves");
+    // The focus never moves to a window of ours (this test's window or the Helper). The user may
+    // switch between other applications meanwhile (measured 2026-10-19 while the game was played:
+    // the foreground went between the game, a launcher and a chat app during the 6 s run), which
+    // the strict "never changes" check of before counted as a failure.
+    let ours: Vec<isize> = fg_seen
+        .iter()
+        .copied()
+        .filter(|&h| {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(HWND(h as *mut _), Some(&mut pid)) };
+            pid == std::process::id() || pid == child_pid
+        })
+        .collect();
+    assert!(ours.is_empty(), "focus moved to our window: {ours:?} (seen {fg_seen:?})");
     assert!(code.is_some_and(|c| c.success()), "helper exit: {code:?}");
     let text = std::fs::read_to_string(&diag).unwrap();
     let events: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();

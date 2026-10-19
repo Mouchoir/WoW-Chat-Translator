@@ -10,6 +10,12 @@
 //! - Replies (conversation window): the UI thread owns the clipboard flow (`reply`, `clip`):
 //!   it empties the clipboard when a consented reply request arrives, writes the final
 //!   translation, and paints the reply card's status from the outcome.
+//! - Status file (2026-10-19, user request R1): a thread writes `CompanionStatus.lua` into the
+//!   deployed addon folders at start, every 60 s, and "stopped" on every clean exit
+//!   (`status_file`), so the addon knows at login or `/reload` that the app runs.
+//! - Presence card (slot 125, the addon's Translate Companion popup): found in a VIEW of its own,
+//!   or, before any VIEW (an app started while the popup is open), by the discovery scan, which
+//!   also searches the middle of the client for it (`discovery_areas`).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
@@ -41,7 +47,6 @@ use crate::capture::{self, GrabStatus, Grabber, Method};
 use crate::cli::{Backend, CaptureChoice, Cli, TranslatorChoice, USAGE};
 use crate::clip::{ClipOs, ClipOutcome, WinClip};
 use crate::i18n::{self, Lang};
-use crate::lane::{self, ChatLaneMemo, Lane, LaneKind};
 use crate::log::{AppEvent, DiagSink, Level, Logger};
 use crate::overlay::{self, window::hinstance, window::ZMode, OverlayManager};
 use crate::perf::{self, Stage, Stages, ThreadClock};
@@ -49,6 +54,7 @@ use crate::reply::{ClipEvent, Replies};
 use crate::tagscan::{CardCache, TagScanner};
 use crate::scene::*;
 use crate::settings::{self, LoadOutcome, Settings};
+use crate::status_file::{StatusWriter, WriterConfig};
 use crate::toast::Toaster;
 use crate::tray::{MenuCmd, MenuItem, Tray, WM_APP_TRAY};
 use crate::wow::{self, hwnd, WowFinder, WowInfo};
@@ -84,6 +90,16 @@ pub const STRIP_RECENT_MS: u64 = 2000;
 /// Tag scans while nothing is known (no request this session, no tag in the last scan, no strip):
 /// the discovery cadence of the design (2 Hz).
 pub const QUIET_SCAN_MS: u64 = 500;
+/// Discovery while the last scan found the presence card (the addon's popup, no VIEW known): 10 Hz,
+/// so its "detected" text leaves within about 100 ms of the popup (2 Hz would leave it floating over
+/// the game for up to half a second).
+pub const PRESENCE_SCAN_MS: u64 = 100;
+/// Discovery searches tags whose first block starts in the left `PRESENCE_REACH` of the client: the
+/// presence card sits in the addon's popup, in the middle of the screen, out of the left
+/// max(200 px, 35%) that `tags::scan` searches in one area.
+pub const PRESENCE_REACH: f32 = 0.65;
+/// Each extra discovery area starts this far left of where the previous one's search range ends.
+pub const DISCOVERY_OVERLAP: i32 = 16;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Events for the UI thread (no text, except a reply's own text, which stays in `ChatText` and
@@ -301,18 +317,9 @@ pub fn card_json(sc: &SceneCard, state: &str) -> Value {
     card_json_clip(sc, state, None)
 }
 
-/// A hint lane in the `cards` diag record: rectangle, kind, fill colours, columns and passing
-/// columns (numbers only).
-pub fn lane_json(l: &Lane) -> Value {
-    let rgb = l.rgb();
-    json!({"rect": r4(&l.rect), "kind": l.kind.name(), "rgb": [rgb[0], rgb[1], rgb[2]],
-           "rgbRight": l.rgb_right().map_or(Value::Null, |c| json!([c[0], c[1], c[2]])), "cols": l.cols.len(), "pass": l.passing()})
-}
-
 /// [`card_json`] with a reply's clipboard outcome (`clip`, None for a chat card or before the
-/// final result). Also: `reply`, the background samples of each band (`bg`, [left, right] colours,
-/// numbers only) and the card's hint lane (`lane`: rectangle, kind, fill colours, columns and
-/// passing columns).
+/// final result). Also: `reply` and the background samples of each band (`bg`, [left, right]
+/// colours, numbers only).
 pub fn card_json_clip(sc: &SceneCard, state: &str, clip: Option<&str>) -> Value {
     let c = &sc.card;
     let (req, reply) = match &sc.kind {
@@ -320,7 +327,6 @@ pub fn card_json_clip(sc: &SceneCard, state: &str, clip: Option<&str>) -> Value 
         _ => (Value::Null, false),
     };
     let bg: Vec<Value> = (0..c.bands.len()).map(|i| sc.bg.band(i)).map(|b| json!([sample_json(b.left), sample_json(b.right)])).collect();
-    let lane = sc.lane.as_ref().map_or(Value::Null, lane_json);
     let band = |b: &RowBand| r4(&b.text_rect);
     let mask_px: usize = c.bands.iter().filter_map(|b| b.mask.as_ref()).map(|m| m.bits.iter().filter(|v| **v != 0).count()).sum();
     let masks: Vec<Value> = c
@@ -339,7 +345,7 @@ pub fn card_json_clip(sc: &SceneCard, state: &str, clip: Option<&str>) -> Value 
         "gaps": c.gaps.iter().map(r4).collect::<Vec<_>>(),
         "maskPx": mask_px, "masks": masks, "alpha": round3(c.alpha), "plate": c.plate,
         "textWidth": c.text_width_px, "state": state, "covered": sc.covered,
-        "reply": reply, "clip": clip, "bg": bg, "lane": lane,
+        "reply": reply, "clip": clip, "bg": bg,
     })
 }
 
@@ -429,14 +435,10 @@ struct Pipeline {
     cards: Vec<Card>,
     /// The chat background around each card of `cards` (same order), for the native look.
     card_bgs: Vec<CardBg>,
-    /// Each card's hint lane, for each card of `cards` (same order).
-    card_lanes: Vec<Option<Lane>>,
-    /// The chat lanes found lately, by (view id, slot): a lane whose card's rows have left the
-    /// top of the chat is followed there (orphan lanes, `lane::find_orphan_chat_lane`).
-    lane_memos: HashMap<(u8, u8), ChatLaneMemo>,
-    /// This capture's orphan lanes.
-    orphan_lanes: Vec<FoundLane>,
     hits: Vec<TagHit>,
+    /// The last discovery scan found the presence card (slot 125): discovery runs at
+    /// `PRESENCE_SCAN_MS` while it shows.
+    presence_seen: bool,
     tick: u64,
     last_fresh: Instant,
     last_fp: Option<u64>,
@@ -444,9 +446,8 @@ struct Pipeline {
     last_hit_count: usize,
     visible: bool,
     minimized: bool,
-    /// Covering test results by (view, slot, game window in front).
-    /// (view id, slot, in front, lane) -> (when, covered): the card's rows, or its hint lane.
-    cover_cache: HashMap<(u8, u8, bool, bool), (Instant, bool)>,
+    /// Covering test results: (view id, slot, game window in front) -> (when, covered).
+    cover_cache: HashMap<(u8, u8, bool), (Instant, bool)>,
     minute: Minute,
     minute_start: Instant,
     perf: PerfWindow,
@@ -536,11 +537,6 @@ struct Region {
     lin_key: Option<(u64, [i32; 4])>,
     prev_cards: Vec<Card>,
     prev_bgs: Vec<CardBg>,
-    prev_lanes: Vec<Option<Lane>>,
-    /// When each of `prev_lanes` was last searched in full (ms, `lane::RESEARCH_MS`).
-    prev_lane_at: Vec<u64>,
-    /// The previous capture's orphan lanes of this region (their fills settle like the cards').
-    prev_orphans: Vec<FoundLane>,
 }
 
 impl Region {
@@ -550,9 +546,6 @@ impl Region {
         self.lin_key = None;
         self.prev_cards.clear();
         self.prev_bgs.clear();
-        self.prev_lanes.clear();
-        self.prev_lane_at.clear();
-        self.prev_orphans.clear();
     }
 }
 
@@ -560,9 +553,7 @@ impl Region {
 struct RegionOut {
     cards: Vec<Card>,
     bgs: Vec<CardBg>,
-    lanes: Vec<Option<Lane>>,
     hits: Vec<TagHit>,
-    orphans: Vec<FoundLane>,
 }
 
 /// Largest union of two VIEW rectangles grabbed as one region, as a multiple of their total area.
@@ -621,14 +612,42 @@ pub fn capture_period_ms(fg: bool, visible: bool, strip_recent: bool, hz_active:
     }
 }
 
-fn rect4(r: &Rect) -> [i32; 4] {
-    [r.x, r.y, r.w, r.h]
-}
-
 /// Keeps the first reading of each tag (slot, row, x0, yTop) across overlapping views and
 /// regions (design B.3 H7): `seen` holds the tags already kept this capture.
 pub fn dedup_hits(hits: &mut Vec<TagHit>, seen: &mut HashSet<(u8, u8, i32, i32)>) {
     hits.retain(|h| seen.insert((h.slot, h.row, h.x0, h.y_top)));
+}
+
+/// Where `tags::scan` looks for a tag's first block in `area`: `[area.x, end)`.
+pub fn search_end(area: Rect) -> i32 {
+    area.x + area.w.min(200.max((0.35 * area.w as f32) as i32))
+}
+
+/// The tag scan areas of a discovery scan (no VIEW) over `area` (the client below row 16): the
+/// area itself (chat frames, at the left), then areas that each start `DISCOVERY_OVERLAP` px left
+/// of where the previous one's search range ends and reach the area's right edge (a plate is
+/// never cut), until the search ranges cover `PRESENCE_REACH` of the width: the presence card
+/// (the addon's popup) is in the middle of the screen. Only presence tags are kept from the extra
+/// areas ([`keep_discovery_hit`]), so chat cards are found as before.
+pub fn discovery_areas(area: Rect) -> Vec<Rect> {
+    let mut out = vec![area];
+    let right = area.x + area.w;
+    let goal = area.x + (area.w as f32 * PRESENCE_REACH) as i32;
+    let mut cur = area;
+    while cur.w > 0 && search_end(cur) < goal {
+        let x = search_end(cur) - DISCOVERY_OVERLAP;
+        if x <= cur.x {
+            break;
+        }
+        cur = Rect { x, y: area.y, w: right - x, h: area.h };
+        out.push(cur);
+    }
+    out
+}
+
+/// A discovery hit is kept when the first area finds it (any slot) or it is the presence card.
+pub fn keep_discovery_hit(h: &TagHit, area: Rect) -> bool {
+    h.slot == PRESENCE_SLOT || h.x0 < search_end(area)
 }
 
 impl Pipeline {
@@ -652,10 +671,8 @@ impl Pipeline {
             taken_method: None,
             cards: Vec::new(),
             card_bgs: Vec::new(),
-            card_lanes: Vec::new(),
-            lane_memos: HashMap::new(),
-            orphan_lanes: Vec::new(),
             hits: Vec::new(),
+            presence_seen: false,
             tick: 0,
             last_fresh: Instant::now(),
             last_fp: None,
@@ -823,8 +840,8 @@ impl Pipeline {
         self.drop_grabber(true);
         self.cards.clear();
         self.card_bgs.clear();
-        self.card_lanes.clear();
         self.hits.clear();
+        self.presence_seen = false;
         self.regions.clear();
         self.sticky = StickyWidth::new();
         self.tone = Tone::identity();
@@ -884,13 +901,15 @@ impl Pipeline {
             let regions = plan_regions(self.scene.views(), cw, ch);
             return (!regions.is_empty()).then_some(regions);
         }
-        // Discovery runs at 2 Hz whatever the tick rate.
-        let discovery_due = self.last_scan.is_none_or(|t| t.elapsed() >= Duration::from_millis(QUIET_SCAN_MS));
+        // Discovery runs at 2 Hz whatever the tick rate (10 Hz while the presence card shows).
+        let every = if self.presence_seen { PRESENCE_SCAN_MS } else { QUIET_SCAN_MS };
+        let discovery_due = self.last_scan.is_none_or(|t| t.elapsed() >= Duration::from_millis(every));
         if !discovery_due || ch <= OVERLAY_TOP {
             return None;
         }
         // Discovery: the whole width below row 16, because a card's plate extends to the right of
-        // its tag; `tags::scan` itself searches only the left 35% of the area.
+        // its tag; `tags::scan` itself searches only the left 35% of the area (`scan_img` adds the
+        // areas that find the presence card in the middle of the client).
         let area = Rect { x: 0, y: OVERLAY_TOP, w: cw, h: ch - OVERLAY_TOP };
         let view = View { id: 0, x: 0, y: OVERLAY_TOP as u16, w: cw.clamp(0, 65535) as u16, h: (ch - OVERLAY_TOP).clamp(0, 65535) as u16, font_px: 0, row_px: 0 };
         Some(vec![(area, vec![view])])
@@ -1036,11 +1055,20 @@ impl Pipeline {
         {
             // a linearized image reads 0 / 255 for the strip's black and white
             let white_black = if self.tone.is_identity() { self.scene.white_black() } else { None };
-            let areas: Vec<Rect> = views
+            let mut areas: Vec<Rect> = views
                 .iter()
                 .filter_map(|v| capture::clip(Rect { x: v.x.into(), y: v.y.into(), w: v.w.into(), h: v.h.into() }, info.client_w, info.client_h))
                 .collect();
+            // discovery (no VIEW): also the middle of the client, for the presence card
+            let discovery = views.len() == 1 && views[0].id == 0 && areas.len() == 1;
+            if discovery {
+                areas = discovery_areas(areas[0]);
+            }
             let st = reg.tagscan.scan(img, &areas, white_black, &mut hits);
+            if discovery {
+                let first = areas[0];
+                hits.retain(|h| keep_discovery_hit(h, first));
+            }
             self.perf.area_rows += u64::from(st.area_rows);
             self.perf.scanned_rows += u64::from(st.scanned_rows);
             self.perf.reused_bands += u64::from(st.reused_bands);
@@ -1060,11 +1088,8 @@ impl Pipeline {
         self.minute.hits += hits.len() as u64;
         let t_cards = Instant::now();
         self.perf.stages.add(Stage::Scan, t_cards - t_scan);
-        let now = self.now_ms();
-        // the ink of each chat lane searched in full (for the orphan memos)
-        let mut inks: Vec<Option<Vec<bool>>> = Vec::new();
-        let (cards, bgs, lanes, lane_at) = if hits.is_empty() {
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        let (cards, bgs) = if hits.is_empty() {
+            (Vec::new(), Vec::new())
         } else {
             let scene = &self.scene;
             let plate_expected = |slot: u8| scene.plate_expected(slot);
@@ -1077,153 +1102,33 @@ impl Pipeline {
             // same pixels give the same samples, so kept cards keep theirs. Samples that moved by
             // a few levels only keep the previous capture's value (a world moving behind a
             // translucent chat would republish the scene at every capture).
-            // Every card's hint lane (design A.6.4; every card since 2026-10-19): a window card's
-            // in its bubble fill, an inline card's on the chat line under its last row, searched
-            // in the same (linear) capture with the card's samples before they go back to display
-            // colours, and settled like them.
-            // A chat lane searched less than `lane::RESEARCH_MS` ago under rows that did not move
-            // keeps its rectangle and passing columns, with this capture's fill: the full search
-            // runs at most 10 times a second per card while the world moves behind a translucent
-            // chat (every capture changes then), like the covering test.
             let discovery = scene.discovery();
-            let same_as_before = kept && reg.prev_bgs.len() == cards.len() && reg.prev_lanes.len() == cards.len() && reg.prev_lane_at.len() == cards.len();
-            if same_as_before {
-                inks = vec![None; cards.len()];
-                (cards, reg.prev_bgs.clone(), reg.prev_lanes.clone(), reg.prev_lane_at.clone())
+            if kept && reg.prev_bgs.len() == cards.len() {
+                (cards, reg.prev_bgs.clone())
             } else {
-                let (mut bgs, mut lanes, mut lane_at) = (Vec::with_capacity(cards.len()), Vec::with_capacity(cards.len()), Vec::with_capacity(cards.len()));
+                let mut bgs = Vec::with_capacity(cards.len());
                 for c in &cards {
-                    let v = view_of(c);
-                    let view = v
+                    let view = view_of(c)
                         .map(|v| Rect { x: v.x.into(), y: v.y.into(), w: v.w.into(), h: v.h.into() })
                         .unwrap_or(Rect { x: img.origin_x, y: img.origin_y, w: img.width as i32, h: img.height as i32 });
                     let mut bg = backdrop::sample_card(img, c, view, discovery);
-                    let row_px = v.map_or(0.0, |v| f32::from(v.row_px));
-                    let k = scene.rows_expected(c.slot);
-                    // only where the addon draws a lane (its build, never the test rows)
-                    let kind = v.map_or(ViewKind::Chat, |v| ViewKind::of(v.id));
-                    let prev = reg
-                        .prev_cards
-                        .iter()
-                        .zip(reg.prev_bgs.iter().zip(reg.prev_lanes.iter().zip(&reg.prev_lane_at)))
-                        .find(|(p, _)| p.slot == c.slot && p.view_id == c.view_id);
-                    let same_rows = |p: &Card| {
-                        p.bands.len() == c.bands.len()
-                            && p.bands.iter().zip(&c.bands).all(|(a, b)| a.row == b.row && [a.text_rect.x, a.text_rect.y, a.text_rect.w, a.text_rect.h] == [b.text_rect.x, b.text_rect.y, b.text_rect.w, b.text_rect.h])
-                    };
-                    let recent = match prev {
-                        Some((p, (_, (Some(pl), at)))) if kind == ViewKind::Chat && pl.kind == LaneKind::Chat && same_rows(p) && now.saturating_sub(*at) < lane::RESEARCH_MS => Some((pl.clone(), *at)),
-                        _ => None,
-                    };
-                    let mut ink = None;
-                    let (mut lane, at, reused) = match recent {
-                        Some((l, at)) => (Some(l), at, true),
-                        None if !scene.lanes_for(c.slot, kind) => (None, now, false),
-                        None => (
-                            match kind {
-                                ViewKind::Window => lane::find_window_lane(img, c, k, row_px, view, &bg),
-                                ViewKind::Chat => lane::find_chat_lane_ink(img, c, k, row_px, view, &bg).map(|(l, i)| {
-                                    ink = Some(i);
-                                    l
-                                }),
-                            },
-                            now,
-                            false,
-                        ),
-                    };
                     if !self.tone.is_identity() {
                         bg.map_colors(|rgb| self.tone.display(rgb));
-                        if let (Some(l), false) = (lane.as_mut(), reused) {
-                            l.map_colors(|rgb| self.tone.display(rgb));
-                        }
                     }
-                    if let Some((p, (prev_bg, (prev_lane, _)))) = prev {
-                        if p.bands.len() == c.bands.len() {
-                            backdrop::settle(&mut bg, prev_bg);
-                        }
-                        if let (Some(l), Some(pl), false) = (lane.as_mut(), prev_lane, reused) {
-                            lane::settle(l, pl);
-                        }
-                    }
-                    // a kept lane takes this capture's (settled) background of the card's last row
-                    if let (Some(l), true) = (lane.as_mut(), reused) {
-                        if let Some(li) = c.bands.iter().enumerate().max_by_key(|(_, b)| b.row).map(|(i, _)| i) {
-                            l.fill = bg.band(li);
+                    if let Some(p) = reg.prev_cards.iter().zip(reg.prev_bgs.iter()).find(|(p, _)| p.slot == c.slot && p.view_id == c.view_id) {
+                        if p.0.bands.len() == c.bands.len() {
+                            backdrop::settle(&mut bg, p.1);
                         }
                     }
                     bgs.push(bg);
-                    lanes.push(lane);
-                    lane_at.push(at);
-                    inks.push(ink);
                 }
-                (cards, bgs, lanes, lane_at)
+                (cards, bgs)
             }
         };
-        let orphans = self.follow_lanes(reg, img, &views, &cards, &lanes, inks);
         self.perf.stages.add(Stage::Cards, t_cards.elapsed());
         reg.prev_cards = cards.clone();
         reg.prev_bgs = bgs.clone();
-        reg.prev_lanes = lanes.clone();
-        reg.prev_lane_at = lane_at;
-        reg.prev_orphans = orphans.clone();
-        RegionOut { cards, bgs, lanes, hits, orphans }
-    }
-
-    /// Remembers every chat lane found under its card in this region, then looks for the lanes
-    /// whose card is not here at the top of their chat (`lane::find_orphan_chat_lane`): the card's
-    /// rows have scrolled above the top while its lane still shows. Memos of another VIEW or not
-    /// found for `lane::ORPHAN_KEEP_MS` are dropped. Searched in the same (linear) capture as the
-    /// cards; the fill goes back to display colours and settles like a card's lane.
-    fn follow_lanes(&mut self, reg: &Region, img: &Bgra, views: &[View], cards: &[Card], lanes: &[Option<Lane>], inks: Vec<Option<Vec<bool>>>) -> Vec<FoundLane> {
-        let now = self.now_ms();
-        let rect_of = |v: &View| Rect { x: v.x.into(), y: v.y.into(), w: v.w.into(), h: v.h.into() };
-        for ((c, l), ink) in cards.iter().zip(lanes).zip(inks.into_iter().chain(std::iter::repeat(None))) {
-            let (Some(l), Some(v)) = (l, views.iter().find(|v| v.id == c.view_id)) else { continue };
-            if l.kind != LaneKind::Chat || v.id == 0 {
-                continue;
-            }
-            let key = (c.view_id, c.slot);
-            // a lane kept from an earlier search keeps the ink found then
-            let ink = ink.or_else(|| self.lane_memos.get(&key).filter(|m| rect4(&m.rect) == rect4(&l.rect)).map(|m| m.ink.clone())).unwrap_or_default();
-            if let Some(m) = ChatLaneMemo::of(c, l, ink, f32::from(v.row_px), rect_of(v), now) {
-                self.lane_memos.insert(key, m);
-            }
-        }
-        let mut out = Vec::new();
-        if self.lane_memos.is_empty() {
-            return out;
-        }
-        let mut keys: Vec<(u8, u8)> = self.lane_memos.keys().copied().filter(|(vid, _)| views.iter().any(|v| v.id == *vid)).collect();
-        keys.sort_unstable();
-        for key in keys {
-            let (vid, slot) = key;
-            let Some(v) = views.iter().find(|v| v.id == vid) else { continue };
-            let vr = rect_of(v);
-            if self.lane_memos.get(&key).is_some_and(|m| !m.same_view(vr)) {
-                self.lane_memos.remove(&key);
-                continue;
-            }
-            // its card is here (its lane is found under it, or hidden with its last row)
-            if cards.iter().any(|c| c.view_id == vid && c.slot == slot) || !self.scene.lanes_for(slot, ViewKind::Chat) {
-                continue;
-            }
-            let Some(memo) = self.lane_memos.get(&key) else { continue };
-            if let Some((mut l, whole)) = lane::find_orphan_chat_lane(img, memo, vr) {
-                if !self.tone.is_identity() {
-                    l.map_colors(|rgb| self.tone.display(rgb));
-                }
-                if let Some(p) = reg.prev_orphans.iter().find(|p| p.view_id == vid && p.slot == slot) {
-                    lane::settle(&mut l, &p.lane);
-                }
-                if let Some(m) = self.lane_memos.get_mut(&key) {
-                    m.rect = whole;
-                    m.at_ms = now;
-                }
-                out.push(FoundLane { view_id: vid, slot, lane: l });
-            }
-        }
-        self.lane_memos.retain(|_, m| now.saturating_sub(m.at_ms) <= lane::ORPHAN_KEEP_MS);
-        out
+        RegionOut { cards, bgs, hits }
     }
 
     /// Tag scan and cards of every region of one capture (`base`: the grabber index of the first
@@ -1234,7 +1139,7 @@ impl Pipeline {
             self.regions.resize_with(plan.len(), Region::default);
         }
         let mut seen: HashSet<(u8, u8, i32, i32)> = HashSet::new();
-        let (mut cards, mut bgs, mut lanes, mut hits, mut orphans) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut cards, mut bgs, mut hits) = (Vec::new(), Vec::new(), Vec::new());
         for (ri, (_, views)) in plan.into_iter().enumerate() {
             // Nothing left of the area after clipping: an empty image finds nothing.
             let empty = Bgra { px: &[], width: 0, height: 0, stride: 0, origin_x: 0, origin_y: 0 };
@@ -1242,9 +1147,7 @@ impl Pipeline {
             let out = self.scan_region(ri, &img, g.frame_number(), g.previous(base + ri), views, info, &mut seen);
             cards.extend(out.cards);
             bgs.extend(out.bgs);
-            lanes.extend(out.lanes);
             hits.extend(out.hits);
-            orphans.extend(out.orphans);
         }
         let t_diag = Instant::now();
         let now = self.now_ms();
@@ -1293,8 +1196,7 @@ impl Pipeline {
         self.minute.cards += cards.len() as u64;
         self.cards = cards;
         self.card_bgs = bgs;
-        self.card_lanes = lanes;
-        self.orphan_lanes = orphans;
+        self.presence_seen = self.scene.discovery() && hits.iter().any(|h| h.slot == PRESENCE_SLOT);
         self.hits = hits;
     }
 
@@ -1318,10 +1220,7 @@ impl Pipeline {
             if scene_changed || states != self.last_states {
                 let list: Vec<Value> =
                     s.views.iter().flat_map(|v| v.cards.iter()).zip(&states).map(|(sc, (st, clip))| card_json_clip(sc, st, *clip)).collect();
-                // orphan lanes (their card's rows above the top of the chat)
-                let lanes: Vec<Value> =
-                    s.views.iter().flat_map(|v| v.lanes.iter().map(move |l| json!({"view": v.id, "slot": l.slot, "lane": lane_json(&l.lane)}))).collect();
-                self.ctx.diag.emit(json!({"ev": "cards", "hidden": s.hidden.map(|h| h.name()), "fg": s.foreground, "cards": list, "lanes": lanes}));
+                self.ctx.diag.emit(json!({"ev": "cards", "hidden": s.hidden.map(|h| h.name()), "fg": s.foreground, "cards": list}));
                 self.last_states = states;
             }
         }
@@ -1515,64 +1414,15 @@ impl Pipeline {
                 wow::rect_fully_covered(target, ox + b.x, oy + b.y, b.w, b.h)
             }
         };
-        // A card's hint lane is painted opaque under its last row, outside the card's bounds: it
-        // gets its own test, and a covered lane is dropped (the card stays), so a window over the
-        // lane row alone is never painted over.
-        let found: Vec<FoundCard> = {
-            let cache = &mut self.cover_cache;
-            self.cards
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    let lane = self.card_lanes.get(i).cloned().flatten().filter(|l| {
-                        if skip_cover {
-                            return true;
-                        }
-                        let key = (c.view_id, c.slot, fg, true);
-                        let hidden = match cache.get(&key) {
-                            Some((t, v)) if t.elapsed() < Duration::from_millis(100) => *v,
-                            _ => {
-                                let v = rect_hidden(l.rect);
-                                cache.insert(key, (Instant::now(), v));
-                                v
-                            }
-                        };
-                        !hidden
-                    });
-                    FoundCard { card: c.clone(), bg: self.card_bgs.get(i).cloned().unwrap_or_default(), lane }
-                })
-                .collect()
-        };
-        // orphan lanes: the same test as a card's lane (a covered one is dropped)
-        let orphans: Vec<FoundLane> = {
-            let cache = &mut self.cover_cache;
-            self.orphan_lanes
-                .iter()
-                .filter(|o| {
-                    if skip_cover {
-                        return true;
-                    }
-                    let key = (o.view_id, o.slot, fg, true);
-                    let hidden = match cache.get(&key) {
-                        Some((t, v)) if t.elapsed() < Duration::from_millis(100) => *v,
-                        _ => {
-                            let v = rect_hidden(o.lane.rect);
-                            cache.insert(key, (Instant::now(), v));
-                            v
-                        }
-                    };
-                    !hidden
-                })
-                .cloned()
-                .collect()
-        };
+        let found: Vec<FoundCard> =
+            self.cards.iter().enumerate().map(|(i, c)| FoundCard { card: c.clone(), bg: self.card_bgs.get(i).cloned().unwrap_or_default() }).collect();
         let cache = &mut self.cover_cache;
         let mut covered_count = 0u64;
         let mut covered = |c: &Card| -> bool {
             if skip_cover {
                 return false;
             }
-            let key = (c.view_id, c.slot, fg, false);
+            let key = (c.view_id, c.slot, fg);
             if let Some((t, v)) = cache.get(&key) {
                 if t.elapsed() < Duration::from_millis(100) {
                     covered_count += u64::from(*v);
@@ -1586,7 +1436,7 @@ impl Pipeline {
         };
         let input = TickInput { now_ms: now, wow: Some(WowTick { geom, minimized: false, foreground: fg }), fresh };
         let hits = std::mem::take(&mut self.hits);
-        let s = self.scene.update_found_lanes(&input, found, orphans, &hits, &mut covered);
+        let s = self.scene.update_found(&input, found, &hits, &mut covered);
         self.hits = hits;
         if self.cover_cache.len() > 256 {
             self.cover_cache.clear();
@@ -1775,8 +1625,7 @@ impl Ui {
         if self.diag.enabled() {
             for r in reports {
                 self.diag.emit(json!({"ev": "overlay", "view": r.id, "shown": r.shown, "rect": r.rect, "window": r.window,
-                                      "px": r.px, "textPx": r.stats.text_px, "tagPx": r.stats.tag_px, "fillPx": r.stats.fill_px,
-                                      "lanePx": r.stats.lane_px}));
+                                      "px": r.px, "textPx": r.stats.text_px, "tagPx": r.stats.tag_px, "fillPx": r.stats.fill_px}));
             }
         }
         let want_anim = self.overlay.animating;
@@ -2172,6 +2021,8 @@ struct EndSession {
     stop: Arc<AtomicBool>,
     capture: Option<JoinHandle<()>>,
     engine: Option<Engine>,
+    /// The status file writer: it writes "stopped" first.
+    status: Option<StatusWriter>,
     log: Arc<Logger>,
     diag: Arc<DiagSink>,
     started: Instant,
@@ -2183,9 +2034,14 @@ static END_SESSION: Mutex<Option<EndSession>> = Mutex::new(None);
 /// between captures; a capture waits at most a few hundred ms for the GPU).
 const CAPTURE_JOIN_MS: u64 = 3000;
 
-/// Stops and joins the capture thread (never waiting more than `CAPTURE_JOIN_MS`), then shuts the
-/// engine down (kills llama-server, joins its threads within 2 s and deletes the key file).
+/// Writes "stopped" into the status files, stops and joins the capture thread (never waiting more
+/// than `CAPTURE_JOIN_MS`), then shuts the engine down (kills llama-server, joins its threads
+/// within 2 s and deletes the key file).
 fn stop_workers(es: EndSession) {
+    // "stopped" first: a few small file writes, done before anything that could take longer
+    if let Some(w) = es.status {
+        w.stop();
+    }
     es.stop.store(true, Ordering::Relaxed);
     if let Some(j) = es.capture {
         let t0 = Instant::now();
@@ -2333,8 +2189,7 @@ fn probe_scene() -> (Scene, (i32, i32), [i32; 4]) {
         kind: ViewKind::Chat,
         rect: Rect { x: 0, y: OVERLAY_TOP, w: cw, h: ch - OVERLAY_TOP },
         font_px: 14,
-        cards: vec![SceneCard { card, kind: CardKind::Test, covered: false, block_px: 6.0, bg: CardBg::default(), lane: None }],
-        lanes: Vec::new(),
+        cards: vec![SceneCard { card, kind: CardKind::Test, covered: false, block_px: 6.0, bg: CardBg::default() }],
     };
     let scene = Scene {
         wow: Some(WowGeom { hwnd: 0, origin_x: ox, origin_y: oy, client_w: cw, client_h: ch }),
@@ -2346,6 +2201,26 @@ fn probe_scene() -> (Scene, (i32, i32), [i32; 4]) {
     };
     let center = (ox + (8 + 368) / 2, oy + (20 + 58) / 2);
     (scene, center, [ox, oy + OVERLAY_TOP, cw, ch - OVERLAY_TOP])
+}
+
+/// Starts the status file writer: `--status-root` alone when given, else settings.json `wowRoot`,
+/// else the Battle.net agent's product.db. Its rounds are logged as counts (never a path): at Info
+/// when something changed, else at Debug.
+fn start_status_writer(cli: &Cli, settings: &Settings, log: Arc<Logger>) -> Option<StatusWriter> {
+    let wow_root = cli.status_root.clone().or_else(|| settings.wow_root_opt());
+    let cfg = WriterConfig {
+        product_db: if wow_root.is_some() { None } else { Some(crate::status_file::product_db_path()) },
+        wow_root,
+        version: VERSION.to_string(),
+        build: ADDON_BUILD,
+        heartbeat: crate::status_file::HEARTBEAT,
+        check: crate::status_file::CHECK,
+    };
+    let report = Arc::new(move |r: crate::status_file::Report| {
+        let level = if r.changed { Level::Info } else { Level::Debug };
+        log.app(level, AppEvent::StatusFile { state: r.state.name(), roots: r.roots, targets: r.targets, written: r.written, failed: r.failed, skipped: r.skipped });
+    });
+    StatusWriter::start(cfg, report)
 }
 
 /// Runs the Helper; returns the process exit code.
@@ -2537,8 +2412,11 @@ pub fn run(cli: Cli) -> i32 {
         }
     }
 
+    // the status file: "running" now and every 60 s, "stopped" on a clean exit (never for a test
+    // instance unless `--status-root` names its own folder, never for the overlay probe)
+    let status = if probe_mode || !cli.status_file_on() { None } else { start_status_writer(&cli, &settings, log.clone()) };
     if let Ok(mut g) = END_SESSION.lock() {
-        *g = Some(EndSession { stop: stop.clone(), capture: capture.take(), engine, log: log.clone(), diag: diag.clone(), started });
+        *g = Some(EndSession { stop: stop.clone(), capture: capture.take(), engine, status, log: log.clone(), diag: diag.clone(), started });
     }
 
     let mut code = ui.message_loop();
@@ -2602,12 +2480,12 @@ mod tests {
             covered: false,
             block_px: 5.0,
             bg: CardBg::default(),
-            lane: None,
         };
         let v = card_json(&sc, "done");
-        for k in ["slot", "req", "view", "bands", "maskPx", "alpha", "state", "covered", "reply", "clip", "bg", "lane"] {
+        for k in ["slot", "req", "view", "bands", "maskPx", "alpha", "state", "covered", "reply", "clip", "bg"] {
             assert!(v.get(k).is_some(), "{k}");
         }
+        assert!(v.get("lane").is_none(), "no hint lanes any more (2026-10-19, R1)");
         assert_eq!(v["reply"], false);
         assert_eq!(v["bg"], json!([[null, null], [null, null]]));
         assert_eq!(v["req"], 5);
@@ -2641,8 +2519,7 @@ mod tests {
     }
 
     #[test]
-    fn reply_card_record_carries_the_clipboard_outcome_and_the_lane() {
-        let lane = Lane::flat(Rect { x: 11, y: 548, w: 250, h: 16 }, [36, 30, 24], (0..250).map(|i| i < 200).collect());
+    fn reply_card_record_carries_the_clipboard_outcome() {
         let bg = CardBg {
             bands: vec![crate::backdrop::BandBg { left: Some(crate::backdrop::Sample { rgb: [36, 30, 24], x: 5 }), right: None }; 3],
             edges: Vec::new(),
@@ -2653,12 +2530,10 @@ mod tests {
             covered: false,
             block_px: 5.0,
             bg,
-            lane: Some(lane),
         };
         let v = card_json_clip(&sc, "done", Some("off"));
         assert_eq!(v["reply"], true);
         assert_eq!(v["clip"], "off");
-        assert_eq!(v["lane"], json!({"rect": [11, 548, 250, 16], "kind": "window", "rgb": [36, 30, 24], "rgbRight": null, "cols": 250, "pass": 200}));
         assert_eq!(v["bg"][2], json!([[36, 30, 24], null]), "a band's samples, borrowed from its neighbours when missing");
     }
 
@@ -2714,6 +2589,34 @@ mod tests {
         assert_eq!(capture_period_ms(true, true, true, 30), 33);
         assert_eq!(capture_period_ms(true, false, true, 30), BUSY_PERIOD_MS);
         assert_eq!(capture_period_ms(true, false, false, 30), IDLE_PERIOD_MS);
+    }
+
+    #[test]
+    fn discovery_also_searches_the_middle_of_the_client_for_the_presence_card() {
+        let area = Rect { x: 0, y: 16, w: 1920, h: 1064 };
+        let areas = discovery_areas(area);
+        let r4 = |r: Rect| [r.x, r.y, r.w, r.h];
+        assert_eq!(r4(areas[0]), r4(area), "the first area is the whole client, as before");
+        // every area reaches the right edge (a plate is never cut) and they chain without a hole
+        for w in areas.windows(2) {
+            assert_eq!(w[1].x + w[1].w, 1920);
+            assert_eq!((w[1].y, w[1].h), (16, 1064));
+            assert_eq!(w[1].x, search_end(w[0]) - DISCOVERY_OVERLAP);
+        }
+        let reach = search_end(*areas.last().unwrap());
+        assert!(reach >= (1920.0 * PRESENCE_REACH) as i32, "searched up to {reach}");
+        assert!(areas.len() <= 4, "{areas:?}");
+        // a popup centred on a 1920 px client: its tag (about 40% of the width) is searched
+        assert!(areas.iter().any(|a| (a.x..search_end(*a)).contains(&770)));
+        // other screens: a small client is one area, an ultrawide one still reaches 65%
+        assert_eq!(discovery_areas(Rect { x: 0, y: 16, w: 300, h: 200 }).len(), 1);
+        let wide = discovery_areas(Rect { x: 0, y: 16, w: 3440, h: 1424 });
+        assert!(search_end(*wide.last().unwrap()) >= 2236);
+        // only the presence card is kept from the extra areas: chat cards are found as before
+        let hit = |slot: u8, x0: i32| TagHit { slot, row: 0, sess_bit: 0, x0, x1: x0 + 47, y_top: 500, y_bot: 513, block_px: 5.5, pitch_px: 6.0, alpha: 1.0 };
+        assert!(keep_discovery_hit(&hit(3, 100), area) && keep_discovery_hit(&hit(PRESENCE_SLOT, 100), area));
+        assert!(keep_discovery_hit(&hit(PRESENCE_SLOT, 900), area));
+        assert!(!keep_discovery_hit(&hit(3, 900), area) && !keep_discovery_hit(&hit(126, 900), area));
     }
 
     #[test]

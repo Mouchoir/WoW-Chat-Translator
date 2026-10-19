@@ -102,8 +102,9 @@ fn exits_on_taskkill(tag: &str, extra: &[&str], want: &[&str], first: &str) {
     if status.is_none() {
         // never leave a process behind (amendment A5)
         let _ = child.kill();
-        let _ = child.wait();
     }
+    // reaped in every case (at once when it already exited)
+    let _ = child.wait();
     let log = std::fs::read_to_string(dir.join("logs").join("helper.log")).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(ready, "windows {wins:?}, wanted {want:?}");
@@ -126,4 +127,65 @@ fn taskkill_without_f_exits_cleanly_through_a_topmost_window() {
 #[test]
 fn taskkill_without_f_exits_cleanly_through_the_main_window() {
     exits_on_taskkill("main", &["--no-overlay"], &["TPHelperMain"], "TPHelperMain");
+}
+
+/// The status file (2026-10-19, user request R1): a Helper whose `--status-root` is a fake WoW
+/// folder under the test's temp folder writes "running" there at start and "stopped" when
+/// `taskkill` without /F stops it (the WM_CLOSE path); an addon whose TOC does not list the file
+/// gets nothing. The user's WoW folders are never touched (a test run writes only with
+/// `--status-root`).
+#[test]
+fn the_status_file_says_running_then_stopped_after_taskkill_without_f() {
+    let dir = temp_dir("status");
+    let root = dir.join("World of Warcraft");
+    let addon = |flavour: &str, lists: bool| -> PathBuf {
+        let d = root.join(flavour).join("Interface").join("AddOns").join("TranslateProbe");
+        std::fs::create_dir_all(&d).unwrap();
+        let toc = if lists { "## Interface: 16001\nCompanionStatus.lua\nCore.lua\n" } else { "## Interface: 16001\nCore.lua\n" };
+        std::fs::write(d.join("TranslateProbe.toc"), toc).unwrap();
+        if lists {
+            std::fs::write(d.join("CompanionStatus.lua"), "TranslateProbe_CompanionStatus = nil\n").unwrap();
+        }
+        d
+    };
+    let forever = addon("_classic_beta_", true);
+    let old = addon("_classic_", false);
+    let name = format!("exit-test-status-{}", std::process::id());
+    let root_arg = root.to_string_lossy().to_string();
+    let mut child = spawn(&name, &dir, &["--status-root", &root_arg]);
+    let pid = child.id();
+    let status_file = forever.join("CompanionStatus.lua");
+    let read = || std::fs::read_to_string(&status_file).unwrap_or_default();
+    let t0 = Instant::now();
+    while !read().contains(r#"state = "running""#) && t0.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let running = read();
+    // the toast window must exist before taskkill (its WM_CLOSE path is the one under test)
+    while !windows_of(pid).iter().any(|(w, _)| w == "TPHelperToast") && t0.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let sent = taskkill(pid);
+    let status = if sent { wait_exit(&mut child, Duration::from_secs(8)) } else { None };
+    if status.is_none() {
+        // never leave a process behind (amendment A5)
+        let _ = child.kill();
+    }
+    // reaped in every case (at once when it already exited)
+    let _ = child.wait();
+    let stopped = read();
+    let old_has = old.join("CompanionStatus.lua").exists();
+    let leftovers: Vec<String> = std::fs::read_dir(&forever).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    let log = std::fs::read_to_string(dir.join("logs").join("helper.log")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(running.contains(r#"TranslateProbe_CompanionStatus = { v = 1, version = "0.6.0", build = 6, state = "running", heartbeat = "#), "{running}");
+    assert!(sent, "taskkill refused");
+    assert_eq!(status.expect("the Helper did not exit within 8 s of taskkill without /F").code(), Some(0));
+    assert!(stopped.contains(r#"state = "stopped""#), "{stopped}");
+    assert!(!old_has, "an addon whose TOC does not list the file never gets it");
+    assert_eq!(leftovers.len(), 2, "the TOC and the status file only, no temporary file: {leftovers:?}");
+    // the log has counts, never a path
+    assert!(log.contains(r#"StatusFile { state: "running", roots: 1, targets: 1, written: 1, failed: 0, skipped: 0 }"#), "{log}");
+    assert!(log.contains(r#"StatusFile { state: "stopped", roots: 1, targets: 1, written: 1, failed: 0, skipped: 0 }"#), "{log}");
+    assert!(!log.contains("World of Warcraft") && !log.contains("tp_graceful_exit"), "no path in the log");
 }

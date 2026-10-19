@@ -83,6 +83,10 @@ pub enum AppEvent {
     TrayIcon { ok: bool },
     /// The tray's "Get updates": the releases page opened in the browser.
     TrayUpdates,
+    /// One round of the status file writer (`status_file`): the state written, the WoW roots looked
+    /// at, the addon folders found, the files written, the writes that failed and the folders
+    /// skipped as reparse points (a junction or a link). Never a path.
+    StatusFile { state: &'static str, roots: u32, targets: u32, written: u32, failed: u32, skipped: u32 },
     Exit { code: i32, uptime_s: u64 },
     Panic { line: u32 },
 }

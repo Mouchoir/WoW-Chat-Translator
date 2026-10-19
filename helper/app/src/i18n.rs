@@ -26,6 +26,7 @@ pub const USED_KEYS: &[&str] = &[
     "status.lowmem",
     "status.notinstalled",
     "status.overlay_ok",
+    "presence.detected",
     "reply.ready",
     "reply.ready_cut",
     "reply.same",
@@ -198,6 +199,9 @@ mod tests {
         assert_eq!(tr(Lang::En, "window.failed"), "Translation failed - Shift-click the bubble");
         assert_eq!(tr(Lang::Fr, "reply.ready"), "Prêt - Ctrl+V pour coller");
         assert_eq!(tr(Lang::En, "tray.copy_replies"), "Copy translated replies to the clipboard");
+        // the popup's presence card (2026-10-19, user request R1)
+        assert_eq!(tr(Lang::En, "presence.detected"), "Translate Companion detected");
+        assert_eq!(tr(Lang::Fr, "presence.detected"), "Translate Companion détecté");
     }
 
     #[test]

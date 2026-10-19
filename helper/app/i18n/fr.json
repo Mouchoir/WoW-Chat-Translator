@@ -10,6 +10,7 @@
   "status.lowmem": "Pas assez de mémoire libre pour le traducteur",
   "status.notinstalled": "Fichiers du traducteur introuvables - voir l'icône Translate Companion près de l'horloge",
   "status.overlay_ok": "Affichage OK (ligne {row}, bloc {block} px)",
+  "presence.detected": "Translate Companion détecté",
   "reply.ready": "Prêt - Ctrl+V pour coller",
   "reply.ready_cut": "Prêt - Ctrl+V pour coller (raccourci à 255 octets)",
   "reply.same": "Déjà en {language} - Ctrl+V pour coller",

@@ -19,10 +19,11 @@
 //! - "Not received" and "Translation failed" name the bubble or the Translate button instead of
 //!   [T].
 //!
-//! Hint lanes (2026-10-19, user request U1): the lane under every card (a window card's in its
-//! bubble fill, an inline card's on the chat line under its last row, `lane.rs`) is painted over
-//! while the card is painted, whatever its state, so the addon's "Translate Companion is not
-//! running" hint shows only when no Helper paints.
+//! Presence card (2026-10-19, user request R1): the one-row card of the addon's Translate
+//! Companion popup (slot 125) gets "Translate Companion detected" in green, from the tag's left
+//! edge like a window card, in any view (the addon's popup VIEW, or the discovery area of an app
+//! started while the popup is open). The hint lanes of 2026-10-19 (U1) are gone: the addon no
+//! longer draws them, so nothing is painted under a card's last row.
 //!
 //! Z-order (decision D12): with the game window in front, the overlay windows are topmost; when
 //! another window is in front, they sit right above the game window, so that window (and any
@@ -106,6 +107,9 @@ pub enum Content {
     /// A reply card: the status on row 0, the text wrapped into rows 1..K-1 (`rows` = K - 1).
     Reply { status: StatusLine, text: Option<String>, target: String, rows: usize },
 }
+
+/// The presence card's text colour: WoW's GREEN_FONT_COLOR, as the reply's "Ready".
+pub const PRESENCE_RGB: [u8; 3] = REPLY_GREEN;
 
 /// Engine status name for logs and `--diag-json`.
 pub fn status_name(s: &Status) -> &'static str {
@@ -198,6 +202,8 @@ pub fn card_content_in(sc: &SceneCard, status: Option<&Status>, reply: Option<&R
     let window = kind == ViewKind::Window;
     match &sc.kind {
         CardKind::Pending => Content::Empty,
+        // the player's language, like the other statuses without a request
+        CardKind::Presence => Content::Status { text: i18n::tr(fallback, "presence.detected").to_string(), tone: Tone::ReplyGreen, animated: false },
         CardKind::Missing if window && sc.card.slot == REPLY_SLOT => {
             Content::Status { text: i18n::tr(fallback, "reply.missing").to_string(), tone: Tone::ReplyRed, animated: false }
         }
@@ -330,26 +336,6 @@ impl LineDraw {
 fn no_replies() -> &'static HashMap<JobKey, ReplyBook> {
     static EMPTY: std::sync::OnceLock<HashMap<JobKey, ReplyBook>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
-}
-
-/// Paints the passing columns of a hint lane with its fill, opaque; returns the pixels painted.
-pub fn paint_lane(canvas: &mut Canvas, lane: &crate::lane::Lane) -> usize {
-    let colors = lane.colors();
-    let mut n = 0;
-    let mut x = 0usize;
-    while x < lane.cols.len() {
-        if !lane.cols[x] {
-            x += 1;
-            continue;
-        }
-        let start = x;
-        while x < lane.cols.len() && lane.cols[x] {
-            x += 1;
-        }
-        let r = Rect { x: lane.rect.x + start as i32, y: lane.rect.y, w: (x - start) as i32, h: lane.rect.h };
-        n += canvas.fill_cols(r, &colors[start..x]);
-    }
-    n
 }
 
 /// A card as it is drawn in a window view: each band's text starts at the tag's left edge + 2 px
@@ -531,8 +517,9 @@ impl OverlayManager {
         fallback: Lang,
         pulse_mul: f32,
     ) -> PaintStats {
-        // a window view draws its text from the tag on (the tag is painted over)
-        let window_copy = (view.kind == ViewKind::Window).then(|| window_card(&sc.card).0);
+        // a window view draws its text from the tag on (the tag is painted over); so does the
+        // presence card in any view (in discovery its view is the whole client, a "chat" view)
+        let window_copy = (view.kind == ViewKind::Window || sc.kind == CardKind::Presence).then(|| window_card(&sc.card).0);
         let card = window_copy.as_ref().unwrap_or(&sc.card);
         let (status, reply) = match &sc.kind {
             CardKind::Request { key, .. } => (results.get(key), replies.get(key)),
@@ -612,13 +599,7 @@ impl OverlayManager {
             })
             .collect();
         let texts: Vec<TextDraw> = covs.iter().map(|(l, cov, spans)| TextDraw { band: l.band, cov: cov.as_ref(), rgb: l.rgb, alpha_mul: l.mul, spans }).collect();
-        let mut st = paint_card(canvas, card, &sc.bg, &texts, self.diag_outlines);
-        // the card's hint lane: its passing columns get the bubble fill (flat) or the chat
-        // background (the gradient between its samples), opaque
-        if let Some(lane) = &sc.lane {
-            st.lane_px += paint_lane(canvas, lane);
-        }
-        st
+        paint_card(canvas, card, &sc.bg, &texts, self.diag_outlines)
     }
 
     /// Draws the scene (chat requests only, no reply state). Returns the views whose state
@@ -647,11 +628,6 @@ impl OverlayManager {
                     stats.tag_px += s.tag_px;
                     stats.fill_px += s.fill_px;
                     stats.text_px += s.text_px;
-                    stats.lane_px += s.lane_px;
-                }
-                // orphan chat lanes (their card's rows above the top of the chat)
-                for l in &view.lanes {
-                    stats.lane_px += paint_lane(&mut canvas, &l.lane);
                 }
                 let px = canvas.painted();
                 let r = view.rect;
@@ -764,7 +740,7 @@ mod tests {
     fn scene_with(cards: Vec<SceneCard>) -> Scene {
         Scene {
             wow: Some(WowGeom { hwnd: 1, origin_x: 0, origin_y: 0, client_w: 1920, client_h: 1080 }),
-            views: vec![SceneView { id: 0, kind: ViewKind::Chat, rect: Rect { x: 0, y: 16, w: 400, h: 1000 }, font_px: 14, cards, lanes: Vec::new() }],
+            views: vec![SceneView { id: 0, kind: ViewKind::Chat, rect: Rect { x: 0, y: 16, w: 400, h: 1000 }, font_px: 14, cards }],
             hidden: None,
             lang_target: None,
             gdi: false,
@@ -779,7 +755,6 @@ mod tests {
             covered: false,
             block_px: 5.0,
             bg: crate::backdrop::CardBg::default(),
-            lane: None,
         }
     }
 
@@ -1297,54 +1272,95 @@ mod tests {
         assert!((900..914).any(|y| (60..200).any(|x| is_text(&cb, x, y))));
     }
 
-    #[test]
-    fn the_lane_is_painted_on_passing_columns_only() {
-        let mut sc = reply_card();
-        let mut cols = vec![true; 250];
-        for c in cols.iter_mut().skip(200) {
-            *c = false;
+    /// Glyph pixels by colour in a rendered view (premultiplied BGRA, canvas 400 wide from y 16):
+    /// (green, light blue) counts in rows y0..y1.
+    fn colour_counts(bits: &[u8], y0: i32, y1: i32) -> (usize, usize) {
+        let (mut green, mut blue) = (0, 0);
+        for y in y0..y1 {
+            for x in 0..400 {
+                let i = (((y - 16) * 400 + x) * 4) as usize;
+                let (r, g, b) = (i32::from(bits[i + 2]), i32::from(bits[i + 1]), i32::from(bits[i]));
+                green += usize::from(g > 120 && g > r + 60 && g > b + 60);
+                blue += usize::from(b > 120 && b >= g && b > r + 30);
+            }
         }
-        sc.lane = Some(crate::lane::Lane::flat(Rect { x: 10, y: 948, w: 250, h: 16 }, [36, 30, 24], cols));
-        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
-        let reports = m.render(&window_scene(vec![sc]), &HashMap::new(), 1.0, Lang::En);
-        assert_eq!(reports[0].stats.lane_px, 200 * 16);
-        let bits = m.memory_pixels(200).unwrap();
-        let px = |x: i32, y: i32| {
-            let i = (((y - 16) * 400 + x) * 4) as usize;
-            ([bits[i + 2], bits[i + 1], bits[i]], bits[i + 3])
-        };
-        assert_eq!(px(15, 950), ([36, 30, 24], 255));
-        assert_eq!(px(209, 963), ([36, 30, 24], 255));
-        assert_eq!(px(210, 955).1, 0, "a failing column (under a tooltip) is left alone");
+        (green, blue)
     }
 
     #[test]
-    fn a_chat_lane_is_painted_with_the_background_gradient_whatever_the_card_state() {
-        use crate::backdrop::{BandBg, Sample};
-        use crate::lane::{Lane, LaneKind};
-        let fill = BandBg { left: Some(Sample { rgb: [20, 40, 60], x: 10 }), right: Some(Sample { rgb: [120, 40, 60], x: 260 }) };
-        let lane = Lane { rect: Rect { x: 10, y: 932, w: 251, h: 17 }, kind: LaneKind::Chat, fill, cols: vec![true; 251] };
-        // a chat card waiting (no status yet), "Not received" and done: the lane is painted in all
-        let mut done = HashMap::new();
-        done.insert(JobKey { session: 9, req_id: 1 }, Status::Done(ChatText::new("ok".into())));
-        let mut missing = req(3, 1, "fr");
-        missing.kind = CardKind::Missing;
-        for (sc, results) in [(req(3, 1, "fr"), HashMap::new()), (missing, HashMap::new()), (req(3, 1, "fr"), done)] {
-            let mut sc = sc;
-            sc.lane = Some(lane.clone());
+    fn the_presence_card_says_detected_in_green_from_the_tag() {
+        use crate::backdrop::{BandBg, CardBg, Sample};
+        // the popup's one-row card in its own window view, over a dark dialog background
+        let mut sc = req(125, 0, "en");
+        sc.card = card(125, 201, 900, 1, 1.0);
+        sc.kind = CardKind::Presence;
+        let ground = [20, 18, 16];
+        sc.bg = CardBg { bands: vec![BandBg { left: Some(Sample { rgb: ground, x: 4 }), right: Some(Sample { rgb: ground, x: 380 }) }], edges: Vec::new() };
+        assert_eq!(card_content_in(&sc, None, None, ViewKind::Window, Lang::En), Content::Status { text: "Translate Companion detected".into(), tone: Tone::ReplyGreen, animated: false });
+        assert_eq!(card_content_in(&sc, None, None, ViewKind::Chat, Lang::Fr), Content::Status { text: "Translate Companion détecté".into(), tone: Tone::ReplyGreen, animated: false });
+        // a request status never shows there (no engine status is looked up for it)
+        let mut results = HashMap::new();
+        results.insert(JobKey { session: 9, req_id: 0 }, Status::Failed(tp_engine::FailKind::Timeout));
+        for (id, kind) in [(201u8, ViewKind::Window), (0, ViewKind::Chat)] {
+            let mut s = scene_with(vec![sc.clone()]);
+            s.views[0].id = id;
+            s.views[0].kind = kind;
             let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
-            let reports = m.render(&scene_with(vec![sc]), &results, 1.0, Lang::En);
-            assert_eq!(reports[0].stats.lane_px, 251 * 17);
-            let bits = m.memory_pixels(0).unwrap();
+            let r = m.render(&s, &results, 1.0, Lang::En);
+            assert!(!m.animating, "a still status");
+            let bits = m.memory_pixels(id).unwrap();
+            let (green, blue) = colour_counts(&bits, 900, 914);
+            assert!(green > 30 && blue == 0, "view {id}: green {green}, blue {blue}, {r:?}");
+            // drawn from the tag's left edge (x 10..57 is the tag), like a window card
+            let from_tag = (900..914).any(|y| (13..56).any(|x| {
+                let i = (((y - 16) * 400 + x) * 4) as usize;
+                bits[i + 1] > 120 && bits[i + 1] > bits[i + 2].saturating_add(60)
+            }));
+            assert!(from_tag, "view {id}: text starts over the painted tag");
+            // the tag and the plate become the dialog's ground: no plate colour anywhere
             let px = |x: i32, y: i32| {
                 let i = (((y - 16) * 400 + x) * 4) as usize;
                 ([bits[i + 2], bits[i + 1], bits[i]], bits[i + 3])
             };
-            assert_eq!(px(10, 932), ([20, 40, 60], 255));
-            assert_eq!(px(135, 940), ([70, 40, 60], 255), "half way");
-            assert_eq!(px(260, 948), ([120, 40, 60], 255));
-            assert_eq!(px(261, 940).1, 0, "nothing right of the lane");
-            assert_eq!(px(100, 949).1, 0, "nothing under it");
+            assert_eq!(px(255, 905), (ground, 255), "plate end: the ground, opaque");
+            assert!((880..940).all(|y| (0..400).all(|x| px(x, y).0 != [32, 40, 64])), "no plate colour");
+            // nothing under the card (the addon's grey caption line, COMPANION_CARD_CAPTION)
+            assert!((916..960).all(|y| (0..400).all(|x| px(x, y).1 == 0)), "nothing painted below the card");
         }
+    }
+
+    #[test]
+    fn a_short_translation_in_a_tall_bubble_is_top_aligned_and_the_other_rows_are_fill() {
+        // D5 (2026-10-19): a bubble may reserve 2 or 3 rows for a one-line translation; the text
+        // goes to row 0 and the unused rows become the bubble fill, as the plate did before
+        use crate::backdrop::{BandBg, CardBg, Sample};
+        let fill = [36, 30, 24];
+        let mut sc = req(101, 1, "fr");
+        sc.card = card(101, 200, 900, 3, 1.0);
+        // the 2 px between the rows (cards::build reports them when both masks are set there)
+        sc.card.gaps = vec![Rect { x: 60, y: 914, w: 200, h: 2 }, Rect { x: 60, y: 930, w: 200, h: 2 }];
+        sc.kind = CardKind::Request { key: JobKey { session: 9, req_id: 1 }, rows: 3, target: "fr".into(), reply: false };
+        let b = BandBg { left: Some(Sample { rgb: fill, x: 4 }), right: Some(Sample { rgb: fill, x: 380 }) };
+        sc.bg = CardBg { bands: vec![b; 3], edges: Vec::new() };
+        let mut results = HashMap::new();
+        results.insert(JobKey { session: 9, req_id: 1 }, Status::Done(ChatText::new("Je cherche un enchanteur".into())));
+        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
+        m.render(&window_scene(vec![sc]), &results, 1.0, Lang::En);
+        let bits = m.memory_pixels(200).unwrap();
+        // rows at y 900, 916, 932 (14 px tall): text in row 0 only
+        assert!(colour_counts(&bits, 900, 914).1 > 20, "the line is in row 0");
+        assert_eq!(colour_counts(&bits, 916, 946).1, 0, "rows 1 and 2 hold no text");
+        let px = |x: i32, y: i32| {
+            let i = (((y - 16) * 400 + x) * 4) as usize;
+            ([bits[i + 2], bits[i + 1], bits[i]], bits[i + 3])
+        };
+        for y in [916, 925, 932, 945] {
+            for x in [20, 100, 250] {
+                assert_eq!(px(x, y), (fill, 255), "row fill at ({x}, {y})");
+            }
+        }
+        // the gaps between rows are filled too (no dark seam), and nothing under the last row
+        assert_eq!(px(150, 914), (fill, 255));
+        assert!((946..990).all(|y| (0..400).all(|x| px(x, y).1 == 0)), "the links bar under the card is never painted");
     }
 }

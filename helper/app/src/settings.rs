@@ -34,6 +34,10 @@ pub struct Settings {
     pub reply_clipboard: bool,
     /// Tray item "Sound when a reply is copied" (`MessageBeep(MB_OK)`, off by default).
     pub reply_sound: bool,
+    /// The WoW folder the status file goes to (`status_file`): a "World of Warcraft" folder or one
+    /// flavour folder. Empty: every "World of Warcraft" folder the Battle.net agent's product.db
+    /// names.
+    pub wow_root: String,
 }
 
 /// Default translation text colour (native look, 2026-10-18).
@@ -61,6 +65,7 @@ impl Default for Settings {
             log_level: "info".into(),
             reply_clipboard: true,
             reply_sound: false,
+            wow_root: String::new(),
         }
     }
 }
@@ -163,6 +168,10 @@ impl Settings {
     pub fn model_opt(&self) -> Option<PathBuf> {
         (!self.model.trim().is_empty()).then(|| PathBuf::from(self.model.trim()))
     }
+
+    pub fn wow_root_opt(&self) -> Option<PathBuf> {
+        (!self.wow_root.trim().is_empty()).then(|| PathBuf::from(self.wow_root.trim()))
+    }
 }
 
 /// "RRGGBB" (an optional leading '#' is accepted) to [R, G, B].
@@ -204,7 +213,7 @@ mod tests {
         let expected = serde_json::json!({"version":1,"backend":"auto","gpuMarginMb":1500,"cpuThreads":0,
             "idleUnloadMinutes":10,"keepLoaded":false,"capture":"auto","captureHzActive":30,"hideFromRecordings":false,
             "textColor":"A8D8FF","fontScale":1.0,"runtimeDir":"","model":"","logLevel":"info",
-            "replyClipboard":true,"replySound":false});
+            "replyClipboard":true,"replySound":false,"wowRoot":""});
         assert_eq!(v, expected);
     }
 
@@ -311,5 +320,11 @@ mod tests {
         assert_eq!(s.runtime_dir_opt(), None);
         s.runtime_dir = "  D:\\rt  ".into();
         assert_eq!(s.runtime_dir_opt(), Some(PathBuf::from("D:\\rt")));
+        assert_eq!(s.wow_root_opt(), None);
+        s.wow_root = "Z:/Jeux/Battle.net/World of Warcraft ".into();
+        assert_eq!(s.wow_root_opt(), Some(PathBuf::from("Z:/Jeux/Battle.net/World of Warcraft")));
+        // a settings file from before the status file gets the default (product.db)
+        let old: Settings = serde_json::from_str(r#"{"backend":"cpu"}"#).unwrap();
+        assert_eq!(old.wow_root_opt(), None);
     }
 }
