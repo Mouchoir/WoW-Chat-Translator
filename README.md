@@ -15,7 +15,8 @@ with or without Translate Companion.
 
 Download Translate Companion: https://github.com/Mouchoir/WoW-Chat-Translator/releases
 
-Status: development build (addon 0.6.0, protocol build 5; Translate Companion 0.5.0). See
+Status: development build (addon 0.7.0, protocol build 6; Translate Companion 0.6.0, use them
+together). See
 `docs\IN-GAME-CHECKS.md` for the checks that only the real client can make. Translate Companion was called TranslateProbe
 Helper (`TranslateProbeHelper.exe`) until 2026-10-19; the addon keeps its name, TranslateProbe.
 
@@ -30,13 +31,10 @@ Helper (`TranslateProbeHelper.exe`) until 2026-10-19; the addon keeps its name, 
   now, so it follows scrolling, fading and tab switches, and never paints over a tooltip or a menu.
   The tags and the dark plates are painted over with the chat background sampled next to them, so
   only the translation shows (the "native look"). Without Translate Companion the rows stay dark.
-- Nothing comes back into the game, so the addon cannot know whether Translate Companion runs.
-  Under every card that waits for it, the addon writes a gold hint 1.5 s after the click ("No
-  translation above? Start Translate Companion." and a `[Download]` link that opens a small dialog
-  with the download address, ready to copy). Translate Companion paints over that line whenever it
-  paints the card, so the hint shows only when it is not running. It also follows that line when
-  newer messages push the card's rows out of the top of the chat. In the conversation window a
-  bubble's hint hides while the window is dragged or resized and comes back 1.5 s after any move.
+- Before anything opens, the addon checks that Translate Companion is there (see "Is Translate
+  Companion running?" below). Without it, a `[T]` click opens only a small popup in the middle of the
+  screen that offers to start it or download it: no window, no rows, nothing in the chat. With it,
+  `[T]` opens the translation at once.
 - Translate Companion starts the translator on the first click (on the GPU when enough video
   memory is free, else on the CPU) and unloads it after 10 minutes without use.
 - The conversation window works the same way: each bubble carries tagged rows that Translate
@@ -47,6 +45,30 @@ Helper (`TranslateProbeHelper.exe`) until 2026-10-19; the addon keeps its name, 
 
 Design: `docs\DESIGN.md`. Components: `docs\ADDON.md`, `docs\BRIDGE.md`, `docs\ENGINE.md`,
 `docs\HELPER.md`.
+
+## Is Translate Companion running?
+
+Nothing comes back into the game while you play: an addon cannot read files, the network, the
+clipboard or the screen. The game only reads the addon's own files, at login and at every `/reload`.
+So the addon ships an empty `CompanionStatus.lua`, and Translate Companion writes into the copy in
+your AddOns folder (that one file, nothing else) when it starts, every minute while it runs, and
+"stopped" when you exit it. It finds the folder from the Battle.net launcher's list of games, or from
+`wowRoot` in its settings.
+
+- **Translate Companion started before the game, or before a `/reload`:** the addon reads "running"
+  and `[T]` opens the translation at once, with no popup.
+- **Not running, or never installed:** `[T]` opens only the popup: "Start it on your computer, then
+  click Continue", with `[Download]` (the download address, ready to copy) when it was never seen.
+  Cancel or Escape closes it and forgets the click.
+- **Started while the game runs (no `/reload` needed):** click `[T]`; the popup shows a dark strip,
+  and within about two seconds of Translate Companion starting it reads "Translate Companion
+  detected" in green (Translate Companion paints it, the way it paints translations). Click Continue:
+  the window opens with your click, and later `[T]` clicks act at once until you log out or
+  `/reload`. The popup's text and its `[Download]` button stay as they were when it opened: the
+  addon cannot learn by itself that Translate Companion started, only the green strip can show it.
+- **When `/reload` helps:** only to skip that one popup after starting Translate Companion
+  mid-session (the next `/reload` reads "running"). After a deploy or an update of the addon,
+  Translate Companion writes its file again within 5 seconds.
 
 ## The conversation window
 
@@ -97,19 +119,24 @@ Design: `docs\DESIGN.md`. Components: `docs\ADDON.md`, `docs\BRIDGE.md`, `docs\E
      `--model <file.gguf>`.
 5. Start the game (Windowed or Windowed (Fullscreen)), then `scripts\helper.ps1 -Run` (add
    `-Diag` for a diagnostics file). Translate Companion sits in the notification area; exit it
-   from its icon (`taskkill /IM WoWTranslateCompanion.exe` also closes it cleanly). It can be
-   started before or after a click, no `/reload` needed.
+   from its icon (`taskkill /IM WoWTranslateCompanion.exe` also closes it cleanly). Started before
+   the game (or before a `/reload`), `[T]` works at once; started later, the popup a `[T]` click
+   opens shows it as detected, and Continue goes on (see "Is Translate Companion running?").
 6. In game: `/tpr test`.
 
 ## Translate Companion
 
 **Starting it:** double-click `WoWTranslateCompanion.exe` (a development build is in
 `helper\app\target\release`). No console opens; a small icon appears in the notification area
-(its tooltip: "Translate Companion 0.5.0 - ready, translator not loaded"). It finds the translator
+(its tooltip: "Translate Companion 0.6.0 - ready, translator not loaded"). It finds the translator
 runtime from `runtimeDir` in `%APPDATA%\TranslateProbe\settings.json` (set it once; else the Ollama
-install) and the model in the Ollama store, so no argument is needed. Start it before or after
-WoW, before or after a click: no `/reload`. To stop it: its icon, Exit (a second copy refuses to
-start while one runs). In game, `/tpr app` prints the download address.
+install) and the model in the Ollama store, so no argument is needed. Start it before WoW and `[T]`
+works at once; started later, confirm it once in the popup (above). It writes its status into
+`Interface\AddOns\TranslateProbe\CompanionStatus.lua` of each WoW install that has the addon (from
+the Battle.net launcher's database, or `wowRoot` in the settings file for an install it does not
+know), never anywhere else, and never into a folder that is a link. To stop it: its icon, Exit (a
+second copy refuses to start while one runs). In game, `/tpr app` prints the download address and
+what the status file said.
 
 | Command | What it does |
 |---|---|
@@ -196,7 +223,9 @@ links or icons get no `[T]`.
   Win+V history and the cloud clipboard, and empties it again after the send only if it still holds
   its own text. Messages you receive are never copied.
 - Translate Companion's log and diagnostics files hold counters, sizes, timings and positions only,
-  never chat text, translations or names. Translations stay in memory.
+  never chat text, translations or names. Translations stay in memory. The status file it writes
+  into the addon folder holds its version, the protocol build, "running" or "stopped" and the time
+  of the last write, nothing else.
 - During a chat restriction (boss fights, rated content), lines that arrived unreadable are never
   read; afterwards one line offers to show them again, with a `[T]`.
 
@@ -212,13 +241,16 @@ links or icons get no `[T]`.
 
 | Symptom | What to do |
 |---|---|
-| The rows stay dark, with a gold "Start Translate Companion" line under them | Translate Companion is not running: start it (`/tpr app`, or `[Download]` for the link); check its tray icon; `/tpr test` should show a "bridge OK" message in the top-left corner |
-| The gold hint shows under a translation | something covers that line (a tooltip, a frame), or Translate Companion is older than the addon (it then shows "older than the TranslateProbe addon" once): update it ("Get updates" in its tray menu); over a very busy world behind a transparent chat a few columns may stay, report them (`docs\IN-GAME-CHECKS.md`, G19) |
+| `[T]` opens a "Translate Companion" popup | Translate Companion was not running when the game loaded the addon: start it (`[Download]` in the popup for the link), wait for the green "Translate Companion detected" on the popup's strip, then click Continue |
+| The popup's strip stays dark after starting Translate Companion | it is not running (check its tray icon), or the game is minimized, or it is older than 0.6.0 (it then shows "Not received - click the bubble" there and an "older than the TranslateProbe addon" toast): update it ("Get updates" in its tray menu) |
+| The popup shows although Translate Companion runs | it started after the game loaded the addon: wait for the green strip and click Continue, or `/reload` once; if it shows after a `/reload` too, its status file is not reaching the addon (`/tpr app` says what was read; set `wowRoot` in `%APPDATA%\TranslateProbe\settings.json` to your "World of Warcraft" folder) |
+| Coloured blocks and dark rows stay in a bubble ("Nothing painted?" on hover) | Translate Companion is not running or missed the strip: start it, then click the bubble; `/tpr test` should show a "bridge OK" message in the top-left corner |
+| A gold "Start Translate Companion" line under a translation | an addon older than 0.7.0 with Translate Companion 0.6.0 (it shows "the addon is older" once): update the addon |
 | "Not received - click [T] again" | Translate Companion started after the click, or missed the strip: click `[T]` again |
 | "Not received - click the bubble" (window) | the same in the conversation window: click the bubble |
 | "Ready (not copied...)" on a reply | the clipboard was refused in the dialog (`/tpr clip ask` asks again) or is off in Translate Companion's tray menu: type the translation shown, or allow the clipboard |
 | "Not copied - you copied something else" | you copied something after clicking Translate: Translate Companion left it alone; click Translate again |
-| No status line above a reply ("No status above? ...") | start or update Translate Companion (a version older than the addon cannot read replies) |
+| No status line above a reply | start or update Translate Companion (a version older than the addon cannot read replies), then click Translate again |
 | No "bridge OK" message | run the game in Windowed (Fullscreen) mode; try `scripts\helper.ps1 -Run --capture gdi`; with strong colour filters try `/tpr mode robust` |
 | "Translator files not found" | install Ollama and pull `hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M`, or start Translate Companion with `--runtime` and `--model` |
 | "Not enough free memory for the translator" | free some RAM (the CPU translator needs about 3.6 GB available) |
@@ -242,7 +274,8 @@ python -I tests\e2e\run.py --all --capture wgc
   simulation and the CRC Monte Carlo.
 - `tests\e2e` plays scripted scenarios in a stand-in game window and checks what Translate
   Companion finds and draws (`tests\e2e\README.md`), the conversation window's bubbles and reply
-  card included (scenario `conv`), and that it covers every hint lane while it paints the card.
+  card included (scenario `conv`), and the popup's status card, with Translate Companion running
+  before the popup (`presence`) or started while it shows (`presence_late`).
   Every automated run uses `--no-overlay --no-clipboard`: no window is shown and the clipboard is
   never touched.
 - `npm install` uses the lock file; everything else builds offline (`cargo --offline`).

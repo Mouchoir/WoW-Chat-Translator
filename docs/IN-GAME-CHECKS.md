@@ -1,4 +1,4 @@
-# In-game checks (G1-G20)
+# In-game checks (G1-G21)
 
 The automated suites (`docs\DESIGN.md`, section E) run without the game: the addon on a mock
 client, the bridge against reference vectors, and the Helper against a stand-in game window. What
@@ -9,8 +9,10 @@ builds before 0.4.0 were "TranslateProbe Helper", `TranslateProbeHelper.exe`), c
 Helper" below.
 
 G1-G10 cover the rows under a chat line (inline mode). G11-G18 cover the conversation window and
-replies (2026-10-19). G19 covers the hint lanes and the Translate Companion dialog (2026-10-19).
-G20 covers the links of a message: colour codes, the links bar, link colours (2026-10-19).
+replies (2026-10-19). G19 covered the hint lanes of addon builds 4 and 5 (gone since 0.7.0). G20
+covers the links of a message: colour codes, the links bar, link colours (2026-10-19). G21 covers
+Translate Companion's presence: its status file, the popup a [T] click opens without it, its
+"detected" card, and the compact bubbles (addon 0.7.0, protocol build 6, Translate Companion 0.6.0).
 The window design numbered its checks G9-G16; they follow the existing ones here, so code comments
 that say "G9" to "G16" for the window mean:
 
@@ -63,7 +65,7 @@ that say "G9" to "G16" for the window mean:
    (`hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M`). `WoWTranslateCompanion.exe --selftest` (in
    `helper\app\target\release`) prints what it finds without loading the model.
 5. **Start the game** in Windowed or Windowed (Fullscreen) mode, log in, and type `/tpr info`.
-   Expect the version of the build under test with `(build 4)` and `TransformMessages yes,
+   Expect the version of the build under test with `(build 6)` and `TransformMessages yes,
    FontStringContainer yes` for each chat frame. No Lua error.
    - **[T] opens the conversation window by default** since 2026-10-19 (Ctrl-click [T] draws the
      rows under the line). For G1-G10, type `/tpr display inline` first, and `/tpr display window`
@@ -83,15 +85,20 @@ that say "G9" to "G16" for the window mean:
    the Helper: right-click its icon, Exit, or `taskkill /IM WoWTranslateCompanion.exe` (no `/F`
    needed since Helper 0.2.0). A second copy refuses to start (exit code 2). A Helper older than
    the addon shows an "older than the addon" toast once per session (and the other way round):
-   addon build 4 draws a hint lane under every card (G19), which a Helper older than 0.4.0 does
-   not paint over (its gold hints would show under its translations: the toast says why), build 3
+   addon build 6 holds the popup's presence card (G21), which a Helper older than 0.6.0 takes for
+   an unknown bubble ("Not received - click the bubble" on the popup's strip after 1.5 s) and it
+   writes no status file, so update both together; Translate Companion 0.6.0 shows "the addon is
+   older" to an addon of build 3 to 5, whose gold hint lanes it no longer paints over; build 4 drew
+   a hint lane under every card, which a Helper older than 0.4.0 did not paint over, build 3
    sends replies (reply and copy flags), which a build-2 Helper drops, and build 2 sent up to 6
    rows, which an older Helper ignores.
 7. **Start Translate Companion by double-click** (no console needed): `WoWTranslateCompanion.exe`
    in `helper\app\target\release` (or wherever the release package puts it). It reads the
    translator runtime folder from `runtimeDir` in `%APPDATA%\TranslateProbe\settings.json` (set it
    once by hand; a `--runtime` argument wins over it), else the Ollama install; its icon appears in
-   the notification area, and its tooltip shows "Translate Companion 0.5.0" (0.4.0 before the links release).
+   the notification area, and its tooltip shows "Translate Companion 0.6.0" (0.5.0 before the presence release, 0.4.0 before the links release).
+   Since 0.6.0 it also writes `CompanionStatus.lua` into the deployed addon folder (G21): start it
+   before logging in, or click Continue in the popup a [T] click opens.
 
 ## G1 Bridge and capture
 
@@ -319,9 +326,9 @@ Type each line in the chat and copy the answers (a value, `nil`, or an error).
 2. **Expect:** every bubble's tags read (translations appear); the translated text in the
    Helper's light blue (#A8D8FF), on a seamless bubble fill (no dark slab, no square where the
    tag was); a bubble scrolled half out of the thread shows no half row, at the top and the
-   bottom; a tooltip over a bubble or over the reply card's lane is never painted over, nor an
-   always-on-top window (Task Manager with "Always on top") placed over the lane row only; the
-   window over a chat frame gives no double translation. The ChatBubble border tint looks right
+   bottom; a tooltip over a bubble or over the reply card is never painted over, nor an
+   always-on-top window (Task Manager with "Always on top") placed over a bubble's last row only;
+   the window over a chat frame gives no double translation. The ChatBubble border tint looks right
    by eye.
 3. **Popups and bubbles:** open the language popup ("DE v"), then right-click a bubble while it is
    open, then press Escape once. **Expect:** the first Escape closes only the popup, the second
@@ -381,7 +388,10 @@ Helper's clipboard writer runs outside the game. The whole flow is checked here.
 7. **Report:** each state seen (a screenshot of the green line and of the dialog), whether
    anything old was ever pasted, and the Win+V result.
 
-## G19 Hint lanes and the Translate Companion dialog (2026-10-19)
+## G19 Hint lanes and the Translate Companion dialog (2026-10-19; addon builds 4 and 5 only)
+
+**Removed in addon 0.7.0 (protocol build 6):** there is no hint lane and no [Download] link any
+more; G21 replaces this check. The steps below apply to builds 4 and 5 only.
 
 The addon cannot know whether the Helper runs: under every card it draws one more row, the lane,
 with a gold hint and a [Download] link, and the Helper paints that row over whenever it paints the
@@ -454,10 +464,10 @@ pin (Ctrl-click the map, then the pin's chat link), an achievement, a quest.
    bubble, its tooltip, the Original text, the glossary line); with Translate Companion the item's
    name is painted in its quality colour (a rare item in blue), the rest in the translation's light
    blue.
-3. **The links bar.** Under the bubble's rows and hint lane: one button per link, in the colours the
-   chat uses, in the order of the message. Without Translate Companion the gold hint shows above the
-   bar, not over it; with it, the bar stays visible and nothing is painted over it or left of the
-   lane. A message without links has no bar. A follow-mode-add (untranslated) bubble shows the bar
+3. **The links bar.** Right under the bubble's last row (since 0.7.0; under the hint lane before):
+   one button per link, in the colours the chat uses, in the order of the message. With Translate
+   Companion the bar stays visible and nothing is painted over it. A message without links has no
+   bar. A follow-mode-add (untranslated) bubble shows the bar
    under its Translate button.
 4. **Clicks on the bar**, each compared with the same click on the link in the chat:
    - left click on an item: its tooltip (the floating item card); on a spell: its tooltip; on a
@@ -511,6 +521,75 @@ pin (Ctrl-click the map, then the pin's chat link), an achievement, a quest.
     5). **Expect:** its "older than the addon" toast once, and the translations with plain link
     names: no "0070DD" or other colour digits before a name (the colours travel in COLOURS, which it
     ignores, `docs\BRIDGE.md` section 3b). Then start the current one again.
+
+## G21 Translate Companion presence and the popup (2026-10-19, addon 0.7.0, build 6)
+
+Translate Companion 0.6.0 writes its status into the deployed `CompanionStatus.lua` (start, every
+60 s, within 5 s of a deploy that put the addon's empty file back, "stopped" on a clean exit); the
+addon reads it at login and `/reload`. Without a confirmed
+Translate Companion a [T] click opens only a popup in the centre of the screen; the popup's dark
+strip turns into a green "Translate Companion detected" a moment after the exe starts, without a
+`/reload`. `docs\ADDON.md`, "Translate Companion presence", has the details. The AddOns folder below
+is the one of `scripts\dev.local.ps1`.
+
+1. **The file.** With Translate Companion 0.6.0 running, open
+   `<AddOns>\TranslateProbe\CompanionStatus.lua` in a text editor (read only): one line
+   `TranslateProbe_CompanionStatus = { v = 1, version = "0.6.0", build = 6, state = "running",
+   heartbeat = ... }` under its comment, and the heartbeat grows by about 60 a minute. Run `dev.cmd`:
+   the file keeps that line (a deploy never resets it). Copy the shipped file over it (step 3's
+   `Copy-Item`) while Translate Companion runs: within 5 s the line is back. Exit Translate Companion
+   from its icon: the line says `state = "stopped"`.
+2. **Started before the game.** Start Translate Companion, then log in (or `/reload`). `/tpr app`
+   ends with "Translate Companion 0.6.0 was running when the game loaded the addon." and "A [T] click
+   opens the translation at once in this session.". Click [T]: the window opens at once with the
+   translation; no popup, no chat line about Translate Companion. Ctrl-click: the rows under the line.
+3. **Never seen (absent).** Exit Translate Companion; put the shipped file back (`Copy-Item
+   addon\TranslateProbe\CompanionStatus.lua <AddOns>\TranslateProbe\ -Force`, with the game open is
+   fine) and `/reload`. Click [T] on a line. **Expect:** only the popup, centred: "Translate
+   Companion" and "Translate Companion is not installed or not running. Start it on your computer,
+   then click Continue. Not installed? Download it.", a dark strip with "Once Translate Companion
+   runs, it says so on the bar above." in grey under it, and [Continue] [Download] [Cancel]. No
+   conversation window, no rows under the line, nothing new in the chat, and a strip of coloured dots
+   flickers in the top-left corner about every 2 s while the popup shows. Walk with the movement keys
+   while it shows: they still work (it never takes the keyboard).
+   - Ctrl-click [T], Shift-click [T], the key binding "Show/hide the conversation window" and
+     `/tpr conv`: the same popup, nothing else.
+   - [Download]: the link `https://github.com/Mouchoir/WoW-Chat-Translator/releases` selected in a
+     box under the strip; Ctrl+C, paste it in a web browser: the releases page. Escape closes the
+     popup; so does [Cancel]; the click is forgotten (no window opens).
+   - In a fight (a training dummy): the popup opens on [T], [Download] shows the link without taking
+     the keyboard, movement and abilities keep working.
+4. **Installed but stopped.** Translate Companion exited from its icon (the file says stopped),
+   `/reload`, click [T]. **Expect:** "Translate Companion is installed but not running. Start it on
+   your computer, then click Continue." and [Continue] [Cancel] only.
+5. **Started after the popup (no /reload).** With the popup of step 3 or 4 open, start Translate
+   Companion (double-click). **Expect:** within about 2 to 3 s the dark strip shows "Translate
+   Companion detected" in green (in French on a French setup), the grey caption unchanged under it.
+   Click [Continue]: the window opens with the line and its translation. Later [T] clicks act at
+   once. **Report** the time from the double-click to the green line, and a screenshot of the popup
+   before and after. Do it twice: at your usual UI scale, and at another one (Options > Graphics, UI
+   Scale, for example the smallest, or "pixel perfect" with an addon that sets it): both times the
+   green text sits inside the strip from its left end and no darker band shows at the strip's left
+   (the E2E rig draws this popup with the addon's metrics at one scale only).
+   - Alt+Z while the popup is open (the whole UI hides), Alt+Z again, then [Continue]: the window
+     opens with the line you clicked (the click is kept while the UI is hidden).
+6. **Continue without Translate Companion.** Exit it, `/reload`, [T], then [Continue] without
+   starting it: the window opens with the bubble's colour tags and dark plate (nothing paints them);
+   hovering the bubble shows "Nothing painted? Translate Companion may be closed.".
+7. **A crash (stale heartbeat).** Start Translate Companion, end it with Task Manager (End task: no
+   clean exit, the file still says running), wait 3 minutes, `/reload`, [T]: the "installed" popup.
+   - A [T] on a line from before that `/reload`: the popup again, nothing in the chat; after
+     [Continue], one line "this line comes from before the last /reload".
+8. **Compact bubbles.** With Translate Companion, target French: click [T] on a short line with an
+   item or enchant link (like "Cherche [Encantamiento: Encantar arma 2M: impacto]"). **Expect:** 1
+   reserved row (2 at most), the translation in it, the links bar right under it with a small gap,
+   no empty dark band in the bubble, no gold text anywhere, the item name once in the bar (and once in
+   the painted translation, which is not clickable). A long German line: no empty row under its
+   translation beyond what the text needs (if a line is cut with "...", a click on the bubble asks
+   again with 6 rows). Inline (Ctrl-click): the rows under the line and nothing under them.
+9. **Report:** screenshots of the popup (absent, installed, detected) and of a compact bubble with a
+   links bar, the time of step 5, any chat line printed by TranslateProbe during steps 3 to 7, and any
+   Lua error.
 
 ## What to send back
 

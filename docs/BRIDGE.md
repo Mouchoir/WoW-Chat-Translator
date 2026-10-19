@@ -86,12 +86,14 @@ record = type u8, len u16, data; unknown types are skipped (0x02 = the v1 LAYOUT
 0x12 CLEAR      (empty)
 0x13 TEST       nonce u16
 0x14 VIEW       n u8 (0..4) | n x { id u8, x u16, y u16, w u16, h u16, fontPx u8, rowPx u8 }  (physical px, client origin)
-                ids 1..199: chat frames (GetID() % 256); ids 200..255: addon windows (200 = the conversation window)
+                ids 1..199: chat frames (GetID() % 256); ids 200..255: addon windows (200 = the conversation window,
+                201 = the Translate Companion popup's status card since addon build 6, section 8d)
 0x15 COLOURS    reqId u16 | n u8 (1..255) | n x { span u8, r u8, g u8, b u8 }  (span strictly increasing)
                 the link colours of the TRANSLATE with the same reqId, sent right before it (section 3b)
 0x01 STATUS     addonBuild 3 since 2026-10-19 (TRANSLATE reply and copy), 4 the same day (a hint
                 lane under every card, section 8c), 5 the same day (the link colours: COLOURS,
-                sections 3a and 3b)
+                sections 3a and 3b), 6 the same day (no hint lane any more; slot 125 is the
+                presence card of the Translate Companion popup, VIEW 201: section 8d)
 ```
 
 - 2026-10-18: TRANSLATE rows went from 1..4 to 1..6 (long German-to-French lines were cut); same
@@ -137,6 +139,18 @@ record = type u8, len u16, data; unknown types are skipped (0x02 = the v1 LAYOUT
     this change because it read build 1 in the code, but build 2 already shipped with rows 1..6
     on 2026-10-18 (`Core.lua`, `scene.rs`). Keeping 2 would leave a build-2 Helper dropping replies
     without a toast, so the build is 3 and the Helper accepts 2..3.
+- 2026-10-19, `STATUS.addonBuild` 6 (addon 0.7.0, Translate Companion 0.6.0), with no change of any
+  message's format: the addon draws no hint lane any more (sections 8c and "Hint lanes under inline
+  rows": builds 4 and 5 only), and slot 125, taken from the window bubbles (now 100..124), is the
+  one-row status card of the Translate Companion popup, shown with VIEW id 201 and never in a
+  TRANSLATE (section 8d). A Translate Companion of build 6 searches no lane and paints "Translate
+  Companion detected" over that card; one of build 5 shows its "older than the addon" toast and
+  takes slot 125 for an unknown bubble (the tag and the plate painted over at once, then "Not
+  received - click the bubble" after 1.5 s). A Translate Companion of build 6 serves only build 6
+  without a toast (`ADDON_BUILD_MIN` 6, integration review): builds 3 to 5 draw hint lanes it no
+  longer paints over, so it shows "the addon is older" to them. The parsers are unchanged
+  (TRANSLATE still accepts slots 0..126; the addon never sends 125), so no vector changed
+  (`tools\bridge` untouched).
 - Parsers are strict: a length that does not match exactly, a field out of range or invalid
   UTF-8 drops the message (`msg::ParseError`) and a counter is incremented.
 - Builders (`Bridge.TranslateMessage` etc.) write integers as given, clamped to the field width;
@@ -238,7 +252,8 @@ colours go in a message of their own:
   text is still read (section 3a), unless COLOURS gives that span another.
 - **Compatibility:** a build-5 addon with a build-4 Companion: COLOURS is dropped as an unknown
   type, the link names are painted plain as before, and the toast asks for the update; a build-4
-  addon with this Companion: no COLOURS, plain names, no toast (`ADDON_BUILD_MIN` 2).
+  addon with a build-5 Companion: no COLOURS, plain names, no toast (`ADDON_BUILD_MIN` was 2 until
+  build 6, which made it 6).
 
 ```
 TRANSLATE reqId 300, slot 101, rows 2, flags 2, "fr", "a " .. MarkSpan("[Fireball]", "71D5FF") .. " b", 0 pairs:
@@ -419,21 +434,21 @@ chat line. Rules the addon keeps and the Helper relies on:
   card's fill bottom; `fontPx` and `rowPx` from the window's text size and scale.
 - A row not entirely inside the visible thread has its tag and plate hidden (fill only): the
   Helper never sees a partly clipped window row.
-- The hint lane (the reply card's, and since addon build 4 every translated bubble's) is the band
-  `[row0.yTop + K * rowPx, + rowPx]` from the tag's x0 to the plate's end: flat fill with the
-  addon's gold hint and its [Download] button from the plate's x, clear of the lane's top and
-  bottom by 2 units and 2 physical px at least, which the Helper covers whenever it paints the
-  card. The addon draws a bubble's lane only while the bubble's last row and the lane are entirely
-  inside the visible thread, and not while the window is dragged or resized.
-- Slots: 0..99 chat, 100..125 window bubbles, 126 the reply, 127 TEST.
+- Builds 4 and 5 only: the hint lane (the reply card's, and every translated bubble's) was the band
+  `[row0.yTop + K * rowPx, + rowPx]` from the tag's x0 to the plate's end, flat fill with the
+  addon's gold hint and its [Download] button, which the Helper covered whenever it painted the
+  card. Since addon build 6 there is no lane: a bubble is its rows and its fill, and the reply card
+  ends `inset` (the border and the padding) under its last row.
+- Slots: 0..99 chat, 100..124 window bubbles (100..125 until build 5), 125 the presence card (section
+  8d), 126 the reply, 127 TEST.
 - The links bar (2026-10-19, user request L2; `docs\ADDON.md`, "Links of a message"): a bubble whose
-  message has hyperlinks shows them as buttons inside its fill, under the lane, from the tag's x0
-  to the plate's end, starting 4 units and 4 physical px at least under the lane's bottom (out of
-  the Helper's lane search, which tries the lane's place +-2 px), its lines `rowPx` apart. The rows,
-  tags, plates and the lane keep their places; only the bubble grows. VIEW 200 is unchanged (the
-  bar is inside the bubble column) and nothing of the bar is ever painted by the Helper.
+  message has hyperlinks shows them as buttons inside its fill, from the tag's x0 to the plate's
+  end, starting 4 units and 4 physical px at least under the last row's bottom (under the lane
+  until build 5), its lines `rowPx` apart. The rows, tags and plates keep their places; only the
+  bubble grows. VIEW 200 is unchanged (the bar is inside the bubble column) and nothing of the bar
+  is ever painted by the Helper.
 
-### Hint lanes under inline rows (addon build 4, 2026-10-19)
+### Hint lanes under inline rows (addon builds 4 and 5, 2026-10-19; removed in build 6)
 
 User request U1: the addon cannot learn whether the Helper runs, so every card that waits for it
 ends with a lane holding "No translation above? Start Translate Companion." and a [Download] link,
@@ -454,6 +469,36 @@ entry, right after the K tagged rows and before the glossary and name rows:
 - No tag of its own: the Helper finds it under the card's last row, or, once the card's rows have
   scrolled above the top of the chat, at the chat's top line where it follows it (orphan lanes,
   `docs\HELPER.md`, "Hint lanes"). The `/tpr test rows` card (slot 127) has no lane.
+
+## 8d. The presence card (Translate Companion popup, addon build 6, 2026-10-19)
+
+A [T] click without a confirmed Translate Companion opens only a popup (`docs\ADDON.md`,
+"Translate Companion presence"). The popup holds a status card the Helper confirms itself on, so the
+user sees that Translate Companion runs without a /reload:
+
+- **Slot 125** (`Bridge.PRESENCE_SLOT`), one row (row 0, the session bit), never in a TRANSLATE,
+  CANCEL or COLOURS. The Helper treats a tag of slot 125 that has no request, from an addon of
+  build 6 or later, as the presence card (`docs\HELPER.md`).
+- **Geometry**, as a bubble's rows (section 8c): an opaque `BUBBLE_RGB` fill (360 units of the
+  popup wide), `pad = max(6, ceil(4 / ppu))` units of fill above and under the row and right of the
+  plate (4 physical px at least), `left = max(pad, ceil((0.75 rowPx + 3) / ppu))` units of fill
+  left of the tag, the tag of 8 blocks of `W = max(2, ceil(5 / ppu))` units, then the `PLATE_RGB`
+  plate to `pad` before the fill's right edge. The row is `rowPx = round(14 ppu)` physical px high;
+  `ppu = effective scale * physH / 768`. The wider left fill holds the Helper's discovery sample
+  (up to 0.75 of the band height left of the tag, `backdrop::DISCOVERY_LEFT`), so a Helper that
+  finds the card before any VIEW 201 paints it over its own fill (integration review: with `pad`
+  alone it sampled the popup's background, a darker strip until the next VIEW).
+- **VIEW id 201**, listed first while the popup shows (then 200 when the window shows, then the chat
+  frames, 4 entries at most): the card's whole fill in physical px from the client's top-left,
+  `fontPx = round(12 ppu)`, `rowPx` as above. It goes out when the popup opens, again every 2 s
+  while it shows (a Helper started after the popup opened learns the view within about 2 s), after
+  a UI scale or display size change and when the popup grows; a VIEW without it goes out when the
+  popup closes (unless no rectangle is left: an empty VIEW is never sent).
+- **The Helper** paints the card like a window card (the tag and the plate become the fill) with
+  "Translate Companion detected" in green, whenever it sees the tag. The addon writes nothing on
+  the card: its own caption sits under the fill, outside the VIEW. A Helper of build 5 or older
+  takes the card for an unknown bubble ("Not received - click the bubble" after 1.5 s, and its
+  "older than the addon" toast).
 
 ## 9. Validation
 

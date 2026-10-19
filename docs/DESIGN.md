@@ -11,9 +11,11 @@ the Helper translates the reply and puts it in the clipboard, the player pastes 
 channel. Nothing leaves the PC, and the Helper never touches the game process: the addon and the
 Helper talk through pixels only.
 
-This file is the design as it was built (addon 0.6.0, protocol build 5; Translate Companion 0.5.0;
-section L for the hint lanes and the rename of 2026-10-19, section M for the links of a message and
-the tokens the model must copy, the same day). Sections I to L keep the numbers of their own dates.
+This file is the design as it was built (addon 0.7.0, protocol build 6; Translate Companion 0.6.0;
+section L for the hint lanes and the rename of 2026-10-19 (the lanes are gone since build 6),
+section M for the links of a message and the tokens the model must copy, section N for the
+Translate Companion presence check and the compact bubbles, all the same day). Sections I to M keep
+the numbers of their own dates.
 The detailed specs, the measurements
 behind them and every deviation from the original plan are in:
 
@@ -24,7 +26,7 @@ behind them and every deviation from the original plan are in:
 | `docs\ENGINE.md` | the translation engine: discovery, llama-server lifecycle, prompt, evaluations |
 | `docs\HELPER.md` | the Helper app: threads, capture, overlay, CLI, diagnostics, CPU measurements |
 | `tests\e2e\README.md` | the end-to-end rig (fakewow) and its checks |
-| `docs\IN-GAME-CHECKS.md` | what only the real client can show (G1-G19) |
+| `docs\IN-GAME-CHECKS.md` | what only the real client can show (G1-G21) |
 
 ---
 
@@ -149,8 +151,9 @@ Ollama store.
 |---|---|---|
 | Readable player line arrives | ` [T]` link after the line | nothing |
 | Click [T] | K reserved rows (tag and plate) under the line, then the glossary row (if `show on` and any match), then the romanized name row (if `names on`) | a status in the plate within about 100 ms ("Waiting (N ahead)...", "Starting the translator...", "Translating..."), then the translation |
-| Helper not running | rows stay dark; tooltips on [T] and rows name the Helper; 1.5 s after the click a gold hint line under the rows ("No translation above? Start Translate Companion. [Download]", section L); the first click ever prints FIRST_USE once per account | - |
-| Helper started after the click | same | "Not received - click [T] again" once a plate has been seen for 1.5 s without a request |
+| Helper not running when the addon loaded (status file absent, stopped or stale; section N) | a click opens only the centred Translate Companion popup: no rows, no window, nothing printed; Continue runs the click, Cancel or Escape drops it (until build 5: the rows and a gold hint lane, section L) | a green "Translate Companion detected" over the popup's status card while it runs |
+| Helper running when the addon loaded | rows at once | the statuses, then the translation |
+| Helper started after the click (after Continue) | rows stay dark | "Not received - click [T] again" once a plate has been seen for 1.5 s without a request |
 | Re-click [T] | rows unchanged; the same request is sent again (served from the cache; repairs a missed request) | same card |
 | Shift-click [T] | rows unchanged; new request with noCache | the card restarts |
 | Click a reserved row (the overlay is click-through) | rows removed, CANCEL sent | the card disappears |
@@ -189,8 +192,11 @@ Ollama store.
 Locales.lua      ns.L (English base, frFR override)
 ConvLocales.lua  the conversation window's strings and key binding names (en, frFR)
 ReplyLocales.lua the reply composer's strings (en, frFR)
+CompanionStatus.lua  TranslateProbe_CompanionStatus = nil; Translate Companion overwrites the deployed copy (section N)
 Core.lua         saved variables (whitelist purge, schema 4), session id, print helpers, inits under pcall
-Bridge.lua       strip encoder, message builders, tag and plate markup, ApplyTag, BUBBLE_RGB
+Presence.lua     the status file read at load (running, installed, absent), the session's confirmation, Presence.Ensure
+Bridge.lua       strip encoder, message builders, tag and plate markup, ApplyTag, BUBBLE_RGB, PRESENCE_SLOT
+Links.lua        12.x colour escapes and links of a message (section M)
 Glossary.lua     Describe, Extract, PromptText, VisibleText, PlainText, Romanize
 Lang.lua         TARGETS, NAMES, DefaultTarget, Script, TargetScript
 LangData.lua     trigram profiles (restored from 8b7750e)
@@ -204,6 +210,7 @@ Conversations.lua conversations, messages, following, closed tabs, memory bounds
 Bubble.lua       bubbles, the reply card, TranslateProbeConvFont
 Channels.lua     the reply's channel buttons, wire text, sending, echoes
 Consent.lua      the in-game clipboard consent dialog
+CompanionDialog.lua the Translate Companion popup and its status card (slot 125, VIEW 201)
 Composer.lua     the reply composer (states, paste detection, checks, reply TRANSLATE and CANCEL)
 ConvFrame.lua    the window: tabs, header, thread, slot manager, per-row visibility, VIEW 200, position
 Commands.lua     slash commands
@@ -237,8 +244,9 @@ Helper: capture -> strip decode -> reassemble -> TRANSLATE -> engine -> status /
   0.8, default 1.3). The width ratio is not rounded up first, so a short line reserves one row.
   The tag's row field has 2 bits: rows 4 and 5 carry 0 and 1 again, and the Helper numbers a
   card's rows on from its first visible tag.
-- **Slots** 0..99 for chat lines since 2026-10-19 (0..126 before; 100..125 are the window's
-  bubbles, 126 the reply, 127 the `/tpr test rows` slot) come from a free list. A slot is freed when
+- **Slots** 0..99 for chat lines since 2026-10-19 (0..126 before; 100..124 are the window's
+  bubbles (100..125 until build 5), 125 the Translate Companion popup's status card since build 6,
+  126 the reply, 127 the `/tpr test rows` slot) come from a free list. A slot is freed when
   its rows are removed, or by the read-only scan once its line has left every chat frame. The scan
   is a `TransformMessages` predicate that records our row links and always returns false, so no
   entry is ever repackaged (no new timestamp, no un-fade). It runs at most every 15 s from the
@@ -425,7 +433,9 @@ and `docs\ENGINE.md` section 1.
 
 `python -I tests\e2e\run.py --all --capture wgc` plays every scenario (basic, scroll, fade, cover,
 tabs, altz, dropped, late_start, gamma22, and since 2026-10-19 conv: a synthetic conversation
-window with three bubbles, a reply card and its lane) in fakewow, placed off every monitor, with
+window with three bubbles and a reply card; since build 6 presence and presence_late: the
+Translate Companion popup's status card, with the Helper running before it or started while it
+shows) in fakewow, placed off every monitor, with
 the Helper on the echo translator and `--no-overlay --no-clipboard` (no window is ever shown, the
 clipboard is never touched), then checks latency, band positions, hiding, masks, "Not received",
 completion and the Helper's CPU use, plus the window checks for conv. `--capture gdi`
@@ -443,8 +453,9 @@ See section I.
 
 `docs\IN-GAME-CHECKS.md` lists the setup (deploy, build and start the Helper) and the checks G1
 (bridge and capture) to G10 (native look) for inline mode, then G11 (client facts) to G18
-(clipboard end to end) for the conversation window and replies, and G19 (hint lanes and the
-Translate Companion dialog), with what to report.
+(clipboard end to end) for the conversation window and replies, G19 (hint lanes, builds 4 and 5
+only), G20 (links of a message) and G21 (Translate Companion presence, the popup and the compact
+bubbles), with what to report.
 
 ---
 
@@ -501,6 +512,8 @@ Each is recorded with its evidence in the component docs; the main ones:
   since 2026-10-19 a window layer (scenario `conv`) and the window checks.
 - **Conversation window** (2026-10-19): see section K.4.
 - **Hint lanes and Translate Companion** (2026-10-19): see section L.2.
+- **Links of a message** (2026-10-19): see section M.2.
+- **Translate Companion presence and compact bubbles** (2026-10-19): see section N.2 and N.3.
 
 ---
 
@@ -702,9 +715,9 @@ background", deviations 35-42), `tests\e2e\README.md` (scenario `conv`) and
   and then paints green "Ready - Ctrl+V to paste" ("Ready (not copied)" in amber otherwise). The
   player pastes into the box (the addon shows "Pasted"), the paste checks run, and a click on a
   channel button sends; CANCEL then lets the Helper empty the clipboard if it still holds its own
-  text. A hint lane under the card (now "No status above? Start Translate Companion." with a
-  [Download] button) is painted over by the Helper, so it shows exactly when no Helper paints;
-  since addon build 4 every card has one (section L).
+  text. From addon build 3 to 5 a hint lane under the card said "No status above? Start Translate
+  Companion." (section L); since build 6 the window opens only with a confirmed Translate
+  Companion (section N), and the card has no lane.
 - **Helper in the background (D12):** the overlay windows are topmost only with the game in front;
   otherwise they sit right above the game window, so other windows hide them pixel for pixel. The
   strip and the tags are read in the background too (5 Hz, 20 Hz while the strip is active), so a
@@ -718,7 +731,7 @@ background", deviations 35-42), `tests\e2e\README.md` (scenario `conv`) and
 
 | State | Bubble | Reply card |
 |---|---|---|
-| Helper not running | coloured tags and navy plates in the bubble, the original under it | tags, plates and the lane hint |
+| Helper not running | since build 6 the window opens only after the popup (section N); after Continue without the Helper: coloured tags and navy plates in the bubble, "Nothing painted?" on hover | tags and plates (the lane hint until build 5) |
 | Helper started late | "Not received - click the bubble" (each click asks again) | "Not received - click Translate again" |
 | Waiting, starting, translating | grey statuses | the same on row 0, stepper "2 Paste (Ctrl+V)" |
 | Done | the translation in light blue, or "Already in French" | green "Ready - Ctrl+V to paste" and the text |
@@ -728,7 +741,7 @@ background", deviations 35-42), `tests\e2e\README.md` (scenario `conv`) and
 | Pasted, warning | - | "Pasted" in green, or an orange warning and "click again to send" |
 | Sending, sent, not confirmed, offline, blocked | my bubble's meta line | - |
 | Chat locked | a banner | stepper in red with the manual path; send buttons greyed; the clipboard is kept |
-| Helper older than the addon | chat-style wording in bubbles | the reply is dropped ("Not received"), the lane hint and the "Helper is older" toast |
+| Helper older than the addon | chat-style wording in bubbles | the reply is dropped ("Not received") and the "Helper is older" toast |
 
 ### K.4 Deviations from the conversation design
 
@@ -841,6 +854,13 @@ those figures describe the sleeping display, not this build.
 ---
 
 ## L. Hint lanes and Translate Companion (2026-10-19, user requests U1-U3)
+
+**The hint lanes are removed since addon build 6 (addon 0.7.0, Translate Companion 0.6.0), the same
+day:** in game the lane cover failed under a bubble with a links bar, so the gold hint stayed under
+a painted translation. The not-running message is now the Translate Companion popup, opened by a
+[T] click before anything else (section N; `docs\ADDON.md`, "Translate Companion presence"). U2 and
+U3 (the name and the download link) stand. The rest of this section records the lanes as they were
+built for builds 4 and 5.
 
 Built in two work packages (addon, helper), reviewed twice (one review per side), then integrated.
 The component docs hold the details: `docs\ADDON.md` ("Hint lanes and the Translate Companion
@@ -1019,3 +1039,121 @@ fired, at most one llama-server at any second, none left.
 - A grep of the 50 diag, truth, report, fakewow and log files for the scenarios' chat words and
   sender names: 0 hits. run.py reported no leftover process.
 - No process started here is still running except the user's Translate Companion 0.5.0.
+
+## N. Translate Companion presence and compact bubbles (2026-10-19, user requests R1-R2)
+
+Built from the lead's design D1-D6 in two work packages (addon, companion), reviewed once per side,
+then integrated (2026-10-20). Versions: addon 0.7.0 (protocol build 6) and Translate Companion
+0.6.0, which go together. The component docs hold the details: `docs\ADDON.md` ("Translate
+Companion presence", decisions 74-90), `docs\HELPER.md` ("Status file", "Presence card", "Hint
+lanes (removed ...)", deviations 52-61), `docs\BRIDGE.md` (STATUS build 6, section 8d),
+`docs\ENGINE.md` (E1d), `tests\e2e\README.md` (scenarios `presence` and `presence_late`, the
+`presence` check) and `docs\IN-GAME-CHECKS.md` (G21).
+
+### N.1 User requests
+
+An in-game screenshot: Translate Companion ran and painted the translation, but the gold "Start
+Translate Companion. [Download]" stayed under the bubble (the lane cover failed under a bubble
+with a links bar), the bubble had big empty bands (3 reserved rows for a 1-row translation, the
+lane, the links bar) and the item name appeared twice.
+
+| # | Request | As built |
+|---|---|---|
+| R1 | Detect a running Translate Companion; never offer to start or download it while it runs | The status file (D1): the addon ships `CompanionStatus.lua` (`TranslateProbe_CompanionStatus = nil`, in the TOC before `Core.lua`); Translate Companion overwrites the deployed copy of that one file in every WoW flavour folder whose TOC lists it (product.db or settings `wowRoot`), atomically, with `{ v, version, build, state, heartbeat }`: at its start, every 60 s, within 5 s of a deploy that put the nil file back, and "stopped" on a clean exit. At `ADDON_LOADED`: "running" (state running, heartbeat within 150 s) confirms the session, and [T] acts at once: no popup, no start or download offer |
+| R1 | [T] without it: only a popup in the centre, no window, no chat line | `Presence.Ensure` in front of every way to a translation or the window ([T] plain, Ctrl, Shift, an old-session [T], a bubble's Translate and click, the reply's Translate, the key bindings, `/tpr conv`): unconfirmed, only the popup opens (D3 texts, [Continue] [Download] [Cancel], centred, Escape closes it, never the keyboard focus); Continue confirms the session and runs the click; Cancel and Escape drop it. Hint lanes, their timers and strings and the first-use chat line are gone (D4) |
+| R1 | A Translate Companion started later is detected, ideally without /reload | The popup's status card (one row of slot 125, VIEW 201): a running Translate Companion 0.6.0 paints "Translate Companion detected" in green over it (E2E: 104 ms after its start by its discovery scan, 210 ms through VIEW 201), and the user clicks Continue. The addon itself cannot learn it (below), so the popup's text and [Download] stay as they were when it opened |
+| R2 | The [Encantamiento] painted at the top is not clickable; keep the bottom one otherwise | Not possible: the painted name is pixels of Translate Companion's click-through overlay, a window of another process, and the addon never learns where it was painted. The clickable links bar under the bubble stays |
+| R2 | No big empty spaces | Compact bubbles (D5): no lane row, the links bar 4 units (4 px at least) under the last row, rows estimated from the bubble's own text width with link names counted as written and a Latin-to-Latin factor of 1.25 (E1d lengths, `tests\eval\out\e1d_lengths.json`); "Cherche [Encantamiento: Encantar arma 2M: impacto]" reserves 1 row at the in-game font width (2 in the mock), 3 before; the Companion paints from the first row down and fills unused rows with the bubble fill |
+
+**Why a Translate Companion started later still needs one click.** Data goes one way only while the
+game runs: from the addon to Translate Companion, as pixels. Addon Lua can read no file, socket,
+clipboard or pixel; the client reads the addon's own files at login and at `/reload` only, and the
+status file uses exactly that. So a Translate Companion running when the addon loads is detected
+with no popup at all; one started later cannot be known to the addon before the next `/reload`. The
+popup's card is the live proof (Translate Companion paints it, about a second after its start), and
+Continue is the user's confirmation; it lasts until logout or `/reload`. Best practice: start
+Translate Companion before the game, or `/reload` once after starting it.
+
+### N.2 Integration review findings
+
+| Finding (severity, review) | Status |
+|---|---|
+| Translate Companion 0.6.0 served addon builds 3 to 5 without a toast while their gold hint lanes, no longer painted over, stayed under every translation: the user's bug, unexplained (major, companion) | fixed: `ADDON_BUILD_MIN` 6, builds 1 to 5 get "the addon is older" once per session (HELPER.md deviation 58) |
+| The popup's `OnHide` dropped the waiting click when the whole UI hid (Alt+Z, a cinematic); Continue then ran nothing (minor, both) | fixed: an ancestor hide keeps the click, the Escape hold and the events; a harness case hides UIParent (ADDON.md decision 87) |
+| The docs said an older Translate Companion leaves the card unpainted; 0.5.0 shows "Not received - click the bubble" there and writes no status file (minor, both) | fixed in ADDON, BRIDGE, HELPER, IN-GAME-CHECKS and README; 0.6.0 restarted with addon 0.7.0 deployed |
+| README and DESIGN still described the gold hint lane and [Download] (minor, both) | fixed: README rewritten (versions, "Is Translate Companion running?", troubleshooting, tests); DESIGN A.10, C.1, C.3, E.2, F, H, K.2, K.3 updated, section L marked removed |
+| `harness_conv.lua` accepted slot 125 for a bubble (minor, addon) | fixed: `Reserve.WIN_FIRST..WIN_LAST` (decision 90) |
+| The card's 6-unit left fill was shorter than the discovery scan's left sample: a darker strip until the next VIEW 201 (minor, both) | fixed on the addon side: `left = max(pad, ceil((0.75 rowPx + 3) / ppu))` units (decision 89). E2E `presence_late`: discovery samples (36, 30, 24), the fill, against (18, 16, 14) in the package's run; check.py now judges them; `presence_card.rs` draws the addon's metrics at 1080p and fails with the old fill |
+| A Translate Companion started later: the popup still says "not installed or not running ... Download it" while its card turns green (minor, both) | kept: the texts are the lead's (D3) and the addon cannot learn the start; README ("Is Translate Companion running?") and section N.1 say so |
+| A [T] of a line from before the last `/reload` printed a chat line with no confirmed Translate Companion (minor, addon) | fixed: through `Presence.Ensure`, the notice after Continue (decision 88) |
+| The evidence for the 1.25 factor was not in the repo (minor, addon) | fixed: `evalprompt` keeps per-line lengths (counts only); E1d, `tests\eval\out\e1d_lengths.json` (ENGINE.md E1d, ADDON.md decision 79) |
+| The E2E popup is synthetic: the addon's real geometry and VIEW 201 never reached the Companion (minor, addon) | partly: the rig's left fill follows `CompanionDialog.DISCOVERY_LEFT`, `presence_card.rs` uses `CardMetrics` at 1080p with fractional px and VIEW 201 as the addon rounds it, G21 step 5 checks two UI scales in game; the rig still draws integer px at one size |
+| `write_atomic` followed links: a hard link at the `.tmp` name was written through, a junctioned addon folder made the Companion rewrite the repo's file (minor, companion) | fixed: the `.tmp` name removed then `create_new`, reparse points skipped and counted; tests with a hard link and a `mklink /J` junction in temp folders (deviation 59) |
+| The status file stayed nil up to 60 s after a deploy; a refused "stopped" left "running" for up to 150 s (minor, companion) | fixed: a check every 5 s writes over a file that is not the Companion's own; "stopped" retried for 2.5 s (deviation 60); measured live: the shipped file copied over the deployed one 20 s after a heartbeat was rewritten 0.3 s later |
+| Leftovers: the old caption in two comments, the testkit's lane truth, clippy `zombie_processes` in `graceful_exit.rs` (minor, companion) | fixed (the same warning in `window_pipeline.rs`, older, too) |
+
+### N.3 Integration results (2026-10-20)
+
+Same PC. The WoW client was not running during these runs (the user had stopped playing); window
+tests still ran off screen or at the bottom of the z-order with `--no-overlay --no-clipboard`, and
+every build and test used a target folder of its own except `scripts\helper.ps1 -Build`. The
+user's Translate Companion 0.5.0 was stopped with `taskkill` without /F (it exited in 0.3 s; no
+llama-server was running) before the release build. `scripts\dev.ps1` then deployed the addon (28
+files identical; `CompanionStatus.lua` copied as shipped, none existed), and Translate Companion
+0.6.0 was restarted detached: its log has Start 0.6.0, Settings loaded, the engine's Discovery,
+TrayIcon and `StatusFile { state: "running", roots: 1, targets: 1, written: 1, failed: 0, skipped:
+0 }`, and the `_classic_beta_` file says "running" with the heartbeat of its start; `WowFound` comes
+when the game starts. A second deploy kept that file byte for byte (`/XF`) and updated the rest.
+
+**Offline suites**
+
+| Command | Result |
+|---|---|
+| `npm test` (enUS, frFR, bridge) | enUS 789/789, frFR 789/789; bridge byte identity: 30 traces, 16,892 ticks, 1,066 frames, 1,024 tags, 62 builder vectors (+10 parser-only; 11 COLOURS), 12 marks, 29 API checks, all passed |
+| `node tests\run.js enUS --stub-bridge` / `frFR --stub-bridge` | 789/789 each |
+| `luacheck addon` | 0 warnings, 0 errors in 26 files |
+| `python -I tools\bridge\make_vectors.py <dir>` | 30 traces, 1,066 frames, 387 messages, 1,024 tags, 72 message vectors, 36 strips; the 34 generated files byte-identical to `tests\vectors` (no message changed) |
+| `cargo test --offline`, `helper\bridge` | 73 passed, 2 ignored; `--release -- --ignored`: 2 passed (200,000 corrupted captures, 0 undetected; at 1080p strip decode 12.8 us, view scan 325.5 us, cards 244.2 us) |
+| `cargo test --offline`, `helper\engine` | 114 + 5 passed, 3 ignored; `--ignored` (CPU, 4 threads, a 60 s watchdog that never acted): 3 passed, `real_server_cpu_smoke` server ready in 10.5 s, first result 15.5 s, the cached one at once, shutdown 168 ms |
+| `cargo test --offline`, `helper\app` | lib 160, clipprobe 4, graceful_exit 3, native_look 5, presence_card 2, sentinel 2, tagscan_equiv 5 passed (6 ignored); `--release -- --ignored`: window_pipeline 2/2, render 0.663 ms, candidates 0.116 ms, `sample_card` 396.1 us, discovery scan 0.663 ms (whole client) and 1.421 ms (with the presence areas) |
+| `cargo test --offline`, `helper\testkit` | 17 passed (the 2 lane truth tests went with the code) |
+| `cargo clippy --all-targets` (app, testkit, engine) | no warning in the changed code; older warnings elsewhere unchanged |
+| `scripts\helper.ps1 -Build` | `WoWTranslateCompanion.exe` 1,336,832 bytes; `--version` "Translate Companion 0.6.0" |
+| `python -I tests\e2e\check.py --selftest` (basic, cover, conv, scroll, late_start, presence, presence_late truths) | all pass: the perfect diag passes, the shifted one fails bands (cover: and masks), the broken window fails window_fill, a diag that takes slot 125 for an unknown slot fails presence |
+| E1d (`evalprompt`, CPU, `docs\ENGINE.md`) | every gate passes, per-line results identical to `out\report.json`; 10 servers each killed and seen exited, at most one at a time, none left; Latin to Latin 30+ characters: P90 1.387, max 1.421 |
+
+**End to end, echo translator, WGC, `--no-overlay --no-clipboard`**
+
+| Scenario | TRANSLATE P99 ms | band failures / checks | hidden | masks | missing | done | presence | CPU whole run % | CPU after 2 s % |
+|---|---|---|---|---|---|---|---|---|---|
+| basic | 184.8 | 0 / 3507 | pass | pass | pass (0) | 3/3 | - | 3.71 | 1.75 |
+| scroll | 88.0 | 0 / 3349 | pass | pass | pass (0) | 3/3 | - | 1.89 | 1.27 |
+| fade | 105.9 | 0 / 1317 | pass | pass | pass (0) | 2/2 | - | 2.64 | 1.67 |
+| cover | 107.6 | 0 / 3963 | pass | pass | pass (0) | 2/2 | - | 2.75 | 1.59 |
+| tabs | 108.6 | 0 / 1997 | pass | pass | pass (0) | 2/2 | - | 2.81 | 1.67 |
+| altz | 98.1 | 0 / 2768 | pass | pass | pass (0) | 2/2 | - | 2.81 | 1.40 |
+| dropped | 82.8 | 0 / 1365 | pass | pass | pass (1) | 2/2 | - | 3.52 | 1.86 |
+| late_start | 57.6 | 0 / 1668 | pass | pass | pass (3) | 1/1 | - | 3.15 | 1.30 |
+| gamma22 | 101.7 | 0 / 3513 | pass | pass | pass (0) | 3/3 | - | 2.40 | 1.24 |
+| conv | 121.0 | 0 / 3009 | pass | pass | pass (0) | 4/4 | - | 4.03 | 2.25 |
+| presence | 45.3 | 0 / 593 | pass | pass | pass (0) | 1/1 | pass: 209.8 ms, VIEW 201 | 3.25 | 1.40 |
+| presence_late | 96.1 | 0 / 505 | pass | pass | pass (0) | 1/1 | pass: 104.1 ms, discovery, samples (36, 30, 24) | 3.51 | 1.32 |
+
+- Every functional check passes in all 12 scenarios (conv: window_fill, reply_status,
+  partial_rows, no_duplicate too). The CPU rule (3% of one core over the whole run) fails in 6 of
+  12 (3.15 to 4.03%; 1.24 to 2.25% after the first 2 s), as in every run on this machine; conv
+  also fails `cpu_vs_i2`. A 25 s release build of `evalprompt` overlapped the first scenarios.
+- A grep of the 60 diag, truth, report, fakewow and log files for the words of the scenarios'
+  player lines and their senders (24 words, from the recordings): 0 hits. run.py reported no
+  leftover process.
+
+### N.4 In-game steps (G21 has the full list)
+
+1. `/reload` with Translate Companion 0.6.0 running (it is): the status file is read at load, so
+   [T] opens the conversation window at once, with no popup.
+2. Exit Translate Companion from its icon, `/reload`, click [T]: only the popup in the middle of the
+   screen ("installed but not running"), nothing in the chat, no window.
+3. With the popup open, start Translate Companion: within about two seconds the dark strip reads
+   "Translate Companion detected" in green; Continue opens the window with the line.
+4. A line like "Cherche [Encantamiento: Encantar arma 2M: impacto]": a compact bubble, one row
+   (two at most) of translation, the links bar right under it, no gold hint anywhere.

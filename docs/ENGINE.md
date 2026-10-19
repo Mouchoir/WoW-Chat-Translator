@@ -299,7 +299,7 @@ From `helper\engine`:
 |---|---|
 | `cargo test --offline` | 111 unit tests in the library (2 ignored: the child process of the job-object test, and `selftest_on_this_machine`, which may run `llama-server --help`), 5 in `evalprompt`, 1 ignored integration test |
 | `cargo test --offline --test real_server -- --ignored --nocapture` (env `TPROBE_LLAMA_RUNTIME`) | the public Engine API against the real llama-server on CPU, 60 s watchdog; since 2026-10-19 the synthetic line holds a coloured link and a synthetic ID, which must come back as a coloured mark and exactly as written (2026-10-19: first result after 13.9 s including the load, WoW running) |
-| `cargo run --offline --release --bin evalprompt -- --runtime %TPROBE_LLAMA_RUNTIME% --cpu --threads 4 --out ..\..\tests\eval\out\report.json` | E1 with the shipped tuning, E1b and E1c lines included (`--tuning v0`, `v1+v3+v4`... for the others; `--samples ..\..\tests\eval\echo_samples.tsv` for the echo set) |
+| `cargo run --offline --release --bin evalprompt -- --runtime %TPROBE_LLAMA_RUNTIME% --cpu --threads 4 --out ..\..\tests\eval\out\report.json` | E1 with the shipped tuning, E1b and E1c lines included (`--tuning v0`, `v1+v3+v4`... for the others; `--samples ..\..\tests\eval\echo_samples.tsv` for the echo set); since E1d every `done` line also has its lengths outside the protected spans |
 
 Unit tests cover: prompt goldens per target, variant and style, with and without glossary, and
 the insist block; the glossary policy table; protect and restore (nesting, more than 9 spans,
@@ -332,7 +332,7 @@ of the waiting ones, in order, never dropped first by an overload, moving a shar
 both corpora, check the expectation grammar, and check that every pair the corpora mark
 must-use or keep-allowed is classified the same way by `prompt::keep_allowed`.
 
-## 10. E1, E1b and E1c evaluations
+## 10. E1, E1b, E1c and E1d evaluations
 
 ### E1 (2026-10-16, P3)
 
@@ -511,6 +511,30 @@ per-second process count, none left; WoW running).
   en09, first pass en07.
 - Unit tests hold the shapes the probe found (`verbatim::tests::other_languages_shorthand_stays_plain`,
   `chat_words_joined_by_a_dot_are_not_domains`, `full_width_ids_and_urls`).
+
+### E1d (2026-10-20, integration of the compact bubbles): output lengths
+
+The addon's bubble row factor for Latin to Latin (1.25, `docs\ADDON.md` decision 79) needed output
+lengths, which no report kept. `evalprompt` now records, for every `done` line, the characters of
+the source and of the shown output outside the protected spans (item names, `{...}` groups, IDs,
+URLs; spaces collapsed) and their ratio, with the script pair (`pair`, `inChars`, `outChars`,
+`lengthRatio` per line; `lengths`: lines, mean, median, P75, P90 and max per pair, and per pair
+for the lines of 30 characters or more). Counts only: no text reaches the report.
+`out\e1d_lengths.json`: the shipped tuning, CPU, 4 threads, 10 servers each killed and seen
+exited, the watchdog never fired, none left, 168 s; every gate passes with the per-line results
+of `out\report.json` (script 54/54, items 23/23, must-use 10/10, verbatim 15/15, free 4/4, wrong
+Same 0).
+
+| Pair | Lines | Median | P75 | P90 | Max |
+|---|---|---|---|---|---|
+| Latin to Latin | 37 | 1.167 | 1.308 | 1.778 | 2.5 |
+| Latin to Latin, 30 characters or more | 22 | 1.063 | 1.297 | 1.387 | 1.421 |
+| Cyrillic to Latin | 4 | 1.273 | 1.351 | 1.48 | 1.48 |
+| Han to Latin | 5 | 4.417 | 4.926 | 4.962 | 4.962 |
+
+The short Latin lines run higher (an abbreviation spelled out by the must-use glossary) but give
+35 characters out at most, one bubble row. The other pairs have 1 to 5 lines each: too few to
+change their factors.
 
 ## 11. Deviations from the design and decisions
 
