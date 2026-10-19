@@ -3,7 +3,9 @@
     python -I tests/e2e/check.py --truth T --diag D --report R [--captures 2] [--px 2]
                                  [--helper-cpu-pct X] [--done-within-s 5]
     python -I tests/e2e/check.py --synth-diag OUT --truth T [--shift-px N]
-    python -I tests/e2e/check.py --selftest --truth T
+    python -I tests/e2e/check.py --selftest --truth T   (a conv truth also checks the window checks:
+                                                         a perfect synthetic diag passes them, a
+                                                         broken one fails window_fill)
 
 Exit code 0 when every check passes, 1 otherwise (2 on bad input).
 
@@ -29,6 +31,24 @@ Checks (design section E, P6 step 2):
 - cpu: the Helper used at most 3% of one core (when --helper-cpu-pct is given). The report also
   gives steady_pct_one_core, the same figure without the first 2 s (informational, not judged).
 
+Conversation window (scenario conv; only when the truth has `layers`, design B.4 E2E): the
+window's visible rows are plates of VIEW 200 in the truth, so latency, bands, hidden and done
+apply to them too, and:
+- window_fill: every background sample of a window card (the colour the overlay paints the tags
+  and plates with) is within 6 levels of BUBBLE_RGB, every window card has at least one sample
+  (a card with none is painted with the navy plate colour: the seam this check is for), and tags
+  were painted in VIEW 200;
+- reply_status: the reply card (reply bit) reaches a final state with the clipboard outcome
+  "off" ("not copied - off in the Helper menu": every E2E run uses --no-clipboard), and the
+  Helper's clip records never say it copied;
+- lane: the reply card's hint lane is found where the truth has it (+-2 px) with at least 60% of
+  its columns passing, and painted (lanePx > 0);
+- partial_rows: while a bubble is scrolled half out, its hidden rows never get a band and its
+  visible rows do;
+- no_duplicate: no capture shows two cards of one slot, and no window slot shows in a chat view;
+- cpu_vs_i2: the CPU figures are within 10% of the highest of DESIGN.md I.2 (3.55% whole run,
+  1.96% after the first 2 s).
+
 Neither file holds chat text: only rectangles, ids, states and times (Unix epoch ms).
 """
 import argparse
@@ -44,6 +64,16 @@ LATENCY_P99_MS = 300.0
 TAG_ROWS = 4
 CPU_MAX_PCT = 3.0
 FINISHED = {"done", "same", "nothing"}
+# Conversation window (docs\BRIDGE.md section 8c)
+BUBBLE_RGB = (36, 30, 24)
+PLATE_RGB = (32, 40, 64)
+REPLY_SLOT = 126
+WINDOW_VIEW_MIN = 200
+FILL_TOL = 6
+LANE_SHARE = 0.6
+# DESIGN.md I.2: the highest CPU figures of the 9 echo scenarios (whole run, after the first 2 s)
+I2_CPU_WHOLE = 3.55
+I2_CPU_STEADY = 1.96
 
 
 def load_jsonl(path):
@@ -115,6 +145,7 @@ class Truth:
         self.times = [s[0] for s in self.states]
         self.sent = [e for e in events if e.get("ev") == "sent"]
         self.dropped = [e for e in events if e.get("ev") == "dropped"]
+        self.layers = [e for e in events if e.get("ev") == "layers"]
         self.end = next((e for e in events if e.get("ev") == "end"), None)
         # captures are compared with the truth only while fakewow was playing
         self.until = self.end["t"] if self.end else (self.states[-1][0] if self.states else math.inf)
@@ -154,9 +185,13 @@ class Diag:
         self.msgs = [e for e in events if e.get("ev") == "msg"]
         self.engine = [e for e in events if e.get("ev") == "engine"]
         self.perf = [e for e in events if e.get("ev") == "perf"]
+        self.overlay = [e for e in events if e.get("ev") == "overlay"]
+        self.clips = [e for e in events if e.get("ev") == "clip"]
         self.first_capture = self.all_captures[0] if self.all_captures else None
         self.views = [(e["t"], {v[0] for v in e.get("views", [])}) for e in self.msgs if e.get("kind") == "view"]
         self.views_t = [v[0] for v in self.views]
+        # the full VIEW rectangles: (t, [[id, x, y, w, h, fontPx, rowPx], ...])
+        self.view_rects = [(e["t"], e.get("views", [])) for e in self.msgs if e.get("kind") == "view" and e.get("views")]
 
     def next_capture(self, t):
         k = bisect.bisect_right(self.all_captures, t)
@@ -404,6 +439,125 @@ def steady_cpu_pct(diag, cpu_pct):
     return round(cpu_pct * (cyc_late / cyc) * (wall / wall_late), 2)
 
 
+def window_cards(diag):
+    """(t, card) of every card shown in a window view (VIEW id >= 200)."""
+    return [(e["t"], c) for e in diag.cards_ev for c in e.get("cards", []) if c.get("view", 0) >= WINDOW_VIEW_MIN]
+
+
+def records_in_effect(diag, t0, t1):
+    """The cards records whose time in effect (until the next record) meets [t0, t1)."""
+    out = []
+    for k, e in enumerate(diag.cards_ev):
+        nxt = diag.cards_ev[k + 1]["t"] if k + 1 < len(diag.cards_ev) else math.inf
+        if e["t"] < t1 and nxt > t0:
+            out.append(e)
+    return out
+
+
+def window_view_holds(diag, t, tag):
+    """True when a VIEW with a window view holding the tag rectangle was in use for the capture
+    of the cards record at t: decoded before a capture that came before t (a capture plans its
+    regions before it decodes the strip, so the tick that decodes a VIEW still scans with the
+    previous one)."""
+    rects = None
+    for vt, vs in diag.view_rects:
+        if vt <= t and diag.next_capture(vt) < t:
+            rects = vs
+    return any(v[0] >= WINDOW_VIEW_MIN and v[1] <= tag[0] < v[1] + v[3] and v[2] <= tag[1] < v[2] + v[4] for v in rects or [])
+
+
+def layer_meta(e):
+    """The meta data of the window layer(s) of a truth `layers` event."""
+    return [it.get("meta") or {} for it in e.get("items", [])]
+
+
+def check_window(truth, diag, rep, cpu_pct):
+    wcards = window_cards(diag)
+    # fill: the samples the overlay paints the window's tags and plates with; a card with no
+    # sample at all is painted with the plate colour, so it fails too
+    samples, off, unsampled = 0, [], []
+    for t, c in wcards:
+        mine = 0
+        for i, pair in enumerate(c.get("bg") or []):
+            for s in pair or []:
+                if s is None:
+                    continue
+                samples += 1
+                mine += 1
+                d = max(abs(s[k] - BUBBLE_RGB[k]) for k in range(3))
+                if d > FILL_TOL and len(off) < 12:
+                    off.append({"t": t, "slot": c["slot"], "band": i, "rgb": s, "levels": d})
+        if mine == 0 and len(unsampled) < 12:
+            unsampled.append({"t": t, "slot": c["slot"]})
+    tag_px = max((o.get("tagPx", 0) for o in diag.overlay if o.get("view", 0) >= WINDOW_VIEW_MIN), default=0)
+    rep.add("window_fill", samples > 0 and not off and not unsampled and tag_px > 0, samples=samples, off=len(off),
+            first_off=off, unsampled_cards=unsampled, tag_px=tag_px, bubble_rgb=list(BUBBLE_RGB), tolerance=FILL_TOL)
+    # reply status: final, not copied (off), and never copied
+    replies = [(t, c) for t, c in wcards if c.get("reply")]
+    final = [(t, c) for t, c in replies if c.get("state") in FINISHED]
+    clips = sorted({c.get("clip") for _, c in final if c.get("clip")})
+    copied = [e for e in diag.clips if str(e.get("outcome", "")).startswith("copied")]
+    finish = [e.get("outcome") for e in diag.clips if e.get("what") == "finish"]
+    rep.add("reply_status", bool(final) and clips == ["off"] and not copied, reply_cards=len(replies),
+            final_states=len(final), clip_outcomes=clips, clip_records=len(diag.clips), finish=finish,
+            first_final_ms=None if not final else round(final[0][0] - replies[0][0], 1))
+    # lane: where the truth has it, mostly passing, painted
+    want = None
+    for e in truth.layers:
+        for m in layer_meta(e):
+            if m.get("lane"):
+                want = m["lane"]
+    lanes = [c["lane"] for _, c in replies if c.get("lane")]
+    good = [l for l in lanes if l["cols"] > 0 and l["pass"] >= LANE_SHARE * l["cols"]
+            and (want is None or abs(l["rect"][1] - want[1]) <= 2)]
+    lane_px = max((o.get("lanePx", 0) for o in diag.overlay if o.get("view", 0) >= WINDOW_VIEW_MIN), default=0)
+    rep.add("lane", want is not None and bool(good) and lane_px > 0, truth_lane=want, found=len(lanes), good=len(good),
+            example=good[-1] if good else (lanes[-1] if lanes else None), lane_px=lane_px)
+    # rows of a bubble scrolled half out: hidden ones never get a band, visible ones do
+    periods = []
+    for k, e in enumerate(truth.layers):
+        hidden = [h for m in layer_meta(e) for h in (m.get("hidden") or [])]
+        if hidden:
+            end = truth.layers[k + 1]["t"] if k + 1 < len(truth.layers) else truth.until
+            periods.append((e["t"] + 300, end, hidden))
+    bad, seen_rows = [], set()
+    for t0, t1, hidden in periods:
+        hslots = {h[0] for h in hidden}
+        for e in records_in_effect(diag, t0, t1):
+            for c in e.get("cards", []):
+                if c.get("view", 0) < WINDOW_VIEW_MIN or c["slot"] not in hslots:
+                    continue
+                for r in c.get("rows", []):
+                    if [c["slot"], r] in hidden:
+                        bad.append({"t": e["t"], "slot": c["slot"], "row": r})
+                    else:
+                        seen_rows.add((c["slot"], r))
+    rep.add("partial_rows", bool(periods) and not bad and bool(seen_rows), periods=len(periods),
+            hidden=periods[0][2] if periods else None, bands_on_hidden_rows=len(bad), first_bad=bad[:6],
+            visible_rows_shown=sorted(seen_rows))
+    # each tag kept once: one card per slot, window slots only in window views. A window's new rows
+    # can be seen before the VIEW that covers them is decoded (both are sent together, the strip
+    # takes 100-400 ms): until then they belong to the chat view under them, which is reported
+    # (strip_delay) but not a failure.
+    wslots = {c["slot"] for _, c in wcards}
+    dup, delayed = [], []
+    for e in diag.cards_ev:
+        slots = [c["slot"] for c in e.get("cards", [])]
+        twice = sorted({s for s in slots if slots.count(s) > 1})
+        stray = [c for c in e.get("cards", []) if c.get("view", 0) < WINDOW_VIEW_MIN and c["slot"] in wslots]
+        known = sorted({c["slot"] for c in stray if c.get("tags") and window_view_holds(diag, e["t"], c["tags"][0])})
+        if stray and not known and len(delayed) < 12:
+            delayed.append({"t": e["t"], "slots": sorted({c["slot"] for c in stray})})
+        if (twice or known) and len(dup) < 12:
+            dup.append({"t": e["t"], "twice": twice, "in_chat_view": known})
+    rep.add("no_duplicate", bool(wcards) and not dup, cards_records=len(diag.cards_ev), failures=dup, strip_delay=delayed)
+    if cpu_pct is not None:
+        steady = steady_cpu_pct(diag, cpu_pct)
+        ok = cpu_pct <= 1.1 * I2_CPU_WHOLE and (steady is None or steady <= 1.1 * I2_CPU_STEADY)
+        rep.add("cpu_vs_i2", ok, helper_pct_one_core=cpu_pct, steady_pct_one_core=steady,
+                max_whole=round(1.1 * I2_CPU_WHOLE, 2), max_steady=round(1.1 * I2_CPU_STEADY, 2))
+
+
 def run_checks(truth, diag, captures, px, cpu_pct, done_within_s, strict=False):
     rep = Report()
     if not diag.all_captures:
@@ -414,6 +568,8 @@ def run_checks(truth, diag, captures, px, cpu_pct, done_within_s, strict=False):
     check_frames(truth, diag, rep, captures, px, strict)
     check_missing(truth, diag, rep)
     check_done(truth, diag, rep, done_within_s)
+    if any(e.get("items") for e in truth.layers):
+        check_window(truth, diag, rep, cpu_pct)
     if cpu_pct is not None:
         rep.add("cpu", cpu_pct <= CPU_MAX_PCT, helper_pct_one_core=cpu_pct, max=CPU_MAX_PCT,
                 steady_pct_one_core=steady_cpu_pct(diag, cpu_pct))
@@ -425,8 +581,12 @@ def run_checks(truth, diag, captures, px, cpu_pct, done_within_s, strict=False):
 
 
 # ------------------------------------------------------------------------------- synthetic diag
-def synth_diag(truth, shift=0, hz=30.0, process_ms=12.0):
-    """A diag file a perfect Helper would write for this truth (shift moves every rectangle)."""
+def synth_diag(truth, shift=0, hz=30.0, process_ms=12.0, window_broken=False):
+    """A diag file a perfect Helper would write for this truth (shift moves every rectangle).
+    Window cards (VIEW id >= 200) also carry what the window checks read: background samples in
+    BUBBLE_RGB, the reply bit and clipboard outcome "off" on the reply slot, the truth's lane, and
+    overlay and clip records. window_broken: the window cards' samples are the plate colour or
+    missing (window_fill must fail)."""
     h = truth.header
     start = h["playStart"] + h.get("helperStartMs", 0)
     end = truth.end["t"] if truth.end else (truth.states[-1][0] if truth.states else start) + 1000
@@ -443,6 +603,12 @@ def synth_diag(truth, shift=0, hz=30.0, process_ms=12.0):
     t = start
     k = 0
     lag = period * 0.9  # the picture a capture sees is almost one capture old
+    lane_want = None
+    for e in truth.layers:
+        for m in layer_meta(e):
+            if m.get("lane"):
+                lane_want = m["lane"]
+    window_seen = False
     while t <= end:
         out.append({"t": round(t, 1), "ev": "capture", "fresh": True, "method": "wgc"})
         while k < len(msg_times) and msg_times[k][0] <= t:
@@ -492,14 +658,30 @@ def synth_diag(truth, shift=0, hz=30.0, process_ms=12.0):
                             segs = nxt
                     runs += [[y + shift, a + shift, b + shift] for a, b in segs if b > a]
                 masks.append({"rect": [plate[0] + 1 + shift, plate[1] + shift, plate[2] - 1, plate[3]], "runs": runs})
-            cards.append({"slot": slot, "req": req, "view": view, "kind": kind, "rows": [i["row"] for i in its],
-                          "bands": bands, "tags": tags, "gaps": [], "masks": masks, "alpha": 1.0, "plate": True,
-                          "state": state, "covered": False})
+            card = {"slot": slot, "req": req, "view": view, "kind": kind, "rows": [i["row"] for i in its],
+                    "bands": bands, "tags": tags, "gaps": [], "masks": masks, "alpha": 1.0, "plate": True,
+                    "state": state, "covered": False}
+            if view >= WINDOW_VIEW_MIN:
+                window_seen = True
+                fill = list(PLATE_RGB) if window_broken else list(BUBBLE_RGB)
+                card["bg"] = [[fill, None if window_broken else fill] for _ in bands]
+                if window_broken and len(cards) % 2 == 0:
+                    card["bg"] = [[None, None] for _ in bands]
+                card["reply"] = slot == REPLY_SLOT
+                if slot == REPLY_SLOT:
+                    card["clip"] = "off" if state in FINISHED else None
+                    if lane_want is not None:
+                        lw = [lane_want[0] + shift, lane_want[1] + shift, lane_want[2], lane_want[3]]
+                        card["lane"] = {"rect": lw, "rgb": list(BUBBLE_RGB), "cols": lane_want[2], "pass": lane_want[2]}
+            cards.append(card)
         key = json.dumps(cards, sort_keys=True)
         if key != last_cards:
             out.append({"t": round(t + process_ms, 1), "ev": "cards", "hidden": None, "cards": cards})
             last_cards = key
         t += period
+    if window_seen:
+        out.append({"t": round(end, 1), "ev": "overlay", "view": WINDOW_VIEW_MIN, "tagPx": 1, "lanePx": 1 if lane_want else 0})
+        out.append({"t": round(end, 1), "ev": "clip", "what": "finish", "outcome": "off"})
     out.sort(key=lambda e: e["t"])
     return out
 
@@ -535,6 +717,12 @@ def main():
         result = {"perfect": perfect.json(), "shifted5": {"pass": shifted.ok(), "failed_checks": [
             k for k, v in shifted.checks.items() if not v["pass_"]]}}
         ok = perfect.ok() and not shifted.ok()
+        if any(e.get("items") for e in truth.layers):
+            broken = run_checks(truth, Diag(synth_diag(truth, 0, window_broken=True)), a.captures, a.px, None,
+                                a.done_within_s)
+            failed = [k for k, v in broken.checks.items() if not v["pass_"]]
+            result["window_broken"] = {"pass": broken.ok(), "failed_checks": failed}
+            ok = ok and "window_fill" in failed
         result["selftest"] = "pass" if ok else "fail"
         print(json.dumps(result, indent=1))
         return 0 if ok else 1

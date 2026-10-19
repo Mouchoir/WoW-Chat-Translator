@@ -7,7 +7,8 @@
            [--fakewow-arg ARG]... (extra fakewow arguments, for example --fakewow-arg=--gamma=0.45)
 
 The Helper runs with --no-overlay (cards are rendered in memory and reported in --diag-json; no
-window is ever shown) and --wow-class TPFakeWow. fakewow is placed off every monitor (WGC mode),
+window is ever shown), --no-clipboard (it never touches the clipboard; --no-overlay implies it, the
+flag is given anyway) and --wow-class TPFakeWow. fakewow is placed off every monitor (WGC mode),
 so nothing covers the game. GDI mode reads the screen, so fakewow must be visible: it runs only
 when no WoW client is running and is reported as deferred otherwise (amendment A1).
 
@@ -25,7 +26,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
-SCENARIOS = ["basic", "scroll", "fade", "cover", "tabs", "altz", "dropped", "late_start", "gamma22"]
+SCENARIOS = ["basic", "scroll", "fade", "cover", "tabs", "altz", "dropped", "late_start", "gamma22", "conv"]
 GAME_EXES = ["WowB.exe", "Wow.exe", "WowClassic.exe", "WowT.exe"]
 CREATE_NO_WINDOW = 0x08000000
 
@@ -116,7 +117,7 @@ def run_one(name, a, out):
             time.sleep(start_at - time.time())
         exit_after = max(5.0, end - time.time() + 1.0)
         h_cmd = [a.helper, "--wow-class", header.get("class", "TPFakeWow"), "--translator", a.translator,
-                 "--capture", a.capture, "--no-overlay", "--no-tray", "--diag-json", str(diag),
+                 "--capture", a.capture, "--no-overlay", "--no-clipboard", "--no-tray", "--diag-json", str(diag),
                  "--log-dir", str(logs), "--exit-after", f"{exit_after:.1f}"] + a.helper_arg
         t_h = time.time()
         helper = subprocess.Popen(h_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

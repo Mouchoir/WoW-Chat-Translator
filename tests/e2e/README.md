@@ -15,7 +15,7 @@ scenarios\<name>.lua --make_scenario.js--> out\<name>.json --fakewow--> window +
 | File | Role |
 |---|---|
 | `scenario_lib.lua` | the `E2E` API scenarios use; records every mock frame (1/60 s) that changed: strip blocks, chat frame rectangles, fonts, scroll offsets, the visible end of each chat history, and the messages handed to `Bridge.Send` |
-| `scenarios\*.lua` | the nine scenarios below |
+| `scenarios\*.lua` | the ten scenarios below |
 | `make_scenario.js` | runs `tests\mock.lua`, the addon files (TOC order, through `tests\run.js`), `scenario_lib.lua` and a scenario; writes the recording (format in `helper\testkit\src\scenario.rs`) |
 | `helper\testkit` (crate `tp_testkit`, bin `fakewow`) | plays a recording in a window of class `TPFakeWow` and writes the truth |
 | `check.py` | compares a truth file with the Helper's `--diag-json`; also makes synthetic diags for its self-test |
@@ -36,7 +36,10 @@ python -I tests\e2e\run.py --scenario basic --translator llama --helper-arg=--ba
 `tests\e2e\out\` is scratch output and is not committed.
 
 `run.py` starts the Helper as
-`TranslateProbeHelper.exe --wow-class TPFakeWow --translator echo --capture wgc|gdi --no-overlay --no-tray --diag-json F --log-dir D --exit-after S`.
+`TranslateProbeHelper.exe --wow-class TPFakeWow --translator echo --capture wgc|gdi --no-overlay --no-clipboard --no-tray --diag-json F --log-dir D --exit-after S`
+(`--no-clipboard`: the Helper never touches the clipboard; `--no-overlay` implies it, it is given
+anyway). With a Helper of the user's running, add `--helper-arg=--instance-name=e2e` (the test
+Helper then takes its own single-instance mutex).
 It gives fakewow and the Helper no console window, measures the Helper's CPU time from its process
 handle, and kills anything still running at the end. A final `tasklist` check reports any process
 left over. Exit codes: 0 all passed, 1 a check failed, 2 a run could not start, 3 everything
@@ -74,6 +77,10 @@ deferred.
   - scroll offsets.
 - **Covers and Alt-Z:** game tooltips over plates, and Alt-Z periods (UIParent hidden: no chat,
   no strip, no tooltip).
+- **Layers:** an addon window over the chat frames and under the covers (the conversation window
+  of the `conv` scenario): opaque rectangles in client px; its visible tag rows join the truth's
+  `plates` (VIEW 200), and its meta data (view rectangle, hidden rows, reply card, lane) goes to a
+  `layers` truth record.
 - **Display curve:** applied last, `out = 255 * clamp((in/255 - 0.5) * contrast + 0.5) ^ (1/gamma)`.
   `--gamma 2.2` brightens, like a higher WoW Gamma setting. Values under 1 darken.
 - **Truth:** JSON Lines, `t` = Unix epoch ms when the frame was painted. The events are `header`,
@@ -101,6 +108,7 @@ deferred.
 | `dropped` | the strip is not painted during one request; "Not received" must show; a re-click repairs it |
 | `late_start` | 3 clicks, then the Helper starts at 7 s (no VIEW, no TRANSLATE); "Not received", re-click |
 | `gamma22` | `basic` through Gamma 2.2 (the Helper measures the curve on the strip and undoes it before the tag scan) |
+| `conv` | the conversation window (`E2E.Window`, a synthetic layer with the real tag colours; VIEW 200 first, then the chat frame it overlaps): 3 bubbles over the opaque fill, a reply card with flags 14 and its hint lane, then a scroll that leaves the first bubble half out |
 
 ## check.py
 
@@ -124,9 +132,22 @@ See the docstring for details.
   the D3D11 device), which is 1-2% of a 15-30 s run, and process times are sampled by the clock
   interrupt, so two identical runs can differ by more than 1%.
 - **fakewow:** fakewow never had the focus.
+- **conv only** (the truth has a window layer): `window_fill` (every background sample of a window
+  card within 6 levels of `BUBBLE_RGB`, every window card with at least one sample, since a card
+  with none is painted with the navy plate colour; tags painted), `reply_status` (final, clipboard outcome
+  "off", never copied), `lane` (found where the truth has it, at least 60% of its columns passing,
+  painted), `partial_rows` (a half-out bubble's hidden rows never get a band, its visible rows do),
+  `no_duplicate` (one card per slot; a window slot in a chat view only within the strip delay of the
+  VIEW that covers it, reported as `strip_delay`), `cpu_vs_i2` (within 10% of the highest CPU
+  figures of DESIGN.md I.2).
 
 `--selftest --truth T` builds a perfect diag for a truth file and a copy shifted by 5 px: the
-first must pass and the second must fail. `--synth-diag OUT [--shift-px N]` writes such a diag.
+first must pass and the second must fail. For a truth with a window layer (`conv`) the perfect
+diag also carries what the window checks read (background samples in `BUBBLE_RGB`, the reply bit
+and the outcome "off" on slot 126, the truth's lane, `overlay` and `clip` records), and a third,
+broken diag (window samples in the plate colour or missing) must fail `window_fill` (integration
+review fix: the window checks had never been shown to fail). `--synth-diag OUT [--shift-px N]`
+writes such a diag.
 
 ## Deviations from the design (amendment A9) and why
 
@@ -157,7 +178,8 @@ first must pass and the second must fail. `--synth-diag OUT [--shift-px N]` writ
    - a Helper started late (no VIEW; discovery every 10th tick).
 
    check.py therefore counts fresh captures with `scan: true` (from the Helper's `capture` diag
-   event). It expects a plate only once the Helper's sticky VIEW covers its chat frame, or once
+   event, written after the strip decode: a capture that skipped its scan because it decoded a new
+   VIEW says `scan: false, viewSkip: true` and is not counted). It expects a plate only once the Helper's sticky VIEW covers its chat frame, or once
    the Helper scans by discovery because it has no VIEW. The wait is reported as `view_wait_ms`.
    `--strict` applies the literal rule.
 5. **Truth carries more events than the design lists** (`header`, `ui`, `covers`, `sent`, `mark`,

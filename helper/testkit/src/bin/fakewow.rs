@@ -13,8 +13,9 @@
 //! windows (for the Helper's GDI capture mode, which reads the screen) and refuses to run while WoW
 //! runs. The summary's `exposedPoints` counts grid points where fakewow was the visible window.
 //!
-//! Truth (JSON Lines, `t` = Unix epoch ms): header, ui, strip, covers, plates, sent, dropped, mark,
-//! selfcheck, end. `--selfcheck` grabs the window back with GDI about once a second while the
+//! Truth (JSON Lines, `t` = Unix epoch ms): header, ui, strip, covers, plates, layers, sent, dropped,
+//! mark, selfcheck, end. A scenario's layers (the conversation window, drawn over the chat frames and
+//! under the covers) add their visible tag rows to `plates` and their meta data to `layers`. `--selfcheck` grabs the window back with GDI about once a second while the
 //! picture is stable and checks it pixel for pixel against what was drawn, then reads the tags,
 //! plates and strip calibration back at the truth rectangles. `--wgc-check` does the same with
 //! Windows.Graphics.Capture (the Helper's primary capture method). Exit code: 0 pass, 1 a check
@@ -30,7 +31,7 @@ use serde_json::{json, Value};
 use tp_testkit::display::Lut;
 use tp_testkit::layout::{self, FrameLayout, Item, Measure};
 use tp_testkit::raster::{self, IRect, Surface};
-use tp_testkit::scenario::{self, Cover, Entry, FrameState, Scenario};
+use tp_testkit::scenario::{self, Cover, Entry, FrameState, Layer, Scenario};
 use tp_testkit::tagcode::{self, DIGITS, PLATE_RGB, SYNC};
 use tp_testkit::truth::{self, Plate};
 
@@ -446,6 +447,8 @@ struct State {
     history: HashMap<u8, Vec<Entry>>,
     strip: Option<Vec<[u8; 3]>>,
     covers: Vec<ActiveCover>,
+    /// Addon windows over the chat frames, by id.
+    layers: Vec<Layer>,
     drop: Option<(u32, u32)>,
     scroll_since: HashMap<u8, f64>,
     next: usize,
@@ -462,7 +465,18 @@ struct Applied {
 
 impl State {
     fn new() -> State {
-        State { ui: true, frames: Vec::new(), history: HashMap::new(), strip: None, covers: Vec::new(), drop: None, scroll_since: HashMap::new(), next: 0, version: 0 }
+        State {
+            ui: true,
+            frames: Vec::new(),
+            history: HashMap::new(),
+            strip: None,
+            covers: Vec::new(),
+            layers: Vec::new(),
+            drop: None,
+            scroll_since: HashMap::new(),
+            next: 0,
+            version: 0,
+        }
     }
 
     /// Applies every event up to scenario time `t` (ms).
@@ -502,6 +516,14 @@ impl State {
                 if c.on {
                     let rect = c.rect.map(|r| IRect::new(r[0], r[1], r[2], r[3]));
                     self.covers.push(ActiveCover { id: c.id, spec: c.clone(), rect });
+                }
+                self.version += 1;
+            }
+            if let Some(l) = &ev.layer {
+                self.layers.retain(|a| a.id != l.id);
+                if l.on {
+                    self.layers.push(l.clone());
+                    self.layers.sort_by_key(|a| a.id);
                 }
                 self.version += 1;
             }
@@ -602,6 +624,7 @@ fn ui_rects(st: &State, ls: &[FrameLayout], w: i32) -> Vec<IRect> {
         v.push(l.clip.inflate(4));
     }
     v.extend(st.covers.iter().filter_map(|c| c.rect.map(|r| r.inflate(1))));
+    v.extend(st.layers.iter().filter_map(|l| l.bounds()).map(|b| IRect::new(b[0], b[1], b[2], b[3]).inflate(1)));
     v
 }
 
@@ -646,6 +669,17 @@ fn draw_region(g: &mut Gfx, r: IRect, st: &State, ls: &[FrameLayout]) {
             }
         }
         g.flush();
+        // addon windows over the chat frames (opaque rectangles, in order)
+        {
+            let mut s = g.surface();
+            for l in &st.layers {
+                for q in &l.rects {
+                    if let Some(p) = IRect::new(q[0], q[1], q[2], q[3]).intersect(&r) {
+                        s.fill(p, [q[4].clamp(0, 255) as u8, q[5].clamp(0, 255) as u8, q[6].clamp(0, 255) as u8]);
+                    }
+                }
+            }
+        }
         for c in st.covers.iter().filter_map(|c| c.rect) {
             let Some(cr) = c.intersect(&r) else { continue };
             {
@@ -1114,6 +1148,7 @@ fn run(args: Args) -> Result<bool, String> {
     let mut last_strip: Option<bool> = None;
     let mut last_ui: Option<bool> = None;
     let mut last_covers = String::new();
+    let mut last_layers = String::new();
     let mut pending_sent: Vec<(scenario::Sent, bool)> = applied0.sent;
     let mut pending_dropped: Vec<(u32, u32)> = applied0.dropped;
     let mut pending_marks: Vec<String> = applied0.marks;
@@ -1195,7 +1230,21 @@ fn run(args: Args) -> Result<bool, String> {
         for m in pending_marks.drain(..) {
             truth.emit(painted, json!({"ev": "mark", "text": m}));
         }
-        let items = plates_json(&plates, st.ui, &covers);
+        let mut items = plates_json(&plates, st.ui, &covers);
+        if st.ui {
+            if let Value::Array(a) = &mut items {
+                for l in &st.layers {
+                    a.extend(l.items.iter().cloned());
+                }
+            }
+        }
+        let layers = json!(st.layers.iter().map(|l| json!({"id": l.id, "meta": l.meta})).collect::<Vec<_>>());
+        let lkey = format!("{}{}", st.ui, layers);
+        // nothing to report while no scenario layer was ever shown
+        if lkey != last_layers && !(last_layers.is_empty() && st.layers.is_empty()) {
+            truth.emit(painted, json!({"ev": "layers", "shown": st.ui, "items": layers}));
+            last_layers = lkey;
+        }
         let ikey = items.to_string();
         if ikey != last_items {
             truth.emit(painted, json!({"ev": "plates", "items": items}));

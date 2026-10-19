@@ -11,6 +11,12 @@
 //!     sent: {kind, req, slot, rows, bytes}       a message handed to Bridge.Send
 //!     cover: {id, on, rect?: [x,y,w,h], frame?, slot?, row?, fx?: [from, to], pad?: [t,r,b,l]}
 //!     drop: {on, req, slot}                      strip not painted while on (a missed request)
+//!     layer: {id, on, rects: [[x,y,w,h,r,g,b]..], items?: [plate items], meta?: any}
+//!                                                an addon window drawn over the chat frames (the
+//!                                                conversation window): opaque rectangles in
+//!                                                client px, in order; `items` are its visible
+//!                                                tag rows in the truth's plate format, `meta` is
+//!                                                copied to the truth as it is
 //!     mark: string                               annotation only
 //! } ] }
 //! ```
@@ -139,9 +145,44 @@ pub struct Drop {
     pub slot: u32,
 }
 
+/// An addon window (the conversation window) drawn over the chat frames and under the covers.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Layer {
+    pub id: u32,
+    pub on: bool,
+    /// Opaque rectangles in client px, drawn in order: [x, y, w, h, r, g, b].
+    #[serde(default)]
+    pub rects: Vec<[i32; 7]>,
+    /// Its visible tag rows, in the truth's plate item format (view, slot, row, sess, tag, plate,
+    /// visible, alpha, covered).
+    #[serde(default)]
+    pub items: Vec<serde_json::Value>,
+    /// Copied to the truth as it is (what check.py needs to know about the window).
+    #[serde(default)]
+    pub meta: Option<serde_json::Value>,
+}
+
+impl Layer {
+    /// The bounding box of its rectangles (x, y, w, h), None without any.
+    pub fn bounds(&self) -> Option<[i32; 4]> {
+        let mut it = self.rects.iter().filter(|r| r[2] > 0 && r[3] > 0);
+        let f = it.next()?;
+        let (mut x0, mut y0, mut x1, mut y1) = (f[0], f[1], f[0] + f[2], f[1] + f[3]);
+        for r in it {
+            x0 = x0.min(r[0]);
+            y0 = y0.min(r[1]);
+            x1 = x1.max(r[0] + r[2]);
+            y1 = y1.max(r[1] + r[3]);
+        }
+        Some([x0, y0, x1 - x0, y1 - y0])
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Event {
     pub t: f64,
+    #[serde(default)]
+    pub layer: Option<Layer>,
     #[serde(default)]
     pub ui: Option<bool>,
     #[serde(default)]
@@ -228,6 +269,23 @@ mod tests {
         assert_eq!(block_pos(0), (0, 0));
         assert_eq!(block_pos(1), (0, 2));
         assert_eq!(block_pos(5), (4, 2));
+    }
+
+    #[test]
+    fn parses_a_window_layer() {
+        let s = Scenario::parse(
+            r#"{"format":1,"name":"x","physW":1920,"physH":1080,"durationMs":1000,"events":[
+            {"t":0,"layer":{"id":1,"on":true,"rects":[[100,200,50,40,36,30,24],[90,250,10,5,1,2,3]],
+              "items":[{"view":200,"slot":100,"row":0}],"meta":{"view":[100,200,50,40]}}},
+            {"t":5,"layer":{"id":1,"on":false}}]}"#,
+        )
+        .unwrap();
+        let l = s.events[0].layer.as_ref().unwrap();
+        assert_eq!((l.id, l.on, l.rects.len(), l.items.len()), (1, true, 2, 1));
+        assert_eq!(l.bounds(), Some([90, 200, 60, 55]));
+        assert!(l.meta.is_some());
+        let off = s.events[1].layer.as_ref().unwrap();
+        assert!(!off.on && off.bounds().is_none());
     }
 
     #[test]

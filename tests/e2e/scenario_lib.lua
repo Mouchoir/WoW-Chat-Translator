@@ -22,6 +22,9 @@
 --   E2E.ShowFrame(chatFrame, {l, b, w, h})          shows a chat frame (scaled-unit rectangle)
 --   E2E.HideFrame(chatFrame)
 --   E2E.Request(lineID) -> reqId, slot, K
+--   E2E.Window{ bubbles = {{slot, rows, text}...}, scroll }   the conversation window (below)
+--   E2E.WindowReply{ rows, text, copy }             its reply card (TRANSLATE flags plate|reply|copy)
+--   E2E.WindowScroll(px)                            scrolls its thread (rows partly out are hidden)
 --   E2E.Mark(text)                                  annotation in the truth file
 --   E2E.Finish(tailSeconds)                        sets the global E2E_JSON
 local M = Mock
@@ -268,6 +271,9 @@ function E.Start(o)
     ns = M.Load(ADDON_FILES, function(file)
         return ADDON_SOURCES[file]
     end)
+    -- E.Click tests the rows under a chat line: a [T] click opens the conversation window by
+    -- default since 2026-10-19 (display = "window"), so the scenarios use the inline mode
+    ns.db.display = "inline"
     for _, f in ipairs(M.Frames()) do
         if f:GetFrameStrata() == "TOOLTIP" and f:GetFrameLevel() == 9000 then
             stripFrame = f
@@ -391,6 +397,164 @@ end
 
 function E.HideFrame(cf)
     cf:Hide()
+    Step(1)
+end
+
+---------------------------------------------------------------------------- conversation window
+-- A synthetic conversation window (design A.1, A.4 and A.6.4; docs\BRIDGE.md section 8c) drawn by
+-- fakewow as a layer over the chat frames: opaque rectangles in physical px. Its rows are real
+-- protocol tags (Bridge.TagColors) and plates on the opaque bubble fill (Bridge.BUBBLE_RGB), rows
+-- touching at the row pitch, a reply card with its hint lane, and per-row visibility (a row not
+-- entirely inside the thread is not drawn: the fill shows there). The VIEW (window first, then
+-- the chat frame it overlaps) and the TRANSLATE messages go through the addon's own Bridge.Send.
+-- The addon's window modules are not used: the rig checks the Helper against the protocol.
+local WIN = {
+    x = 126, y = 214, w = 620, h = 640,                -- the frame (px)
+    threadTop = 320, threadBottom = 700,
+    colX = 150, bw = 540, pad = 6, rowPx = 23, fontPx = 20, block = 6,
+    cardGap = 8,
+    border = { 150, 120, 70 }, frameBg = { 22, 20, 18 }, header = { 34, 30, 26 }, threadBg = { 12, 12, 12 },
+    composer = { 40, 36, 30 }, hint = { 150, 150, 150 },
+}
+local win = nil       -- { bubbles, scroll, reply, reqs }
+local winReq = 900    -- reqIds of the synthetic window's requests (the addon's own start at 1)
+
+local function Rect7(x, y, w, h, c)
+    return Array({ x, y, w, h, c[1], c[2], c[3] })
+end
+
+-- The tag (8 blocks) and plate of one row at (x, y), appended to rects; the plate item for the truth.
+local function Row(rects, items, x, y, slot, row)
+    local sess = ns.sessionId % 2
+    local colors = ns.Bridge.TagColors(slot, row, sess)
+    for i = 1, 8 do
+        rects[#rects + 1] = Rect7(x + (i - 1) * WIN.block, y, WIN.block, WIN.rowPx, colors[i])
+    end
+    local px0 = x + 8 * WIN.block
+    local pw = WIN.colX + WIN.bw - WIN.pad - px0
+    rects[#rects + 1] = Rect7(px0, y, pw, WIN.rowPx, ns.Bridge.PLATE_RGB)
+    items[#items + 1] = { view = 200, slot = slot, row = row % 4, sess = sess, tag = Array({ x, y, 8 * WIN.block, WIN.rowPx }),
+        plate = Array({ px0, y, pw, WIN.rowPx }), visible = true, alpha = 1, covered = Array() }
+end
+
+local function CardTop()
+    return WIN.threadBottom + WIN.cardGap
+end
+
+local function CardHeight(k)
+    return 2 * WIN.pad + (k + 1) * WIN.rowPx    -- rows, the lane, the padding
+end
+
+local function ViewRect()
+    local bottom = WIN.threadBottom
+    if win.reply then
+        bottom = CardTop() + CardHeight(win.reply.rows)
+    end
+    return { WIN.colX, WIN.threadTop, WIN.bw, bottom - WIN.threadTop }
+end
+
+local function DrawWindow()
+    local rects, items, hidden = Array(), Array(), Array()
+    local B = ns.Bridge.BUBBLE_RGB
+    rects[#rects + 1] = Rect7(WIN.x - 3, WIN.y - 3, WIN.w + 6, WIN.h + 6, WIN.border)
+    rects[#rects + 1] = Rect7(WIN.x, WIN.y, WIN.w, WIN.h, WIN.frameBg)
+    rects[#rects + 1] = Rect7(WIN.x, WIN.y, WIN.w, 90, WIN.header)
+    rects[#rects + 1] = Rect7(WIN.x + 12, WIN.threadTop, WIN.w - 24, WIN.threadBottom - WIN.threadTop, WIN.threadBg)
+    local y = WIN.threadTop + 10 - win.scroll
+    for _, b in ipairs(win.bubbles) do
+        local h = 2 * WIN.pad + b.rows * WIN.rowPx
+        local top, bot = math.max(y, WIN.threadTop), math.min(y + h, WIN.threadBottom)
+        if bot > top then
+            rects[#rects + 1] = Rect7(WIN.colX, top, WIN.bw, bot - top, B)
+        end
+        for r = 0, b.rows - 1 do
+            local ry = y + WIN.pad + r * WIN.rowPx
+            if ry >= WIN.threadTop and ry + WIN.rowPx <= WIN.threadBottom then
+                Row(rects, items, WIN.colX + WIN.pad, ry, b.slot, r)
+            else
+                hidden[#hidden + 1] = Array({ b.slot, r })
+            end
+        end
+        y = y + h + 14
+    end
+    local lane, card = nil, nil
+    if win.reply then
+        local k, top = win.reply.rows, CardTop()
+        card = Array({ WIN.colX, top, WIN.bw, CardHeight(k) })
+        rects[#rects + 1] = Rect7(WIN.colX, top, WIN.bw, CardHeight(k), B)
+        for r = 0, k - 1 do
+            Row(rects, items, WIN.colX + WIN.pad, top + WIN.pad + r * WIN.rowPx, 126, r)
+        end
+        -- the lane: one row of fill, the hint's glyphs from the plate's x, clear of its top and
+        -- bottom 2 px
+        local ly = top + WIN.pad + k * WIN.rowPx
+        local lx0 = WIN.colX + WIN.pad + 8 * WIN.block
+        lane = Array({ WIN.colX + WIN.pad, ly, WIN.bw - 2 * WIN.pad, WIN.rowPx })
+        for gx = lx0 + 2, lx0 + 300, 9 do
+            rects[#rects + 1] = Rect7(gx, ly + 4, 5, WIN.rowPx - 8, WIN.hint)
+        end
+        rects[#rects + 1] = Rect7(WIN.x + 12, top + CardHeight(k) + 8, WIN.w - 24, 30, WIN.composer)
+    end
+    Add({ layer = { id = 1, on = true, rects = rects, items = items, meta = { view = Array(ViewRect()), scroll = win.scroll,
+        hidden = hidden, card = card, lane = lane, replySlot = win.reply and 126 or nil,
+        bubble = Array(ns.Bridge.BUBBLE_RGB) } } })
+end
+
+-- VIEW: the window first (VIEW id 200), then the chat frame it overlaps (the addon's Reserve.View
+-- does the same once the window module is there).
+local function SendView()
+    local _, physH = GetPhysicalScreenSize()
+    local k = physH / 768
+    local cf = ChatFrame1
+    local c = cf.FontStringContainer or cf
+    local l, b, w, h = c:GetScaledRect()
+    local _, fontH = cf:GetFont()
+    local eff = cf:GetEffectiveScale()
+    local spacing = cf.GetSpacing and cf:GetSpacing() or 0
+    local v = ViewRect()
+    ns.Bridge.Send(ns.Bridge.ViewMessage({
+        { id = 200, x = v[1], y = v[2], w = v[3], h = v[4], fontPx = WIN.fontPx, rowPx = WIN.rowPx },
+        { id = cf:GetID(), x = Round(l * k), y = Round(physH - (b + h) * k), w = Round(w * k), h = Round(h * k),
+            fontPx = Round(fontH * eff * k), rowPx = Round((fontH + spacing) * eff * k) },
+    }))
+end
+
+local function Translate(slot, rows, flags, target, text)
+    winReq = winReq + 1
+    ns.Bridge.Send(ns.Bridge.TranslateMessage(winReq, slot, rows, flags, target, text, {}))
+    return winReq
+end
+
+-- o.bubbles = { { slot (100..125), rows (1..6), text }, ... }: the incoming bubbles, top first.
+function E.Window(o)
+    win = { bubbles = o.bubbles or {}, scroll = o.scroll or 0, reply = nil }
+    SendView()
+    -- each TRANSLATE is queued before the bubble's rows are shown (design A.3 step 4)
+    for _, b in ipairs(win.bubbles) do
+        Translate(b.slot, b.rows, ns.Bridge.FLAG_PLATE, o.target or "fr", b.text)
+    end
+    Step(1)
+    DrawWindow()
+    Step(1)
+end
+
+-- The reply card: TRANSLATE slot 126, rows = 1 + text rows, flags plate|reply (+copy).
+function E.WindowReply(o)
+    assert(win, "E2E.WindowReply needs E2E.Window first")
+    win.reply = { rows = o.rows or 3 }
+    local flags = ns.Bridge.FLAG_PLATE + ns.Bridge.FLAG_REPLY + (o.copy == false and 0 or ns.Bridge.FLAG_COPY)
+    SendView()
+    local req = Translate(126, win.reply.rows, flags, o.target or "de", o.text)
+    Step(1)
+    DrawWindow()
+    Step(1)
+    return req
+end
+
+function E.WindowScroll(px)
+    assert(win, "E2E.WindowScroll needs E2E.Window first")
+    win.scroll = px
+    DrawWindow()
     Step(1)
 end
 
