@@ -961,3 +961,61 @@ deviations 23-27), `docs\HELPER.md` ("Link colours", build 5) and `docs\IN-GAME-
 | Full-width IDs were never protected and came back respelled (minor, companion) | fixed: full-width letters, digits and punctuation read as ASCII, protected as written; E1 line en17 |
 | The docs said the build-4 toast replaced the painting (minor, companion) | moot with COLOURS: the build-4 Companion paints plain names; docs updated |
 | A spell's colour (71D5FF) is close to the default translation colour (A8D8FF) (minor, companion) | kept; G20 step 10 checks the legibility in game (an underline is the planned fix) |
+
+### M.3 Integration results (2026-10-19)
+
+Same PC, the WoW client running and the user playing. Builds and tests used a target folder of
+their own; window-level tests ran off screen or at the bottom of the z-order with
+`--no-overlay --no-clipboard` and their own instance name. The E2E suite ran on a release build of
+the final tree from that folder while the user's Translate Companion 0.4.0 kept running; then the
+user's Companion was stopped with `taskkill` without /F (it exited in 0.2 s, no llama-server
+running), `scripts\helper.ps1 -Build` gave `WoWTranslateCompanion.exe` 1,374,208 bytes
+(`--version` "Translate Companion 0.5.0"), the addon was deployed with `scripts\dev.ps1` (every file
+identical in the AddOns folder), and Translate Companion 0.5.0 was restarted detached (log: Start
+0.5.0, settings loaded, tray icon, WowFound, WGC capture started; 58 s without a Companion). A
+`basic` E2E run with that release exe gave the same results as below.
+
+**Offline suites**
+
+| Command | Result |
+|---|---|
+| `npm test` (enUS, frFR, bridge) | enUS 755/755, frFR 755/755; bridge byte identity: 30 traces, 16,892 ticks, 1,066 frames, 1,024 tags, 62 builder vectors (11 COLOURS) + 10 parser-only, 12 marks, 29 API checks, all passed |
+| `node tests\run.js enUS --stub-bridge` / `frFR --stub-bridge` | 755/755 each |
+| `luacheck addon` | 0 warnings, 0 errors in 24 files |
+| `python -I tools\bridge\make_vectors.py <dir>` | 30 traces, 1,066 frames, 387 messages, 1,024 tags, 72 message vectors, 36 strips, marks 12 encode + 11 decode + 7 merge; the 34 files byte-identical to `tests\vectors` (frames, tags and strips unchanged, so `sim.py` and `crc_mc.py` were not run again) |
+| `cargo test --offline`, `helper\bridge` | 73 passed, 2 ignored; `--release -- --ignored`: 2 passed (corruption suite; at 1080p strip decode 11.2 us, view scan 289.0 us, cards 250.1 us) |
+| `cargo test --offline`, `helper\engine` | 114 + 5 passed, 3 ignored; `real_server` (`--ignored`, CPU, 4 threads, 60 s watchdog): passed, server ready in 8.4 s, first result 13.3 s, the cached one at once |
+| `cargo test --offline`, `helper\app` | lib 168, clipprobe 4, graceful_exit 2, hint_lane 5, native_look 5, sentinel 2, tagscan_equiv 5 passed (5 ignored); `--release -- --ignored`: window_pipeline 2/2, render 0.623 ms, candidates 0.110 ms, lane search 156.3 / 20.1 / 252.6 us, `sample_card` 384.4 us |
+| `cargo test --offline`, `helper\testkit` | 19 passed |
+| `cargo clippy --all-targets` (bridge, engine, app) | no warning in the changed code (older warnings elsewhere unchanged) |
+
+**E1 on CPU** (`docs\ENGINE.md` E1c, 59 synthetic lines, shipped tuning): before the review fixes
+script 54/54, item names 23/23, must-use 10/10, IDs/URLs 14/15, free tokens 0/4, wrong Same 0:
+fail; after: the same with IDs/URLs **15/15** and free tokens **4/4**: pass. The 54 older lines gave
+identical per-line results. Each run: 10 servers, each killed and seen exited, the watchdog never
+fired, at most one llama-server at any second, none left.
+
+**End to end, echo translator, WGC, `--no-overlay --no-clipboard`**
+
+| Scenario | TRANSLATE P99 ms | band failures / checks | lanes found / checks | orphan lanes | false lanes | COLOURS received | CPU whole run % | CPU after 2 s % |
+|---|---|---|---|---|---|---|---|---|
+| basic | 146.2 | 0 / 3460 | 1196 / 1196 | - | 0 | 1 | 3.85 | 2.06 |
+| scroll | 95.6 | 0 / 3043 | 1920 / 1920 | 63 / 63 | 0 | 0 | 2.26 | 1.60 |
+| fade | 84.7 | 0 / 1462 | 974 / 974 | - | 0 | 0 | 3.48 | 2.35 |
+| cover | 146.3 | 0 / 3947 | 1022 / 1022 | - | 0 | 1 | 2.55 | 1.50 |
+| tabs | 166.9 | 0 / 1992 | 1338 / 1338 | - | 0 | 0 | 3.30 | 1.88 |
+| altz | 136.8 | 0 / 2750 | 799 / 799 | - | 0 | 0 | 2.94 | 1.41 |
+| dropped | 166.0 | 0 / 1360 | 925 / 925 | - | 0 | 0 | 3.02 | 1.52 |
+| late_start | 76.1 | 0 / 1662 | 831 / 831 | - | 0 | 0 | 3.81 | 1.58 |
+| gamma22 | 164.4 | 0 / 3487 | 1205 / 1205 | - | 0 | 1 | 3.70 | 2.07 |
+| conv | 142.0 | 0 / 2982 | 1447 / 1447 | - | 0 | 0 | 4.19 | 2.49 |
+
+- Every functional check passes in all 10 scenarios (latency, bands, hidden, masks, missing,
+  done, lanes; conv: window_fill, reply_status, partial_rows, no_duplicate). The CPU rule (3% of
+  one core over the whole run) fails in 7 of 10 (8 of 10 at L.3) with the game running; conv also
+  fails `cpu_vs_i2`. The lines with an item link (basic, cover, gamma22) sent their COLOURS, and
+  their cards pass every check (the checks measure where the text is drawn, not its colour; the
+  colour is checked by the overlay's unit tests and G20).
+- A grep of the 50 diag, truth, report, fakewow and log files for the scenarios' chat words and
+  sender names: 0 hits. run.py reported no leftover process.
+- No process started here is still running except the user's Translate Companion 0.5.0.
