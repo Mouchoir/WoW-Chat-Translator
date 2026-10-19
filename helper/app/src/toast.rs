@@ -1,4 +1,4 @@
-//! The bridge toast ("TranslateProbe Helper: bridge OK (...)"), 4 s at client (16, 24): a small
+//! The bridge toast ("Translate Companion: bridge OK (...)"), 4 s at client (16, 24): a small
 //! layered window of class `TPHelperToast`, click-through and never activated. Under
 //! `--no-overlay` it is only reported, never shown.
 
@@ -122,9 +122,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_toast_fits_a_small_game_window() {
+        // the toast is one line, at most the client width - 32 px wide: every text fits 800 px,
+        // so a game window of about 830 px shows it whole (integration review, 2026-10-19)
+        use crate::i18n::{tr, Lang};
+        let mut f = Fonts::new();
+        for lang in [Lang::En, Lang::Fr] {
+            for key in ["toast.addon_old", "toast.helper_old"] {
+                let w = f.measure(Face::Ui, PX, tr(lang, key)) + 2 * PAD;
+                assert!(w <= 800, "{lang:?} {key}: {w} px");
+            }
+            let ok = crate::i18n::tr_fmt(lang, "toast.bridge_ok", &[("mode", "robust"), ("m", "100"), ("capture", "WGC"), ("hz", "60")]);
+            assert!(f.measure(Face::Ui, PX, &ok) + 2 * PAD <= 800, "{lang:?} bridge_ok");
+        }
+    }
+
+    #[test]
     fn renders_a_panel_with_text_and_never_shows_under_no_overlay() {
         let mut t = Toaster::new(true);
-        let c = t.render("TranslateProbe Helper: bridge OK (dense, margin 42, WGC 30 Hz)", 2000);
+        let c = t.render("Translate Companion: bridge OK (dense, margin 42, WGC 30 Hz)", 2000);
         assert!(c.rect.w > 200 && c.rect.h == 40);
         let (_, a) = c.pixel(c.rect.w / 2, 1).unwrap();
         assert!(a > 200, "panel at 85%: {a}");

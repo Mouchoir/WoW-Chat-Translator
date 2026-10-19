@@ -1,4 +1,4 @@
-//! tp_engine: the local translation engine of TranslateProbe Helper.
+//! tp_engine: the local translation engine of Translate Companion (the Helper).
 //!
 //! It finds the llama.cpp runtime and the Qwen3 model on disk, starts `llama-server` on first use
 //! (GPU when enough VRAM is free, else CPU), builds the prompt with placeholders and glossary,

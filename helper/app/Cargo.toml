@@ -1,17 +1,19 @@
 [package]
 name = "translateprobe-helper"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 publish = false
-description = "TranslateProbe Helper: reads the addon's pixel bridge, translates locally and draws the translations over the WoW chat"
+description = "Translate Companion (WoWTranslateCompanion.exe): reads the TranslateProbe addon's pixel bridge, translates locally and draws the translations over the WoW chat"
 
 # The modules live in a library so that capprobe and the tests reuse them.
 [lib]
 name = "tp_helper"
 path = "src/lib.rs"
 
+# The exe users run: WoWTranslateCompanion.exe ("Translate Companion"; TranslateProbeHelper.exe
+# until 2026-10-19). The crate names stay.
 [[bin]]
-name = "TranslateProbeHelper"
+name = "WoWTranslateCompanion"
 path = "src/main.rs"
 
 [[bin]]

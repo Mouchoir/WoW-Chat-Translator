@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Builds, tests or runs TranslateProbe Helper (helper\app).
+Builds, tests or runs Translate Companion (helper\app, WoWTranslateCompanion.exe).
 
 .DESCRIPTION
 -Build       cargo build --offline --release of helper\app, then checks that the exe is under 3 MB.
@@ -13,7 +13,10 @@ Builds, tests or runs TranslateProbe Helper (helper\app).
 
 Personal machine paths never live in source control. The runtime folder comes from -RuntimeDir,
 else $LlamaRuntimeDir in the gitignored scripts\dev.local.ps1, else the TPROBE_LLAMA_RUNTIME
-environment variable. Without one, the Helper searches its default places (see docs\HELPER.md).
+environment variable. Without one, Translate Companion searches its default places (see docs\HELPER.md).
+
+The exe was TranslateProbeHelper.exe until 2026-10-19. Both take the same single-instance mutex,
+so exit an old TranslateProbeHelper.exe (tray icon, Exit) before starting the new one.
 
 .EXAMPLE
 scripts\helper.ps1 -Build -Test
@@ -38,7 +41,7 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $appDir = Join-Path $projectRoot 'helper\app'
-$exe = Join-Path $appDir 'target\release\TranslateProbeHelper.exe'
+$exe = Join-Path $appDir 'target\release\WoWTranslateCompanion.exe'
 
 if (-not ($Build -or $Test -or $Run -or $Diag)) {
     Write-Host 'Usage: scripts\helper.ps1 [-Build] [-Test] [-Run] [-Diag] [-RuntimeDir DIR] [helper arguments]'
@@ -126,9 +129,9 @@ if ($Build -or ($Run -and -not (Test-Path -LiteralPath $exe))) {
     Write-Host '== cargo build --offline --release (helper\app)'
     Invoke-Cargo -Dir $appDir -CargoArgs @('build', '--offline', '--release')
     $size = (Get-Item -LiteralPath $exe).Length
-    Write-Host ('TranslateProbeHelper.exe: {0:N0} bytes' -f $size)
+    Write-Host ('WoWTranslateCompanion.exe: {0:N0} bytes' -f $size)
     if ($size -ge 3MB) {
-        throw 'TranslateProbeHelper.exe must stay under 3 MB'
+        throw 'WoWTranslateCompanion.exe must stay under 3 MB'
     }
 }
 
@@ -141,7 +144,7 @@ if ($Run) {
         $argList += @('--runtime', $RuntimeDir)
     }
     else {
-        Write-Host 'No runtime folder given: the Helper searches its default places.'
+        Write-Host 'No runtime folder given: Translate Companion searches its default places.'
     }
     if ($Diag) {
         $logDir = Join-Path $env:LOCALAPPDATA 'TranslateProbe\logs'
@@ -156,6 +159,6 @@ if ($Run) {
     $startArgs = @{ FilePath = $exe; PassThru = $true }
     if ($quoted) { $startArgs.ArgumentList = ($quoted -join ' ') }
     $proc = Start-Process @startArgs
-    Write-Host "TranslateProbe Helper started (pid $($proc.Id)). Exit it from its tray icon."
+    Write-Host "Translate Companion started (pid $($proc.Id)). Exit it from its tray icon."
 }
 exit 0

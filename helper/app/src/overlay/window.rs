@@ -254,7 +254,7 @@ impl LayeredWindow {
     pub fn create(class: PCWSTR) -> Option<LayeredWindow> {
         register_classes();
         let ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
-        let hwnd = unsafe { CreateWindowExW(ex, class, w!("TranslateProbe Helper"), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinstance()), None) }.ok()?;
+        let hwnd = unsafe { CreateWindowExW(ex, class, w!("Translate Companion"), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinstance()), None) }.ok()?;
         Some(LayeredWindow { hwnd, shown: false, exclude: None, dib: None, pos: (0, 0, 0, 0), prev_dirty: None, z: ZMode::Topmost })
     }
 

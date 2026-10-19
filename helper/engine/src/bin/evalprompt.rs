@@ -450,7 +450,7 @@ fn main() {
         }
     };
     if args.selftest {
-        // Same JSON as TranslateProbeHelper.exe --selftest (never loads the model).
+        // Same JSON as WoWTranslateCompanion.exe --selftest (never loads the model).
         let data = std::env::temp_dir().join(format!("tp_evalprompt_{}", std::process::id()));
         let cfg = tp_engine::EngineConfig {
             runtime_dir: args.runtime.clone(),

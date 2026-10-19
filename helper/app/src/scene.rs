@@ -39,9 +39,14 @@ pub const STALE_AFTER_MS: u64 = 500;
 pub const MIN_ALPHA: f32 = 0.3;
 /// The overlay never covers client rows 0..15 (the strip lives there).
 pub const OVERLAY_TOP: i32 = 16;
-/// `STATUS.addonBuild` this helper speaks (3: TRANSLATE reply and copy bits, the conversation
-/// window, 2026-10-19; 2: rows 1..6, 2026-10-18).
-pub const ADDON_BUILD: u16 = 3;
+/// `STATUS.addonBuild` this helper speaks (4: a hint lane under every card, 2026-10-19, user
+/// request U1; 3: TRANSLATE reply and copy bits, the conversation window, 2026-10-19; 2: rows
+/// 1..6, 2026-10-18).
+pub const ADDON_BUILD: u16 = 4;
+/// The first addon build that draws a hint lane under every card (bubbles and inline rows). An
+/// older addon draws one under the reply card only: under its other cards the row after the last
+/// tag is the next chat line or bubble fill, so no lane is searched there.
+pub const LANES_BUILD: u16 = 4;
 /// The oldest addon build served without the "addon is older" toast: build 2 sends no reply bit,
 /// and everything else it sends is unchanged.
 pub const ADDON_BUILD_MIN: u16 = 2;
@@ -178,7 +183,7 @@ pub struct SceneCard {
     /// The chat background around each band, sampled in the same capture (native look); empty
     /// when unknown (the overlay then covers the tags with the plate colour).
     pub bg: CardBg,
-    /// A reply card's hint lane, found in the same capture (None: not found, or not a reply).
+    /// The card's hint lane, found in the same capture (None: not found, or covered).
     pub lane: Option<Lane>,
 }
 
@@ -191,6 +196,25 @@ pub struct SceneView {
     /// Chat font size from VIEW (0 when no VIEW is known).
     pub font_px: u8,
     pub cards: Vec<SceneCard>,
+    /// Orphan hint lanes: chat lanes whose card's rows have scrolled above the top of the chat
+    /// (`lane::find_orphan_chat_lane`), painted over like a card's lane.
+    pub lanes: Vec<SceneLane>,
+}
+
+/// A hint lane with no card in the capture (an orphan chat lane at the top of a chat). One under
+/// another window is dropped before the scene, as a card's lane is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneLane {
+    pub slot: u8,
+    pub lane: Lane,
+}
+
+/// An orphan lane found in a capture (`view_id`, slot, lane).
+#[derive(Clone, Debug)]
+pub struct FoundLane {
+    pub view_id: u8,
+    pub slot: u8,
+    pub lane: Lane,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,9 +266,9 @@ impl Scene {
         self.views.iter().map(|v| v.cards.len()).sum()
     }
 
-    /// True when at least one uncovered card would be drawn.
+    /// True when at least one uncovered card (or orphan lane) would be drawn.
     pub fn any_visible(&self) -> bool {
-        self.hidden.is_none() && self.views.iter().any(|v| v.cards.iter().any(|c| !c.covered))
+        self.hidden.is_none() && self.views.iter().any(|v| v.cards.iter().any(|c| !c.covered) || !v.lanes.is_empty())
     }
 
     /// FNV-1a over everything the overlay draws from, for "publish when changed".
@@ -311,6 +335,13 @@ impl Scene {
                 }
                 for g in &c.gaps {
                     h.rect(g);
+                }
+            }
+            for l in &v.lanes {
+                h.i(5);
+                h.i(l.slot.into());
+                for w in l.lane.hash_words() {
+                    h.i(w);
                 }
             }
         }
@@ -390,6 +421,8 @@ pub struct SceneMachine {
     last_margin: u32,
     white_black: Option<([f32; 3], [f32; 3])>,
     build_warned: Option<u16>,
+    /// `STATUS.addonBuild` of the latest decoded frame (None before the first one).
+    addon_build: Option<u16>,
     gaps: VecDeque<f32>,
     weak_since: Option<u64>,
     weak_warned: bool,
@@ -414,6 +447,7 @@ impl SceneMachine {
             last_margin: 0,
             white_black: None,
             build_warned: None,
+            addon_build: None,
             gaps: VecDeque::new(),
             weak_since: None,
             weak_warned: false,
@@ -479,6 +513,7 @@ impl SceneMachine {
         self.last_mode = f.mode;
         self.last_margin = f.min_gap.max(0.0).round() as u32;
         self.white_black = Some((f.white, f.black));
+        self.addon_build = Some(f.addon_build);
         if !build_served(f.addon_build) && self.build_warned != Some(f.session) {
             self.build_warned = Some(f.session);
             out.push(Action::Toast(if f.addon_build < ADDON_BUILD { ToastKind::AddonOld } else { ToastKind::HelperOld }));
@@ -584,6 +619,21 @@ impl SceneMachine {
         self.slots.get(&slot).map(|s| s.reply)
     }
 
+    /// True when the addon draws a hint lane under the card of `slot` in a view of `kind`, so the
+    /// capture searches it. Never under the `/tpr test rows` card (slot 127: its next line is the
+    /// addon's own print). An addon older than `LANES_BUILD` draws one under the reply card only.
+    /// Before the first frame (a Helper started after the clicks) the build is not known: the
+    /// lanes are searched, as a current addon draws them.
+    pub fn lanes_for(&self, slot: u8, kind: ViewKind) -> bool {
+        if slot == TEST_SLOT {
+            return false;
+        }
+        match self.addon_build {
+            Some(b) if b < LANES_BUILD => kind == ViewKind::Window && self.reply_expected(slot) == Some(true),
+            _ => true,
+        }
+    }
+
     /// Overlay areas: one per VIEW, or id 0 = the whole client below row 16 when none is known.
     pub fn view_areas(&self, client_w: i32, client_h: i32) -> Vec<(u8, Rect, u8)> {
         let cut = |r: Rect| -> Rect {
@@ -615,9 +665,15 @@ impl SceneMachine {
     }
 
     /// Builds the scene for one tick from the cards found in this capture, with their background
-    /// samples and reply lanes. `covered(card)`: the card is covered by another window (the app
+    /// samples and hint lanes. `covered(card)`: the card is covered by another window (the app
     /// asks for any cover with the game in front, a full cover otherwise).
     pub fn update_found(&mut self, input: &TickInput, cards: Vec<FoundCard>, hits: &[TagHit], covered: &mut dyn FnMut(&Card) -> bool) -> Scene {
+        self.update_found_lanes(input, cards, Vec::new(), hits, covered)
+    }
+
+    /// [`update_found`](Self::update_found) with the orphan lanes of this capture (already
+    /// through the covering test).
+    pub fn update_found_lanes(&mut self, input: &TickInput, cards: Vec<FoundCard>, orphans: Vec<FoundLane>, hits: &[TagHit], covered: &mut dyn FnMut(&Card) -> bool) -> Scene {
         if input.fresh {
             self.last_fresh_ms = Some(input.now_ms);
         }
@@ -640,7 +696,7 @@ impl SceneMachine {
         let mut views: Vec<SceneView> = self
             .view_areas(w.geom.client_w, w.geom.client_h)
             .into_iter()
-            .map(|(id, rect, font_px)| SceneView { id, kind: ViewKind::of(id), rect, font_px, cards: Vec::new() })
+            .map(|(id, rect, font_px)| SceneView { id, kind: ViewKind::of(id), rect, font_px, cards: Vec::new(), lanes: Vec::new() })
             .collect();
         let mut seen_unknown: Vec<(u8, u8)> = Vec::new();
         for FoundCard { card, bg, lane } in cards {
@@ -669,11 +725,19 @@ impl SceneMachine {
                 .map(|h| h.block_px)
                 .unwrap_or(0.0);
             let is_covered = covered(&card);
-            // a lane belongs to a reply card only
-            let lane = lane.filter(|_| matches!(kind, CardKind::Request { reply: true, .. }));
+            // every card's hint lane is covered while the card is painted, whatever its state
+            // (since 2026-10-19: bubbles and inline rows too, not only the reply card)
             view.cards.push(SceneCard { card, kind, covered: is_covered, block_px, bg, lane });
         }
         self.unknown_seen.retain(|k, _| seen_unknown.contains(k));
+        for o in orphans {
+            let Some(view) = views.iter_mut().find(|v| v.id == o.view_id && v.kind == ViewKind::Chat) else { continue };
+            // a card of the slot in this view has its own lane
+            if view.cards.iter().any(|c| c.card.slot == o.slot) {
+                continue;
+            }
+            view.lanes.push(SceneLane { slot: o.slot, lane: o.lane });
+        }
         Scene { wow: Some(w.geom), views, hidden: None, lang_target, gdi: false, foreground: w.foreground }
     }
 }
@@ -861,16 +925,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn reply_cards_and_their_lanes() {
+    fn every_card_keeps_its_lane() {
         use crate::lane::Lane;
         let mut m = SceneMachine::new();
         m.on_message(42, Message::View(vec![View { id: 200, x: 20, y: 400, w: 400, h: 500, font_px: 14, row_px: 16 }, view(1)]));
         m.on_message(42, reply(20, true, "de"));
         m.on_message(42, translate(7, 5, "fr"));
-        let lane = Lane { rect: rect(10, 948, 250, 16), rgb: [36, 30, 24], cols: vec![true; 250] };
+        let lane = Lane::flat(rect(10, 948, 250, 16), [36, 30, 24], vec![true; 250]);
+        let other = Lane::flat(rect(10, 632, 250, 16), [36, 30, 24], vec![true; 250]);
         let found = vec![
             FoundCard { card: card(REPLY_SLOT, 200, 900, 3, 1.0), bg: CardBg::default(), lane: Some(lane.clone()) },
-            FoundCard { card: card(5, 200, 600, 2, 1.0), bg: CardBg::default(), lane: Some(lane.clone()) },
+            FoundCard { card: card(5, 200, 600, 2, 1.0), bg: CardBg::default(), lane: Some(other.clone()) },
+            // a slot the Helper never received ("Not received" after 1.5 s): its lane too
+            FoundCard { card: card(9, 1, 300, 1, 1.0), bg: CardBg::default(), lane: Some(other.clone()) },
         ];
         let s = m.update_found(&tick(10, true, true), found, &[], &mut no_cover);
         assert_eq!(s.views[0].kind, ViewKind::Window);
@@ -878,7 +945,9 @@ pub(crate) mod tests {
         let cards = &s.views[0].cards;
         assert!(matches!(cards[0].kind, CardKind::Request { reply: true, rows: 3, .. }));
         assert_eq!(cards[0].lane.as_ref(), Some(&lane));
-        assert!(cards[1].lane.is_none(), "a lane belongs to a reply card only");
+        assert_eq!(cards[1].lane.as_ref(), Some(&other), "a bubble's lane (U1, 2026-10-19)");
+        assert!(matches!(s.views[1].cards[0].kind, CardKind::Pending));
+        assert_eq!(s.views[1].cards[0].lane.as_ref(), Some(&other), "an unknown slot's lane");
         // the lane is part of what the overlay draws from
         let mut moved = lane.clone();
         moved.cols[100] = false;
@@ -891,6 +960,26 @@ pub(crate) mod tests {
         assert_ne!(s.fingerprint(), s2.fingerprint());
         assert_eq!(ViewKind::of(199), ViewKind::Chat);
         assert_eq!(ViewKind::of(255), ViewKind::Window);
+    }
+
+    #[test]
+    fn lanes_are_searched_where_the_addon_draws_them() {
+        let f = |build| FrameInfo { session: 42, mode: Mode::Dense, addon_build: build, min_gap: 40.0, white: [255.0; 3], black: [0.0; 3] };
+        let mut m = SceneMachine::new();
+        m.on_message(42, reply(20, true, "de"));
+        m.on_message(42, translate(7, 5, "fr"));
+        // before the first frame (a Helper started after the clicks): every card but the test's
+        for (slot, kind) in [(5, ViewKind::Chat), (5, ViewKind::Window), (REPLY_SLOT, ViewKind::Window), (9, ViewKind::Chat)] {
+            assert!(m.lanes_for(slot, kind), "slot {slot} {kind:?}");
+        }
+        assert!(!m.lanes_for(TEST_SLOT, ViewKind::Chat), "the test rows have no lane: the addon's print follows them");
+        // addon build 4 (this one): the same
+        m.on_frame(&f(4), 0);
+        assert!(m.lanes_for(5, ViewKind::Chat) && m.lanes_for(9, ViewKind::Window) && !m.lanes_for(TEST_SLOT, ViewKind::Window));
+        // an addon of build 3 draws the reply card's lane only
+        m.on_frame(&f(3), 0);
+        assert!(m.lanes_for(REPLY_SLOT, ViewKind::Window));
+        assert!(!m.lanes_for(5, ViewKind::Chat) && !m.lanes_for(5, ViewKind::Window) && !m.lanes_for(9, ViewKind::Window));
     }
 
     #[test]
@@ -1030,11 +1119,13 @@ pub(crate) mod tests {
     fn addon_build_mismatch_toasts_once_per_session() {
         let mut m = SceneMachine::new();
         let f = |session, build| FrameInfo { session, mode: Mode::Dense, addon_build: build, min_gap: 40.0, white: [255.0; 3], black: [0.0; 3] };
-        assert_eq!(ADDON_BUILD, 3);
+        assert_eq!(ADDON_BUILD, 4);
         assert!(m.on_frame(&f(5, ADDON_BUILD), 0).is_empty());
-        // build 2 (rows 1..6, no reply bit) is served without a toast
+        // build 2 (rows 1..6, no reply bit) and build 3 (no lanes but the reply's) are served
+        // without a toast
         assert!(m.on_frame(&f(5, 2), 0).is_empty());
-        assert!(build_served(2) && build_served(3) && !build_served(1) && !build_served(4));
+        assert!(m.on_frame(&f(5, 3), 0).is_empty());
+        assert!(build_served(2) && build_served(3) && build_served(4) && !build_served(1) && !build_served(5));
         assert!(matches!(m.on_frame(&f(5, ADDON_BUILD + 1), 0).as_slice(), [Action::Toast(ToastKind::HelperOld)]));
         assert!(m.on_frame(&f(5, ADDON_BUILD + 1), 0).is_empty());
         // the build before rows 1..6 (b8a3e23) is told to update

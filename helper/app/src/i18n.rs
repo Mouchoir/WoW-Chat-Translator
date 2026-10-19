@@ -58,6 +58,7 @@ pub const USED_KEYS: &[&str] = &[
     "tray.state.busy",
     "tray.state.error",
     "tray.unload",
+    "tray.updates",
     "tray.open_logs",
     "tray.copy_replies",
     "tray.reply_sound",
@@ -172,14 +173,23 @@ mod tests {
         assert_eq!(tr_fmt(Lang::Fr, "status.same", &[("language", language_name(Lang::Fr, "fr"))]), "Déjà en français");
         assert_eq!(
             tr_fmt(Lang::En, "toast.bridge_ok", &[("mode", "dense"), ("m", "42"), ("capture", "WGC"), ("hz", "20")]),
-            "TranslateProbe Helper: bridge OK (dense, margin 42, WGC 20 Hz)"
+            "Translate Companion: bridge OK (dense, margin 42, WGC 20 Hz)"
         );
         // the reply card's row 0 (design A.6.4) and the window wording (A.7)
         assert_eq!(tr(Lang::En, "reply.ready"), "Ready - Ctrl+V to paste");
         assert_eq!(tr(Lang::En, "reply.ready_cut"), "Ready - Ctrl+V to paste (shortened to 255 bytes)");
         assert_eq!(tr_fmt(Lang::En, "reply.same", &[("language", language_name(Lang::En, "de"))]), "Already in German - Ctrl+V to paste");
         assert_eq!(tr(Lang::En, "reply.not_copied"), "Ready (not copied)");
-        assert_eq!(tr(Lang::En, "reply.off"), "Ready (not copied - off in the Helper menu)");
+        assert_eq!(tr(Lang::En, "reply.off"), "Ready (not copied - off in the Translate Companion menu)");
+        // the app's name users see (user request U2, 2026-10-19)
+        assert_eq!(tr_fmt(Lang::En, "tray.tip", &[("version", "0.4.0"), ("state", "translating")]), "Translate Companion 0.4.0 - translating");
+        assert_eq!(tr(Lang::En, "balloon.title"), "Translate Companion");
+        assert_eq!(tr(Lang::Fr, "tray.updates"), "Obtenir les mises à jour");
+        for lang in [Lang::En, Lang::Fr] {
+            for key in USED_KEYS {
+                assert!(!tr(lang, key).contains("TranslateProbe Helper") && !tr(lang, key).contains("Helper"), "{lang:?} {key}");
+            }
+        }
         assert_eq!(tr(Lang::En, "reply.changed"), "Not copied - you copied something else. Click Translate again");
         assert_eq!(tr(Lang::En, "reply.busy"), "Not copied - clipboard busy. Click Translate again");
         assert_eq!(tr(Lang::En, "reply.failed"), "Translation failed - click Translate again");

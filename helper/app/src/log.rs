@@ -81,6 +81,8 @@ pub enum AppEvent {
     /// The tray's reply switches (or `--no-clipboard`, logged as copy off).
     ReplySwitches { copy: bool, sound: bool },
     TrayIcon { ok: bool },
+    /// The tray's "Get updates": the releases page opened in the browser.
+    TrayUpdates,
     Exit { code: i32, uptime_s: u64 },
     Panic { line: u32 },
 }

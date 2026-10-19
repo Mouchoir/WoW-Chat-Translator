@@ -27,7 +27,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 fn spawn(name: &str, dir: &Path, extra: &[&str]) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_TranslateProbeHelper"))
+    Command::new(env!("CARGO_BIN_EXE_WoWTranslateCompanion"))
         .args(["--instance-name", name, "--no-tray", "--translator", "echo", "--wow-class", "TPNoSuchGameWindowClass", "--exit-after", "60"])
         .args(extra)
         .arg("--log-dir")

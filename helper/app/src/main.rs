@@ -1,4 +1,4 @@
-//! TranslateProbeHelper.exe entry point.
+//! WoWTranslateCompanion.exe (Translate Companion) entry point.
 #![windows_subsystem = "windows"]
 #![allow(non_snake_case)]
 

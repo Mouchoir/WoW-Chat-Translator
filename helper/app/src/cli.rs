@@ -1,7 +1,7 @@
 //! Command line (design D.6, plus the test flags of amendment A1).
 //!
 //! ```text
-//! TranslateProbeHelper.exe [--runtime DIR] [--model FILE] [--backend auto|cpu|vulkan|cuda] [--capture auto|wgc|gdi]
+//! WoWTranslateCompanion.exe [--runtime DIR] [--model FILE] [--backend auto|cpu|vulkan|cuda] [--capture auto|wgc|gdi]
 //!   [--translator llama|echo] [--wow-class CLASS] [--diag] [--diag-json FILE] [--log-dir DIR] [--no-tray]
 //!   [--exit-after SECS] [--selftest]
 //! test flags: [--no-overlay] [--assume-foreground] [--overlay-probe] [--no-clipboard]
@@ -188,14 +188,21 @@ impl std::fmt::Display for CliError {
     }
 }
 
-pub const USAGE: &str = "TranslateProbeHelper.exe [--runtime DIR] [--model FILE] [--backend auto|cpu|vulkan|cuda]
+pub const USAGE: &str = concat!(
+    "Translate Companion: translates the TranslateProbe addon's WoW chat lines locally.
+Updates: ",
+    crate::releases_url!(),
+    "
+
+WoWTranslateCompanion.exe [--runtime DIR] [--model FILE] [--backend auto|cpu|vulkan|cuda]
   [--capture auto|wgc|gdi] [--translator llama|echo] [--wow-class CLASS] [--diag] [--diag-json FILE]
   [--log-dir DIR] [--no-tray] [--exit-after SECS] [--selftest]
 Test flags: [--no-overlay] (never show a window, render into memory only; implies --assume-foreground
   and --no-clipboard, and skips the covering test)
   [--assume-foreground] [--overlay-probe] (synthetic card, use with --exit-after 5)
   [--no-clipboard] (never touch the clipboard: replies show \"not copied\")
-";
+"
+);
 
 const VALUE_FLAGS: &[&str] = &[
     "--runtime",
@@ -333,6 +340,16 @@ mod tests {
         assert!(!o.no_clipboard && o.clipboard_off(), "--no-overlay implies --no-clipboard");
         assert!(!Cli::default().clipboard_off());
         assert!(USAGE.contains("--no-clipboard"));
+    }
+
+    #[test]
+    fn help_names_the_app_and_its_releases_page() {
+        // user requests U2 and U3 (2026-10-19)
+        assert!(USAGE.starts_with("Translate Companion: "));
+        assert!(USAGE.contains(&format!("Updates: {}\n", crate::RELEASES_URL)));
+        assert!(USAGE.contains("\nWoWTranslateCompanion.exe [--runtime DIR]"));
+        assert_eq!(crate::RELEASES_URL, "https://github.com/Mouchoir/WoW-Chat-Translator/releases");
+        assert_eq!(crate::EXE_NAME, "WoWTranslateCompanion.exe");
     }
 
     #[test]
