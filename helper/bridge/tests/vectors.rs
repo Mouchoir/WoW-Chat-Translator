@@ -55,6 +55,10 @@ fn describe(m: &Message) -> String {
         Message::Clear => "clear".into(),
         Message::Test { nonce } => format!("test {nonce}"),
         Message::View(v) => format!("view {v:?}"),
+        Message::Colours { req_id, spans } => {
+            let s: Vec<String> = spans.iter().map(|(i, c)| format!("{i}:{}", tp_bridge::marks::hex(*c))).collect();
+            format!("colours {req_id} [{}]", s.join(","))
+        }
     }
 }
 
@@ -207,12 +211,65 @@ fn builder_vectors_parse_like_the_reference() {
                     .collect();
                 format!("view {views:?}")
             }
+            "colours" => {
+                let s: Vec<String> = p["spans"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|q| format!("{}:{}", q[0], q[1].as_str().unwrap()))
+                    .collect();
+                format!("colours {} [{}]", p["req"], s.join(","))
+            }
             other => panic!("type {other}"),
         };
         assert_eq!(describe(&r), want);
         n += 1;
     }
     assert!(n >= 25);
+}
+
+/// marks.json "merge" (docs\BRIDGE.md section 3b): the TRANSLATE text and its COLOURS give the
+/// reference's coloured marks (`marks::with_colours`, what the scene hands the engine).
+#[test]
+fn colours_merge_like_the_reference() {
+    use tp_bridge::marks;
+    let v = load(vectors().join("marks.json"));
+    let mut n = 0;
+    for m in v["merge"].as_array().unwrap() {
+        let wire = String::from_utf8(hex(m["wire"]["s"].as_str().unwrap())).unwrap();
+        let colours: Vec<(u8, [u8; 3])> = m["colours"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                let v = u32::from_str_radix(c[1].as_str().unwrap(), 16).unwrap();
+                (c[0].as_u64().unwrap() as u8, [(v >> 16) as u8, (v >> 8) as u8, v as u8])
+            })
+            .collect();
+        let want = String::from_utf8(hex(m["merged"]["s"].as_str().unwrap())).unwrap();
+        assert_eq!(to_hex(marks::with_colours(&wire, &colours).as_bytes()), to_hex(want.as_bytes()), "{}", m["note"]);
+        n += 1;
+    }
+    assert!(n >= 6, "{n} merge vectors");
+}
+
+/// The TRANSLATE builder vectors never carry a 0x04 (a Companion of build 4 would paint the colour
+/// digits as text): the colours go in COLOURS vectors of their own ("hex" "" = no message).
+#[test]
+fn translate_vectors_never_carry_a_colour_code() {
+    let v = load(vectors().join("messages.json"));
+    let mut coloured = 0;
+    for m in v.as_array().unwrap() {
+        if m["fn"] == "translate" {
+            if let Ok(Message::Translate(t)) = parse_message(&hex(m["hex"].as_str().unwrap())) {
+                assert!(!t.text.as_str().contains('\u{4}'), "{}", m["note"]);
+            }
+        }
+        if m["fn"] == "colours" && m["hex"].as_str().is_some_and(|h| !h.is_empty()) {
+            coloured += 1;
+        }
+    }
+    assert!(coloured >= 4, "{coloured} COLOURS vectors");
 }
 
 #[test]
@@ -322,4 +379,57 @@ fn lua_small_messages() {
             View { id: 3, x: 1600, y: 1000, w: 500, h: 200, font_px: 14, row_px: 16 },
         ]
     );
+}
+
+/// marks.json "decode" (docs\BRIDGE.md section 3a): the spans `marks::split` finds are the
+/// reference reader's, in order, with the same colours.
+#[test]
+fn marks_decode_like_the_reference() {
+    use tp_bridge::marks::{self, Piece};
+    let v = load(vectors().join("marks.json"));
+    let mut n = 0;
+    for d in v["decode"].as_array().unwrap() {
+        let text = String::from_utf8(hex(d["text"]["s"].as_str().unwrap())).unwrap();
+        let got: Vec<(String, Option<String>)> = marks::split(&text)
+            .into_iter()
+            .filter_map(|p| match p {
+                Piece::Span { text, rgb } => Some((to_hex(text.as_bytes()), rgb.map(marks::hex))),
+                Piece::Plain(_) => None,
+            })
+            .collect();
+        let want: Vec<(String, Option<String>)> = d["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s[0].as_str().unwrap().to_lowercase(), s[1].as_str().map(str::to_uppercase)))
+            .collect();
+        assert_eq!(got, want, "{}", d["note"]);
+        // the visible text never holds a mark
+        assert!(!marks::plain(&text).contains(marks::is_mark), "{}", d["note"]);
+        n += 1;
+    }
+    assert!(n >= 11, "{n} decode vectors");
+}
+
+/// marks.json "encode": for a well-formed coloured span, the engine's writer (`marks::span`, how
+/// a translation carries a link colour back) builds the addon's bytes.
+#[test]
+fn marks_writer_matches_the_addon_for_coloured_spans() {
+    use tp_bridge::marks;
+    let v = load(vectors().join("marks.json"));
+    let mut n = 0;
+    for e in v["encode"].as_array().unwrap() {
+        // a nil name or no colour: the addon's builder only
+        let Some(name) = e["name"]["s"].as_str() else { continue };
+        let name = String::from_utf8(hex(name)).unwrap();
+        let Some(rgb) = e["rgb"].as_str() else { continue };
+        if rgb.len() != 6 || !rgb.bytes().all(|b| b.is_ascii_hexdigit()) || name.is_empty() || name.contains(marks::is_mark) || name.contains('\u{1}') {
+            continue;
+        }
+        let c = u32::from_str_radix(rgb, 16).unwrap();
+        let rgb = [(c >> 16) as u8, (c >> 8) as u8, c as u8];
+        assert_eq!(to_hex(marks::span(&name, Some(rgb)).as_bytes()), e["hex"].as_str().unwrap().to_lowercase(), "{}", e["note"]);
+        n += 1;
+    }
+    assert!(n >= 3, "{n} encode vectors");
 }

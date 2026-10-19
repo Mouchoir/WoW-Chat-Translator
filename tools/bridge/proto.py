@@ -27,6 +27,7 @@ STATUS_DATA = 6                        # physW u16, physH u16, addonBuild u16
 STATUS_LEN = REC_HDR + STATUS_DATA
 CHUNK_FIXED = 10                       # msgId u16, idx u8, count u8, total u16, msgCrc u32
 MSG_TRANSLATE, MSG_CANCEL, MSG_CLEAR, MSG_TEST, MSG_VIEW = 0x10, 0x11, 0x12, 0x13, 0x14
+MSG_COLOURS = 0x15                     # the link colours of the next TRANSLATE (addon build 5)
 MIN_COLS = {0: 192, 1: 384, 2: 576}    # floor for the max_cols option: 248-252 B of chunk data
 MIN_SCREEN_COLS = 200                  # floor for a degenerate screen size: 64 B of chunk data in mono
 CREDIT_CAP_MS = 100                    # max exposure credited per game frame (hitch guard)
@@ -126,6 +127,165 @@ def _b(s):
     return b""
 
 
+# ---------------------------------------------------------------- marked spans (TRANSLATE text)
+# docs/BRIDGE.md, "Marked spans": 0x02 [0x04 RRGGBB] name 0x03. The colour prefix (addon build 5,
+# 2026-10-19) is the colour the client draws a link name in; "{...}" groups never carry one. It is
+# the form PromptText writes and the engine reads; on the wire the TRANSLATE text has no 0x04 and
+# the colours travel in COLOURS (split_colours, msg_colours, merge_colours; section 3b).
+MARK_OPEN, MARK_CLOSE, MARK_COLOR = 0x02, 0x03, 0x04
+_HEX = frozenset(b"0123456789abcdefABCDEF")
+
+
+def mark_span(name, rgb=None):
+    """Bridge.MarkSpan: 0x02, then 0x04 and rgb in uppercase when rgb is 6 hex digits, the name
+    without bytes 0x01-0x04, then 0x03; b"" for an empty name."""
+    b = bytes(c for c in _b(name) if c not in (1, 2, 3, 4))
+    if not b:
+        return b""
+    color = b""
+    if isinstance(rgb, (str, bytes)):
+        r = _b(rgb)
+        if len(r) == 6 and all(c in _HEX for c in r):
+            color = bytes([MARK_COLOR]) + r.upper()
+    return bytes([MARK_OPEN]) + color + b + bytes([MARK_CLOSE])
+
+
+def parse_marks(text):
+    """The marked spans of a TRANSLATE text, in order: a list of (name bytes, "RRGGBB" or None).
+    A span opens at 0x02; a 0x04 right after it followed by 6 hex digits (either case) is its
+    colour (returned uppercase); a 0x04 anywhere else, or not followed by 6 hex digits, is dropped
+    alone; the span closes at the next 0x03. A 0x02 inside an open span starts it again (the
+    first one is text); a 0x03 outside a span, a span never closed and an empty span are not
+    spans. (The reference for readers: the addon writes only well-formed spans.)"""
+    b = _b(text)
+    out = []
+    i, n = 0, len(b)
+    name, rgb = None, None
+    while i < n:
+        c = b[i]
+        if c == MARK_OPEN:
+            name, rgb = bytearray(), None
+            i += 1
+            if i < n and b[i] == MARK_COLOR:
+                h = b[i + 1:i + 7]
+                if len(h) == 6 and all(x in _HEX for x in h):
+                    rgb = h.decode("ascii").upper()
+                    i += 7
+                else:
+                    i += 1
+            continue
+        if c == MARK_CLOSE:
+            if name is not None and name:
+                out.append((bytes(name), rgb))
+            name, rgb = None, None
+        elif name is not None and c != MARK_COLOR:
+            name.append(c)
+        i += 1
+    return out
+
+
+def split_pieces(text):
+    """The reader's pieces of a marked text, in order (Rust marks::split): ("plain", bytes) and
+    ("span", name bytes, "RRGGBB" or None); consecutive plain bytes form one piece. Same rules
+    as parse_marks: a 0x02 inside an open span makes the open one text, a 0x03 outside a span
+    and a 0x04 anywhere but right after a 0x02 (with 6 hex digits) are dropped, an unterminated
+    span is text, an empty span is dropped."""
+    b = _b(text)
+    out, plain = [], bytearray()
+    i, n = 0, len(b)
+    name, rgb = None, None
+    while i < n:
+        c = b[i]
+        if c == MARK_OPEN:
+            if name is not None:
+                plain += name
+            name, rgb = bytearray(), None
+            i += 1
+            if i < n and b[i] == MARK_COLOR:
+                h = b[i + 1:i + 7]
+                if len(h) == 6 and all(x in _HEX for x in h):
+                    rgb = h.decode("ascii").upper()
+                    i += 7
+                else:
+                    i += 1
+            continue
+        if c == MARK_CLOSE:
+            if name:
+                if plain:
+                    out.append(("plain", bytes(plain)))
+                    plain = bytearray()
+                out.append(("span", bytes(name), rgb))
+            name, rgb = None, None
+        elif c != MARK_COLOR:
+            if name is not None:
+                name.append(c)
+            else:
+                plain.append(c)
+        i += 1
+    if name is not None:
+        plain += name
+    if plain:
+        out.append(("plain", bytes(plain)))
+    return out
+
+
+def split_colours(text):
+    """Bridge.lua SplitColours: the wire form of the addon's marked text and its colours. Each
+    colour prefix the addon writes (0x04 and 6 hex digits right after a 0x02) is taken out and
+    recorded as (span index from 0, "RRGGBB" uppercase), counting every 0x02; a 0x04 not
+    followed by 6 hex digits is dropped alone; any other 0x04 is deleted. The text is then cut at
+    1024 B (cut_marked) and only the colours of the spans the cut kept stay, at most 255, index
+    <= 255. A TRANSLATE never carries 0x04: the colours travel in COLOURS (docs/BRIDGE.md 3b)."""
+    b = _b(text)
+    out, colours = bytearray(), []
+    i, n, span = 0, len(b), -1
+    while i < n:
+        c = b[i]
+        if c == MARK_OPEN:
+            span += 1
+            out.append(c)
+            i += 1
+            if i < n and b[i] == MARK_COLOR:
+                h = b[i + 1:i + 7]
+                if len(h) == 6 and all(x in _HEX for x in h):
+                    colours.append((span, h.decode("ascii").upper()))
+                    i += 7
+                else:
+                    i += 1
+            continue
+        if c != MARK_COLOR:
+            out.append(c)
+        i += 1
+    wire = cut_marked(bytes(out), MAX_TEXT)
+    kept = wire.count(bytes([MARK_OPEN]))
+    colours = [(k, rgb) for k, rgb in colours if k < kept and k <= 255][:255]
+    return wire, colours
+
+
+def merge_colours(text, colours):
+    """Rust marks::with_colours: the TRANSLATE text with its COLOURS written in. Span k (reader
+    order) gets 0x04 RRGGBB after its 0x02 when colours lists k, else keeps the colour it has;
+    every span keeps its marks; the rest is rebuilt from split_pieces. No colours: unchanged."""
+    b = _b(text)
+    if not colours:
+        return b
+    want = {k: rgb for k, rgb in colours}
+    out, k = bytearray(), 0
+    for p in split_pieces(b):
+        if p[0] == "plain":
+            out += p[1]
+            continue
+        rgb = want.get(k, p[2])
+        out.append(MARK_OPEN)
+        if rgb:
+            out.append(MARK_COLOR)
+            out += rgb.upper().encode("ascii")
+        out += p[1]
+        out.append(MARK_CLOSE)
+        k += 1
+    return bytes(out)
+
+
 def str8(s, n):
     b = utf8_cut(_b(s), n)
     return bytes([len(b)]) + b
@@ -141,8 +301,9 @@ def translate_flags(flags):
 
 def msg_translate(req_id, slot, rows, flags, target, text, pairs):
     """Bridge.TranslateMessage. pairs: list of (term, meaning); entries that are not two strings
-    are skipped; at most 8, each cut to 48 / 120 bytes, stopping before 512 bytes in total."""
-    tb = cut_marked(_b(text), MAX_TEXT)
+    are skipped; at most 8, each cut to 48 / 120 bytes, stopping before 512 bytes in total. The
+    text is the wire form of split_colours (no 0x04; the colours go in msg_colours)."""
+    tb, _ = split_colours(text)
     out = bytes([MSG_TRANSLATE]) + bytes(u16(clamp(req_id, 0, 65535))) + bytes([clamp(slot, 0, 255)])
     out += bytes([clamp(rows, 0, 255), translate_flags(flags)])
     out += str8(target, MAX_TARGET) + bytes(u16(len(tb))) + tb
@@ -160,6 +321,19 @@ def msg_translate(req_id, slot, rows, flags, target, text, pairs):
         parts.append(bytes([len(term)]) + term + bytes([len(meaning)]) + meaning)
         used += cost
     return out + bytes([len(parts)]) + b"".join(parts)
+
+
+def msg_colours(req_id, text):
+    """Bridge.ColoursMessage: the COLOURS of a TRANSLATE text (split_colours), sent right before
+    that TRANSLATE: reqId u16, n u8, n x (span u8, r, g, b). b"" when no span has a colour (the
+    Lua builder returns nil)."""
+    _, colours = split_colours(text)
+    if not colours:
+        return b""
+    out = bytes([MSG_COLOURS]) + bytes(u16(clamp(req_id, 0, 65535))) + bytes([len(colours)])
+    for k, rgb in colours:
+        out += bytes([k]) + bytes.fromhex(rgb)
+    return out
 
 
 def msg_cancel(req_id, slot):
@@ -807,4 +981,17 @@ def parse_message(m):
                           "h": (v[7] << 8) | v[8], "fontPx": v[9], "rowPx": v[10]})
         end()
         return {"type": "view", "views": views}
+    if t == MSG_COLOURS:
+        req = int.from_bytes(take(2), "big")
+        n = take(1)[0]
+        if n < 1:
+            raise ValueError("range")
+        spans = []
+        for _ in range(n):
+            e = take(4)
+            if spans and e[0] <= spans[-1][0]:
+                raise ValueError("order")
+            spans.append([e[0], bytes(e[1:4]).hex().upper()])
+        end()
+        return {"type": "colours", "req": req, "spans": spans}
     raise ValueError("type")

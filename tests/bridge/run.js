@@ -68,6 +68,8 @@ run('TAGS = ' + toLua(JSON.parse(fs.readFileSync(path.join(vectors, 'tags.json')
 run('RunTags()', 'tags');
 run('MESSAGES = ' + toLua(JSON.parse(fs.readFileSync(path.join(vectors, 'messages.json'), 'utf8'))), 'messages.json');
 run('RunMessages()', 'messages');
+run('MARKS = ' + toLua(JSON.parse(fs.readFileSync(path.join(vectors, 'marks.json'), 'utf8'))), 'marks.json');
+run('RunMarks()', 'marks');
 run('RunApi()', 'api');
 run('Summary()', 'summary');
 

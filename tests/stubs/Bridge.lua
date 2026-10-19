@@ -14,6 +14,7 @@ local Bridge = {}
 ns.Bridge = Bridge
 
 local MSG_TRANSLATE, MSG_CANCEL, MSG_CLEAR, MSG_TEST, MSG_VIEW = 0x10, 0x11, 0x12, 0x13, 0x14
+local MSG_COLOURS, MAX_COLOURS = 0x15, 255
 local MAX_TEXT, MAX_TARGET, MAX_PAIRS, MAX_TERM, MAX_MEANING, MAX_PAIR_BYTES = 1024, 8, 8, 48, 120, 512
 local MAX_VIEWS = 4
 local FLAG_NOCACHE, FLAG_PLATE, FLAG_REPLY, FLAG_COPY = 1, 2, 4, 8
@@ -101,6 +102,23 @@ local function Str8(s, n)
     return char(#s) .. s
 end
 
+-- A marked span of a TRANSLATE text: 0x02, 0x04 and RRGGBB when rgb is 6 hex digits, the name
+-- without 0x01-0x04, 0x03 (as the real Bridge.lua).
+function Bridge.MarkSpan(name, rgb)
+    if type(name) ~= "string" then
+        return ""
+    end
+    name = name:gsub("[\1-\4]", "")
+    if name == "" then
+        return ""
+    end
+    local color = ""
+    if type(rgb) == "string" and find(rgb, "^%x%x%x%x%x%x$") then
+        color = "\4" .. rgb:upper()
+    end
+    return "\2" .. color .. name .. "\3"
+end
+
 -- Bits 0-3 kept; copy dropped unless reply (as the real Bridge.lua, without the bit library).
 local function TranslateFlags(flags)
     flags = Clamp(flags, 0, 255) % (FLAGS_MASK + 1)
@@ -110,8 +128,52 @@ local function TranslateFlags(flags)
     return flags
 end
 
+-- The wire text and the colours of the addon's marked text (as the real Bridge.lua).
+local function SplitColours(text)
+    text = type(text) == "string" and text or ""
+    local colours = {}
+    if find(text, "\4", 1, true) then
+        local span = -1
+        text = text:gsub("\2(\4?)(%x?%x?%x?%x?%x?%x?)", function(prefix, hex)
+            span = span + 1
+            if prefix ~= "" and #hex == 6 then
+                colours[#colours + 1] = { span, hex:upper() }
+                return "\2"
+            end
+            return "\2" .. hex
+        end):gsub("\4", "")
+    end
+    text = CutMarked(text, MAX_TEXT)
+    if #colours > 0 then
+        local kept = select(2, text:gsub("\2", "\2"))
+        local out = {}
+        for i = 1, #colours do
+            local c = colours[i]
+            if c[1] < kept and c[1] <= 255 and #out < MAX_COLOURS then
+                out[#out + 1] = c
+            end
+        end
+        colours = out
+    end
+    return text, colours
+end
+
+function Bridge.ColoursMessage(reqId, text)
+    local _, colours = SplitColours(text)
+    local n = #colours
+    if n == 0 then
+        return nil
+    end
+    local parts = { char(MSG_COLOURS), U16(reqId), char(n) }
+    for i = 1, n do
+        local v = tonumber(colours[i][2], 16)
+        parts[i + 3] = char(colours[i][1], floor(v / 65536), floor(v / 256) % 256, v % 256)
+    end
+    return concat(parts)
+end
+
 function Bridge.TranslateMessage(reqId, slot, rows, flags, target, text, pairs)
-    text = CutMarked(type(text) == "string" and text or "", MAX_TEXT)
+    text = SplitColours(text)
     local parts = { char(MSG_TRANSLATE), U16(reqId), U8(slot), U8(rows), char(TranslateFlags(flags)),
         Str8(target, MAX_TARGET), U16(#text), text }
     local out, n, used = {}, 0, 0

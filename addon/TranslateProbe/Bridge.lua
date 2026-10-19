@@ -46,6 +46,8 @@ local STATUS_DATA = 6                          -- physW u16, physH u16, addonBui
 local STATUS_LEN = REC_HDR + STATUS_DATA
 local CHUNK_FIXED = 10                         -- msgId u16, idx u8, count u8, total u16, msgCrc u32
 local MSG_TRANSLATE, MSG_CANCEL, MSG_CLEAR, MSG_TEST, MSG_VIEW = 0x10, 0x11, 0x12, 0x13, 0x14
+local MSG_COLOURS = 0x15                       -- the link colours of the next TRANSLATE (addon build 5)
+local MAX_COLOURS = 255                        -- COLOURS entries (span index u8, strictly increasing)
 local MIN_COLS = { [0] = 192, [1] = 384, [2] = 576 }   -- floor for the maxCols option: 248-252 B of chunk data
 local MIN_SCREEN_COLS = 200                    -- floor for a degenerate screen size: 64 B of chunk data in mono
 local MAX_TEXT, MAX_TARGET, MAX_PAIRS, MAX_TERM, MAX_MEANING, MAX_PAIR_BYTES = 1024, 8, 8, 48, 120, 512
@@ -180,6 +182,26 @@ local function Str8(s, n)
     return char(#s) .. s
 end
 
+-- One marked span of the addon's text (docs\BRIDGE.md, "Marked spans"): 0x02, then 0x04 and the
+-- colour as 6 uppercase hex digits when rgb is 6 hex digits (addon build 5: the colour the client
+-- draws a link name in), the name without bytes 0x01-0x04, then 0x03. "" for an empty name. The
+-- message builders take the colours out (SplitColours): the TRANSLATE gets 0x02 name 0x03, the
+-- COLOURS message the colour.
+function Bridge.MarkSpan(name, rgb)
+    if type(name) ~= "string" then
+        return ""
+    end
+    name = name:gsub("[\1-\4]", "")
+    if name == "" then
+        return ""
+    end
+    local color = ""
+    if type(rgb) == "string" and find(rgb, "^%x%x%x%x%x%x$") then
+        color = "\4" .. rgb:upper()
+    end
+    return "\2" .. color .. name .. "\3"
+end
+
 ---------------------------------------------------------------------------- messages
 -- pairs: array of { term, meaning } (the glossary pairs matched in this line). Pairs are cut to
 -- 48 and 120 bytes; at most 8 are sent and they stop before 512 bytes (2 + #term + #meaning each).
@@ -195,8 +217,59 @@ local function TranslateFlags(flags)
     return flags
 end
 
+-- The wire form of the addon's marked text and its colours (docs\BRIDGE.md section 3b). Each
+-- colour prefix MarkSpan writes (0x04 and 6 hex digits right after a 0x02) is taken out and kept as
+-- { span index from 0, "RRGGBB" }, counting every 0x02; a 0x04 not followed by 6 hex digits is
+-- dropped alone and any other 0x04 is deleted. Then the 1024 B cut (CutMarked), and only the
+-- colours of the spans it kept, index <= 255, at most 255. A TRANSLATE never carries a 0x04: a
+-- Translate Companion of build 4 would paint the digits as text, while it skips COLOURS.
+local function SplitColours(text)
+    text = type(text) == "string" and text or ""
+    local colours = {}
+    if find(text, "\4", 1, true) then
+        local span = -1
+        text = text:gsub("\2(\4?)(%x?%x?%x?%x?%x?%x?)", function(prefix, hex)
+            span = span + 1
+            if prefix ~= "" and #hex == 6 then
+                colours[#colours + 1] = { span, hex:upper() }
+                return "\2"
+            end
+            return "\2" .. hex
+        end):gsub("\4", "")
+    end
+    text = CutMarked(text, MAX_TEXT)
+    if #colours > 0 then
+        local kept = select(2, text:gsub("\2", "\2"))
+        local out = {}
+        for i = 1, #colours do
+            local c = colours[i]
+            if c[1] < kept and c[1] <= 255 and #out < MAX_COLOURS then
+                out[#out + 1] = c
+            end
+        end
+        colours = out
+    end
+    return text, colours
+end
+
+-- COLOURS for a TRANSLATE text (the same text as given to TranslateMessage), sent right before
+-- that TRANSLATE: reqId u16, n u8, n x { span u8, r u8, g u8, b u8 }. nil when no span has a colour.
+function Bridge.ColoursMessage(reqId, text)
+    local _, colours = SplitColours(text)
+    local n = #colours
+    if n == 0 then
+        return nil
+    end
+    local parts = { char(MSG_COLOURS), U16(reqId), char(n) }
+    for i = 1, n do
+        local v = tonumber(colours[i][2], 16)
+        parts[i + 3] = char(colours[i][1], floor(v / 65536), floor(v / 256) % 256, v % 256)
+    end
+    return concat(parts)
+end
+
 function Bridge.TranslateMessage(reqId, slot, rows, flags, target, text, pairs)
-    text = CutMarked(type(text) == "string" and text or "", MAX_TEXT)
+    text = SplitColours(text)
     local parts = { char(MSG_TRANSLATE), U16(reqId), U8(slot), U8(rows), char(TranslateFlags(flags)),
         Str8(target, MAX_TARGET), U16(#text), text }
     local out, n, used = {}, 0, 0

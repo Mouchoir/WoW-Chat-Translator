@@ -4,7 +4,7 @@
 //! ```text
 //! 0x10 TRANSLATE reqId u16 | slot u8 (0..126) | rows u8 (1..6)
 //!                | flags u8 (bit0 noCache, bit1 plate, bit2 reply, bit3 copy, bits 4-7 = 0)
-//!                | target str8 (ASCII, 1..8) | text str16 (UTF-8, <= 1024 B, may hold 0x02/0x03 marks)
+//!                | target str8 (ASCII, 1..8) | text str16 (UTF-8, <= 1024 B, may hold 0x02/0x03/0x04 marks: `marks`)
 //!                | nPairs u8 (<= 8) | pairs: term str8 (<= 48 B), meaning str8 (<= 120 B);
 //!                  sum(2 + #term + #meaning) <= 512
 //!                  copy needs reply; reply needs plate, rows 2..6 (row 0 = the Helper's status,
@@ -13,6 +13,10 @@
 //! 0x12 CLEAR     (empty)
 //! 0x13 TEST      nonce u16
 //! 0x14 VIEW      n u8 (0..4) | n x { id u8, x u16, y u16, w u16, h u16, fontPx u8, rowPx u8 }
+//! 0x15 COLOURS   reqId u16 | n u8 (1..255) | n x { span u8, r u8, g u8, b u8 }
+//!                  span: the index (from 0) of a marked span in the text of the TRANSLATE with
+//!                  the same reqId, strictly increasing; sent right before that TRANSLATE
+//!                  (addon build 5, docs/BRIDGE.md section 3b)
 //! ```
 //! A message whose length does not match exactly, or with a field out of range, is refused.
 
@@ -60,7 +64,9 @@ pub struct Translate {
     /// The user allowed the clipboard for this reply (only ever set with `reply`).
     pub copy: bool,
     pub target: String,
-    /// Marked text: item links and `{...}` groups are wrapped in 0x02 ... 0x03.
+    /// Marked text: item links and `{...}` groups are wrapped in 0x02 ... 0x03. The addon sends
+    /// the link colours apart (COLOURS); the scene writes them into the text as 0x04 RRGGBB after
+    /// the 0x02 (`marks::with_colours`), the form the engine and the overlay read.
     pub text: ChatText,
     /// Glossary pairs (term, meaning) matched in this message.
     pub pairs: Vec<(ChatText, ChatText)>,
@@ -72,6 +78,9 @@ pub enum Message {
     Clear,
     Test { nonce: u16 },
     View(Vec<View>),
+    /// The colours of the link spans of the next TRANSLATE with this reqId: (span index from 0,
+    /// RGB), strictly increasing. Numbers only, no text.
+    Colours { req_id: u16, spans: Vec<(u8, [u8; 3])> },
 }
 
 #[derive(Debug)]
@@ -89,6 +98,7 @@ const MSG_CANCEL: u8 = 0x11;
 const MSG_CLEAR: u8 = 0x12;
 const MSG_TEST: u8 = 0x13;
 const MSG_VIEW: u8 = 0x14;
+const MSG_COLOURS: u8 = 0x15;
 
 const MAX_SLOT: u8 = 126;
 /// Reserved rows per request (1..6). A row tag carries the row number modulo 4; `cards::build`
@@ -252,6 +262,22 @@ pub fn parse_message(b: &[u8]) -> Result<Message, ParseError> {
             }
             Message::View(views)
         }
+        MSG_COLOURS => {
+            let req_id = r.u16()?;
+            let n = r.u8()?;
+            if n == 0 {
+                return Err(ParseError::Range);
+            }
+            let mut spans: Vec<(u8, [u8; 3])> = Vec::with_capacity(n as usize);
+            for _ in 0..n {
+                let s = r.take(4)?;
+                if spans.last().is_some_and(|&(prev, _)| s[0] <= prev) {
+                    return Err(ParseError::Range);
+                }
+                spans.push((s[0], [s[1], s[2], s[3]]));
+            }
+            Message::Colours { req_id, spans }
+        }
         other => return Err(ParseError::UnknownType(other)),
     };
     r.end()?;
@@ -275,8 +301,25 @@ mod tests {
         assert!(matches!(parse_message(&[0x13, 1]), Err(ParseError::Length)));
         assert!(matches!(parse_message(&[0x11, 0, 7, 3]), Ok(Message::Cancel { req_id: 7, slot: 3 })));
         assert!(matches!(parse_message(&[0x11, 0, 7, 200]), Err(ParseError::Range)));
-        assert!(matches!(parse_message(&[0x15]), Err(ParseError::UnknownType(0x15))));
+        assert!(matches!(parse_message(&[0x16]), Err(ParseError::UnknownType(0x16))));
         assert!(matches!(parse_message(&[0x02]), Err(ParseError::UnknownType(0x02))));
+    }
+
+    #[test]
+    fn colours() {
+        // reqId 300, spans 0 (0070DD) and 2 (71D5FF)
+        let b = hex("15012c02000070dd0271d5ff");
+        let Ok(Message::Colours { req_id, spans }) = parse_message(&b) else { panic!("colours") };
+        assert_eq!((req_id, spans), (300, vec![(0, [0, 0x70, 0xDD]), (2, [0x71, 0xD5, 0xFF])]));
+        // n 0, a span index not increasing, truncated, a trailing byte
+        assert!(matches!(parse_message(&hex("15012c00")), Err(ParseError::Range)));
+        assert!(matches!(parse_message(&hex("15012c02010070dd0171d5ff")), Err(ParseError::Range)));
+        assert!(matches!(parse_message(&hex("15012c02020070dd0171d5ff")), Err(ParseError::Range)));
+        assert!(matches!(parse_message(&hex("15012c02000070dd0271d5")), Err(ParseError::Length)));
+        assert!(matches!(parse_message(&hex("15012c01000070dd00")), Err(ParseError::Length)));
+        assert!(matches!(parse_message(&hex("15012c")), Err(ParseError::Length)));
+        // span 255 is the last index
+        assert!(matches!(parse_message(&hex("15000101ffffd100")), Ok(Message::Colours { spans, .. }) if spans == vec![(255, [255, 0xD1, 0])]));
     }
 
     #[test]

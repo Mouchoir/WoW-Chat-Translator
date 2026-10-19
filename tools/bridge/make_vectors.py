@@ -7,6 +7,10 @@
   messages.json               message builder inputs with the expected bytes, plus "raw" byte strings
                               no builder writes (parser-only cases); each with the reference parse
   strips.json                 distorted strip captures with the reference decoder's verdict
+  marks.json                  marked spans (0x02 [0x04 RRGGBB] name 0x03): MarkSpan bytes ("encode", the
+                              Lua builder must match), the spans a reader finds ("decode", for Translate
+                              Companion's reader) and a TRANSLATE text with its COLOURS written in
+                              ("merge", what Translate Companion's scene hands the engine)
 
 Usage: python -I tools/bridge/make_vectors.py [out_dir]   (default: tests/vectors next to tools/)
 All text is synthetic. Deterministic: the same files on every run."""
@@ -298,6 +302,36 @@ def make_messages():
     tr("reply to an undecided language refused (target ?)", 266, 126, 3, 14, "?", "x", [])
     tr("reply target with a digit refused", 267, 126, 3, 14, "de1", "x", [])
     tr("reply on another slot (any 0..126 is valid)", 268, 0, 2, 6, "fr", "x", [("lf", "cherche")])
+    # coloured marks (2026-10-19, STATUS.addonBuild 5): the addon's text holds 0x02 0x04 RRGGBB
+    # name 0x03 for a link name (MarkSpan); the TRANSLATE carries it without the colour (no 0x04
+    # on the wire) and COLOURS, sent right before it, carries (span index, RGB)
+    rare = P.mark_span("[Lattice Leggings]", "0070DD").decode("utf-8")
+    spell = P.mark_span("[Fireball]", "71D5FF").decode("utf-8")
+    skull = P.mark_span("{skull}").decode("utf-8")
+
+    def co(note, req, text):
+        args = [req, S(text) if text is not None else None]
+        out.append({"fn": "colours", "note": note, "args": args, "hex": P.msg_colours(req, text).hex()})
+
+    text = "WTS " + rare + " and " + spell + " " + skull
+    tr("coloured marks (addon build 5): the TRANSLATE has no 0x04", 269, 22, 2, 2, "fr", text, [("wts", "vend")])
+    co("coloured marks: COLOURS of spans 0 and 1, not the {skull} group", 269, text)
+    tr("text cut before an open coloured mark", 270, 23, 2, 2, "fr", "a" * 1010 + rare, [])
+    co("the cut span's colour is not sent: no COLOURS", 270, "a" * 1010 + rare)
+    tr("coloured mark ending at 1024 B without its colour prefix", 271, 24, 1, 2, "fr", "a" * (1024 - len(rare) + 7) + rare, [])
+    co("its colour is sent", 271, "a" * (1024 - len(rare) + 7) + rare)
+    long_text = "a" * 990 + skull + rare + " " + spell + "b" * 30
+    tr("a cut between two coloured marks", 273, 25, 1, 2, "fr", long_text, [])
+    co("only the kept span's colour (index 1)", 273, long_text)
+    tr("coloured mark in a reply (flags 14)", 272, 126, 3, 14, "de", "kaufe " + rare, [])
+    co("a reply's COLOURS", 272, "kaufe " + rare)
+    co("no coloured span: no COLOURS", 274, "WTS " + P.mark_span("[Plain]").decode("utf-8") + " " + skull)
+    co("nil text: no COLOURS", 275, None)
+    co("a 0x04 not followed by 6 hex digits: dropped, no colour", 276, "\x02\x04FF00[x]\x03 \x02\x04" + "0070dd[y]\x03")
+    co("a stray 0x04 outside a span: deleted", 277, "a\x04b " + spell)
+    co("clamped reqId, a CJK name", 70000, "\x02\x04FF8000[霜之哀伤]\x03")
+    many = "".join(P.mark_span("x", "%06X" % (i * 4099)).decode("utf-8") for i in range(300))
+    co("300 coloured spans of 3 B kept by the cut: the first 255 (index 0..254)", 278, many)
 
     def raw(note, b):
         out.append({"fn": "raw", "note": note, "hex": b.hex()})
@@ -310,6 +344,10 @@ def make_messages():
     raw("raw: bit 7 refused (flags 128)", base(128))
     raw("raw: reply with copy accepted (flags 14)", base(14))
     raw("raw: reply on 2 rows accepted (flags 6, rows 2)", base(6, 2))
+    raw("raw: COLOURS with no span refused", bytes([0x15, 1, 44, 0]))
+    raw("raw: COLOURS with span indexes not increasing refused", bytes([0x15, 1, 44, 2, 1, 0, 0x70, 0xDD, 1, 0x71, 0xD5, 0xFF]))
+    raw("raw: COLOURS with a trailing byte refused", bytes([0x15, 1, 44, 1, 0, 0, 0x70, 0xDD, 0]))
+    raw("raw: COLOURS span 255 accepted", bytes([0x15, 0, 1, 1, 255, 0xFF, 0xD1, 0]))
     out.append({"fn": "cancel", "args": [513, 126], "hex": P.msg_cancel(513, 126).hex()})
     out.append({"fn": "cancel", "args": [70000, 300], "hex": P.msg_cancel(70000, 300).hex()})
     out.append({"fn": "clear", "args": [], "hex": P.msg_clear().hex()})
@@ -327,6 +365,68 @@ def make_messages():
     out.append({"fn": "utf8cut", "args": [S("\U0001F600a"), 3], "hex": P.utf8_cut("\U0001F600a".encode(), 3).hex()})
     out.append({"fn": "utf8cut", "args": [S("abc"), 5], "hex": b"abc".hex()})
     return out
+
+
+# ---------------------------------------------------------------- marked spans (docs/BRIDGE.md)
+def make_marks():
+    """encode: Bridge.MarkSpan(name, rgb) bytes; decode: the spans a reader finds in a TRANSLATE
+    text (P.parse_marks), for Translate Companion's own reader. All text is synthetic."""
+    enc, dec = [], []
+
+    def e(note, name, rgb):
+        enc.append({"note": note, "name": S(name) if name is not None else None, "rgb": rgb,
+                    "hex": P.mark_span(name, rgb).hex()})
+
+    def d(note, text):
+        dec.append({"note": note, "text": S(text),
+                    "spans": [[name.hex(), rgb] for name, rgb in P.parse_marks(P._b(text))]})
+
+    e("a rare item's name in its blue", "[Lattice Leggings]", "0070DD")
+    e("a lowercase colour is written uppercase", "[Fireball]", "71d5ff")
+    e("no colour: a {...} group", "{skull}", None)
+    e("a colour of 5 digits: none", "[x]", "0070D")
+    e("a colour of 7 digits: none", "[x]", "0070DDD")
+    e("a colour with a non-hex digit: none", "[x]", "0070DG")
+    e("control bytes 0x01-0x04 removed from the name", "a\x01b\x02c\x03d\x04e", "FFD100")
+    e("an empty name: nothing", "", "FFD100")
+    e("a name of control bytes only: nothing", "\x02\x03\x04", "FFD100")
+    e("a UTF-8 name", "[Étoffe de lin]", "FFFFFF")
+    e("a CJK name", "[霜之哀伤]", "FF8000")
+    e("no name (nil): nothing", None, "FFD100")
+
+    d("two coloured links and a group", "WTS \x02\x040070DD[Lattice Leggings]\x03 and \x02\x0471D5FF[Fireball]\x03 \x02{skull}\x03")
+    d("a lowercase colour is read", "\x02\x04a335ee[Sunlit Mantle]\x03")
+    d("0x04 not followed by 6 hex digits: dropped, no colour", "\x02\x04XYZ[x]\x03")
+    d("0x04 with 4 hex digits before 0x03: dropped, the digits are the name", "\x02\x04FFD1\x03")
+    d("a colour and no name: not a span", "\x02\x04FFD100\x03")
+    d("never closed: not a span", "a \x02\x04FFD100[x")
+    d("a 0x03 outside a span: text", "a\x03b")
+    d("a 0x02 inside an open span starts it again", "\x02a\x02\x04FFD100[b]\x03")
+    d("a 0x04 inside a name is dropped", "\x02[a\x04b]\x03")
+    d("no marks", "plain text 20h30")
+    d("UTF-8 names", "\x02\x04FFFFFF[Étoffe de lin]\x03 \x02\x04FF8000[霜之哀伤]\x03")
+
+    merge = []
+
+    def mg(note, wire, colours):
+        merge.append({"note": note, "wire": S(wire), "colours": [[k, rgb] for k, rgb in colours],
+                      "merged": S(P.merge_colours(P._b(wire), colours))})
+
+    two = "WTS \x02[Lattice Leggings]\x03 and \x02[Fireball]\x03 \x02{skull}\x03"
+    mg("two links coloured, the group left uncoloured but marked", two, [(0, "0070DD"), (1, "71D5FF")])
+    mg("no colours: the text unchanged", two, [])
+    mg("an index past the last span: ignored", "a \x02[x]\x03", [(5, "010203")])
+    mg("the index counts the reader's spans; marks that are not spans are dropped",
+       "\x03\x02\x03\x02[a]\x03 \x02[b", [(0, "FF0000")])
+    mg("a colour already in the text stays unless COLOURS has one for its span",
+       "\x02\x0400FF00[a]\x03\x02\x0400FF00[b]\x03", [(1, "FF0000")])
+    mg("UTF-8 names", "\x02[Étoffe de lin]\x03 \x02[霜之哀伤]\x03", [(1, "FF8000")])
+    addon = "WTS " + P.mark_span("[Lattice Leggings]", "0070DD").decode("utf-8") + " " + P.mark_span("{skull}").decode("utf-8") \
+        + " " + P.mark_span("[Fireball]", "71D5FF").decode("utf-8")
+    wire, colours = P.split_colours(addon)
+    mg("the addon's text split for the wire and merged back is the addon's text", wire.decode("utf-8"), colours)
+    assert P.merge_colours(wire, colours) == addon.encode("utf-8")
+    return {"encode": enc, "decode": dec, "merge": merge}
 
 
 # ---------------------------------------------------------------- distorted strips (decoder cross-check)
@@ -385,6 +485,9 @@ def main():
                 json.dump(tr, f, separators=(",", ":"))
     with open(os.path.join(out_dir, "tags.json"), "w") as f:
         json.dump(make_tags(), f, separators=(",", ":"))
+    marks = make_marks()
+    with open(os.path.join(out_dir, "marks.json"), "w") as f:
+        json.dump(marks, f, indent=0, separators=(",", ":"))
     msgs = make_messages()
     for m in msgs:
         if m["fn"] == "utf8cut":
@@ -403,8 +506,10 @@ def main():
     with open(os.path.join(out_dir, "strips.json"), "w") as f:
         json.dump(strips, f, separators=(",", ":"))
     ok = sum(1 for s in strips if s["status"] == "ok")
-    print("traces %d, frames %d, messages %d, tags 1024, builder vectors %d, strips %d (%d decode ok)"
-          % (len(TRACES) * len(P.MODES), nframes, nmsgs, len(msgs), len(strips), ok))
+    print("traces %d, frames %d, messages %d, tags 1024, builder vectors %d, strips %d (%d decode ok), "
+          "marks %d encode + %d decode + %d merge"
+          % (len(TRACES) * len(P.MODES), nframes, nmsgs, len(msgs), len(strips), ok, len(marks["encode"]),
+             len(marks["decode"]), len(marks["merge"])))
 
 
 if __name__ == "__main__":

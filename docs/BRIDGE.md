@@ -11,10 +11,10 @@ the design (`docs\DESIGN.md`; the original plan's sections C.4 and D.2) and why.
 |---|---|
 | Encoder, message builders, tag and plate markup (Lua) | `addon\TranslateProbe\Bridge.lua` |
 | Reference implementation (Python) | `tools\bridge\proto.py` |
-| Test vectors and their generator | `tests\vectors\`, `tools\bridge\make_vectors.py` |
+| Test vectors and their generator | `tests\vectors\` (`marks.json`: the marked spans of section 3a and the COLOURS merge of 3b), `tools\bridge\make_vectors.py` |
 | Lua against the vectors | `node tests\bridge\run.js` (`tests\bridge\bridge_test.lua`) |
 | Simulation, colour curves, CRC Monte Carlo | `tools\bridge\sim.py`, `curves.py`, `crc_mc.py` |
-| Helper side (Rust crate `tp_bridge`) | `helper\bridge\src\{crc,image,strip,msg,reasm,tags,cards,tone,synth}.rs` |
+| Helper side (Rust crate `tp_bridge`) | `helper\bridge\src\{crc,image,strip,msg,marks,reasm,tags,cards,tone,synth}.rs` (`marks`: the reader of section 3a, shared by the engine and the app) |
 | Rust tests | `helper\bridge\tests\{vectors,distort,tags,cards,tone,corrupt,perf}.rs` |
 
 ## 1. Strip pixels
@@ -77,7 +77,7 @@ record = type u8, len u16, data; unknown types are skipped (0x02 = the v1 LAYOUT
 ```
 0x10 TRANSLATE  reqId u16 | slot u8 (0..126) | rows u8 (1..6)
                 | flags u8 (bit0 noCache, bit1 plate, bit2 reply, bit3 copy, bits 4-7 = 0)
-                | target str8 (printable ASCII, 1..8) | text str16 (UTF-8 <= 1024 B, may contain 0x02/0x03 marks)
+                | target str8 (printable ASCII, 1..8) | text str16 (UTF-8 <= 1024 B, may contain 0x02/0x03/0x04 marks, 3a)
                 | nPairs u8 (<= 8) | pairs: term str8 (<= 48 B), meaning str8 (<= 120 B); sum(2+#t+#m) <= 512
                 rules: copy => reply; reply => plate and rows 2..6 (row 0 = the Helper's status, rows 1.. =
                 the text); a reply's target is a language code (ASCII letters and '-', starting with a
@@ -87,8 +87,11 @@ record = type u8, len u16, data; unknown types are skipped (0x02 = the v1 LAYOUT
 0x13 TEST       nonce u16
 0x14 VIEW       n u8 (0..4) | n x { id u8, x u16, y u16, w u16, h u16, fontPx u8, rowPx u8 }  (physical px, client origin)
                 ids 1..199: chat frames (GetID() % 256); ids 200..255: addon windows (200 = the conversation window)
+0x15 COLOURS    reqId u16 | n u8 (1..255) | n x { span u8, r u8, g u8, b u8 }  (span strictly increasing)
+                the link colours of the TRANSLATE with the same reqId, sent right before it (section 3b)
 0x01 STATUS     addonBuild 3 since 2026-10-19 (TRANSLATE reply and copy), 4 the same day (a hint
-                lane under every card, section 8c)
+                lane under every card, section 8c), 5 the same day (the link colours: COLOURS,
+                sections 3a and 3b)
 ```
 
 - 2026-10-18: TRANSLATE rows went from 1..4 to 1..6 (long German-to-French lines were cut); same
@@ -139,6 +142,117 @@ record = type u8, len u16, data; unknown types are skipped (0x02 = the v1 LAYOUT
 - Builders (`Bridge.TranslateMessage` etc.) write integers as given, clamped to the field width;
   the helper refuses out-of-range values rather than the addon remapping them. The text is cut at
   1024 B on a UTF-8 boundary and never inside an open 0x02 mark.
+
+## 3a. Marked spans (TRANSLATE text)
+
+The TRANSLATE text marks every span the model must copy as it is (`Glossary.PromptText`): each
+hyperlink's name and each `{...}` group of 1-32 characters. Since addon build 5 (2026-10-19, user
+request L3) a link name also has the colour the client draws that name in, so Translate Companion
+can paint the restored name in it (the blue of a rare item, the light blue of a spell). The colour
+is written in the span (below) in the addon's own text and inside Translate Companion; **on the
+wire it travels apart**, in COLOURS (section 3b), and the TRANSLATE text has no 0x04.
+
+**Encoding (normative for `PromptText`, the reader and the engine; the TRANSLATE builder takes the
+colour out, section 3b):**
+
+```
+span   = 0x02 [ 0x04 RRGGBB ] name 0x03
+RRGGBB = 6 ASCII hex digits, uppercase as the addon writes them ("0070DD")
+name   = 1 or more bytes of UTF-8 text, never 0x01, 0x02, 0x03 or 0x04
+```
+
+- The colour prefix comes right after the 0x02 and only there; it is exactly 7 bytes. The addon
+  writes it on every link name (`Bridge.MarkSpan(name, rgb)`, `proto.mark_span`), never on a
+  `{...}` group (no colour: the translation's own colour).
+- Bytes 0x01-0x04 never come from a player: `PromptText` deletes them from the chat text before
+  marking (and uses 0x01 internally for a typed `||`), and `MarkSpan` deletes them from a name.
+- The colour (`Links.lua`): the innermost colour escape open at the link, or a colour escape at the
+  start of the link's name (that is what the client draws). `|cAARRGGBB` gives RRGGBB (alpha
+  ignored); `|cnIQ<n>:` gives item quality n's colour through the client
+  (`ColorManager.GetColorDataForItemQuality`, else `C_ColorOverrides.GetColorForQuality`, else
+  `C_Item.GetItemQualityColor`, else `ITEM_QUALITY_COLORS`), so a user's quality colour override is
+  followed; `|cn<NAME>:` gives the global colour of that name (`NORMAL_FONT_COLOR`...). A link with
+  no colour, or one the client cannot resolve, gets `FFD100` (NORMAL_FONT_COLOR gold).
+- The name is the link's text as the reader sees it: colour escapes, textures, atlases and
+  protected names inside it are removed (a map pin `[|A:Waypoint-MapPin-ChatIcon:13:13:0:0|a Map
+  Pin Location]` becomes `[ Map Pin Location]`).
+- The 1024 B cut is unchanged: when the cut leaves the last 0x02 after the last 0x03, the text is
+  cut before that 0x02, so a colour prefix is never split from its span.
+
+**Reading (Translate Companion; `proto.parse_marks` is the reference):** a span opens at 0x02; a
+0x04 right after it followed by 6 hex digits (accept either case) is its colour; a 0x04 anywhere
+else, or not followed by 6 hex digits, is dropped alone (the bytes after it stay text); the span
+closes at the next 0x03; a 0x02 inside an open span starts it again; a span never closed, an empty
+span and a 0x03 outside a span are not spans. The marks, the colour prefix included, must be
+parsed before control characters are neutralized (`docs\ENGINE.md` section 6 turns them into
+spaces). The colour belongs to the span, not to the model's text: the placeholder `{N}` stands for
+the whole span, and the restored name is painted in RRGGBB.
+
+**Examples** (also in `tests\vectors\marks.json`):
+
+```
+MarkSpan("[Fireball]", "71d5ff") = 02 04 37 31 44 35 46 46 5B 46 69 72 65 62 61 6C 6C 5D 03   (19 B)
+MarkSpan("{skull}")              = 02 7B 73 6B 75 6C 6C 7D 03
+```
+
+- Vectors: `marks.json` "encode" (12: `Bridge.MarkSpan` must build the reference bytes, checked by
+  `node tests\bridge\run.js`) and "decode" (11: the spans a reader must find, for the Companion's
+  reader).
+
+## 3b. Link colours on the wire (COLOURS, addon build 5)
+
+**Why apart (integration review, 2026-10-19, fact).** The first build-5 design put the colour in
+the TRANSLATE text. A Translate Companion of build 4 (the 1332f01 engine, run on a build-5 mark in
+a probe) turns every control character but 0x02 and 0x03 into a space before it splits the spans,
+so it painted "WTS  0070DD[Necromancer Leggings] cheap" (placeholders and echo alike) and its
+Brackets prompt read "[ 0070DD[...]]"; its "older than the addon" toast came on top of the codes,
+not instead of them. The parsers skip nothing inside a TRANSLATE (strict lengths), but an unknown
+message type is only a parse error, counted (`reasm` `parse_errors`) and otherwise ignored. So the
+colours go in a message of their own:
+
+```
+0x15 COLOURS  reqId u16 | n u8 (1..255) | n x { span u8, r u8, g u8, b u8 }
+              span = the index (from 0) of a marked span of that TRANSLATE's text, in reading order
+              (section 3a's rules), strictly increasing; only spans with a colour are listed
+```
+
+- **Addon** (`Bridge.ColoursMessage(reqId, text)`, `proto.msg_colours`; the shared local
+  `SplitColours`, `proto.split_colours`): from `PromptText`'s text, each `0x02 0x04 RRGGBB` becomes
+  `0x02` and gives the entry (span index = the 0x02's rank: the addon writes only complete,
+  non-empty spans, so it is the reader's index), a 0x04 not followed by 6 hex digits is dropped
+  alone and any other 0x04 is deleted; then the 1024 B cut of the TRANSLATE, and only the colours of
+  the spans the cut kept (index <= 255, at most 255 entries). No colour left: no COLOURS (nil).
+  `Bridge.TranslateMessage` applies the same split, so **a TRANSLATE never carries a 0x04**, whatever
+  text it is given. `Request.lua` sends VIEW, COLOURS, then TRANSLATE (4 bytes per link more on the
+  strip); a reply has no links (its pipes are escaped) and so no COLOURS.
+- **Order:** the encoder fills each frame least exposed first and in queue order, so COLOURS (a few
+  bytes, queued first) always shares the TRANSLATE's first frame or comes before it, and the
+  reassembler hands complete messages over in record order.
+- **Translate Companion** (`scene.rs`): keeps the last 8 COLOURS by (session, reqId) and, when the
+  TRANSLATE of that reqId comes, writes the colours into its marks (`marks::with_colours`: span k gets
+  `0x04 RRGGBB` after its 0x02; every span keeps its marks; indexes past the last span are
+  ignored; the rest is rebuilt with the reader's rules). The engine, the overlay and the clipboard
+  then read the coloured form of section 3a unchanged. A COLOURS is used once; CLEAR and a session
+  change drop them. A TRANSLATE without COLOURS (an older addon, a Shift-click resend) keeps plain
+  spans: its link names are painted in the translation's colour. A 0x04 colour already in a wire
+  text is still read (section 3a), unless COLOURS gives that span another.
+- **Compatibility:** a build-5 addon with a build-4 Companion: COLOURS is dropped as an unknown
+  type, the link names are painted plain as before, and the toast asks for the update; a build-4
+  addon with this Companion: no COLOURS, plain names, no toast (`ADDON_BUILD_MIN` 2).
+
+```
+TRANSLATE reqId 300, slot 101, rows 2, flags 2, "fr", "a " .. MarkSpan("[Fireball]", "71D5FF") .. " b", 0 pairs:
+COLOURS   15 | 01 2C | 01 | 00 71 D5 FF
+TRANSLATE 10 | 01 2C | 65 | 02 | 02 | 02 66 72 | 00 10 | 61 20 02 5B 46 69 72 65 62 61 6C 6C 5D 03 20 62 | 00
+```
+
+- Vectors: `messages.json` has 11 COLOURS builder vectors (`"hex": ""` = no message: no coloured
+  span, a cut span, nil text) next to the TRANSLATE ones built from the same coloured texts (cut
+  before an open coloured mark, ending at 1024 B once the prefix is out, cut between two coloured
+  marks, a reply), and 4 parser-only COLOURS byte strings (no span, indexes not increasing, a
+  trailing byte, span 255); `marks.json` "merge" (7: a TRANSLATE text and its COLOURS give the
+  reference's coloured text, `proto.merge_colours`, checked against `marks::with_colours`; one of
+  them is an addon text split and merged back to itself).
 
 ## 4. Helper side: strip decoder (`strip::decode_strip`)
 
@@ -312,6 +426,12 @@ chat line. Rules the addon keeps and the Helper relies on:
   card. The addon draws a bubble's lane only while the bubble's last row and the lane are entirely
   inside the visible thread, and not while the window is dragged or resized.
 - Slots: 0..99 chat, 100..125 window bubbles, 126 the reply, 127 TEST.
+- The links bar (2026-10-19, user request L2; `docs\ADDON.md`, "Links of a message"): a bubble whose
+  message has hyperlinks shows them as buttons inside its fill, under the lane, from the tag's x0
+  to the plate's end, starting 4 units and 4 physical px at least under the lane's bottom (out of
+  the Helper's lane search, which tries the lane's place +-2 px), its lines `rowPx` apart. The rows,
+  tags, plates and the lane keep their places; only the bubble grows. VIEW 200 is unchanged (the
+  bar is inside the bubble column) and nothing of the bar is ever painted by the Helper.
 
 ### Hint lanes under inline rows (addon build 4, 2026-10-19)
 
@@ -341,11 +461,11 @@ Commands (from the repo root; numbers measured on 2026-10-17 on the dev PC, re-r
 
 | Command | Result |
 |---|---|
-| `python -I tools\bridge\make_vectors.py` | 30 traces (10 x 3 modes), 1066 frames, 387 queued messages, 1024 tags, 52 message vectors (46 builder vectors and 6 parser-only byte strings; 34 before the reply and copy flags, 2026-10-19), 36 strips; byte-identical on re-run, and the traces, tags and strips unchanged by the flags |
-| `node tests\bridge\run.js` | ALL BRIDGE TESTS PASSED: 30 traces, 16892 ticks, 1066 frames, 1268038 blocks, 1024 tags (each also through `ApplyTag`, at its row and row + 4), 20 markup, 46 builder vectors (+6 parser-only), 29 API checks |
+| `python -I tools\bridge\make_vectors.py` | 30 traces (10 x 3 modes), 1066 frames, 387 queued messages, 1024 tags, 72 message vectors (62 builder vectors, 11 of them COLOURS, and 10 parser-only byte strings; 34 before the reply and copy flags, 52 before the coloured marks, 56 before COLOURS, 2026-10-19), 36 strips, marks 12 encode + 11 decode + 7 merge; byte-identical on re-run (34 files), and the traces, tags and strips unchanged by the flags, the marks and COLOURS |
+| `node tests\bridge\run.js` | ALL BRIDGE TESTS PASSED: 30 traces, 16892 ticks, 1066 frames, 1268038 blocks, 1024 tags (each also through `ApplyTag`, at its row and row + 4), 20 markup, 62 builder vectors (+10 parser-only; 11 COLOURS), 12 marks, 29 API checks |
 | `python -I tools\bridge\sim.py all` (150 runs each) | 4/4 PASS, see below |
 | `python -I tools\bridge\crc_mc.py` (2 M) | 0 undetected, see below |
-| `cargo test --offline` in `helper\bridge` | 62 passed, 0 failed (2 ignored: the release suites; 2026-10-19, with the reply and copy flags: every flag byte, reply rows, slot and target, the documented example) |
+| `cargo test --offline` in `helper\bridge` | 62 passed, 0 failed (2 ignored: the release suites; 2026-10-19, with the reply and copy flags: every flag byte, reply rows, slot and target, the documented example); 69 passed with the marks of section 3a (2026-10-19: 5 `marks` unit tests; `vectors` checks the 11 decode vectors of `marks.json` against `marks::split`, and the coloured encode vectors against `marks::span`, the engine's writer); 73 passed with COLOURS (section 3b: `msg::tests::colours`, `marks::tests::colours_are_written_into_their_spans`, the 7 merge vectors against `marks::with_colours`, no 0x04 in any TRANSLATE vector) |
 | `cargo test --offline --release -- --ignored` | 2 passed: corruption suite, per-call cost |
 | `luacheck addon\TranslateProbe\Bridge.lua` | 0 warnings |
 
@@ -373,7 +493,7 @@ text is random glyph shapes):
 
 | Suite | Result |
 |---|---|
-| `vectors`: every trace frame drawn as pixels and decoded | 1066 frames decoded byte-identical, 339 messages rebuilt exactly as the reference; all 1024 tags drawn and scanned back; 52 message vectors (with reply and copy) and 36 distorted strips agree with the reference |
+| `vectors`: every trace frame drawn as pixels and decoded | 1066 frames decoded byte-identical, 339 messages rebuilt exactly as the reference; all 1024 tags drawn and scanned back; 72 message vectors (with reply, copy and COLOURS) and 36 distorted strips agree with the reference |
 | `distort`: decode rate per category, 4000 captures each (Python reference in brackets) | dense identity +-6 noise 100% (100%); dense envelope curves, gap >= 16, block noise 99.750% (99.725%); robust envelope + harsh curves 99.825% (99.825%); mono with colour mixing 99.900% (99.850%); dense 0.5 px offset 100% (100%); torn captures decoded 21.6 / 19.9 / 19.6% (20.6 / 18.3 / 17.3%) in dense / robust / mono; **0 wrong frames** anywhere; colour mixing: dense 0/300, mono 300/300 |
 | `tags`: recall on 3000 synthetic chat panels (dark 25-100% over a random world, antialiased text in chat, class and item colours incl. (255,128,255) and (0,255,246), raid icons, blocks 4-12 px, gaps 0-2 px, alpha 0.3-1.0, offset +-2 px, top clipping, two frames) | 26601 / 26601 tags (100%), 0 wrong identity, 0 unexpected hits; every alpha bucket 100% |
 | `tags`: tag-free panels (text, item links, raid icon runs, tooltips) | 0 hits over 10000 panels |
@@ -511,6 +631,9 @@ Each is backed by a measured fact; the tests named reproduce it.
   slot 0..127. VIEW accepts 0..4 views. Any other length is `Length`.
 - `msg::Translate` has `reply` and `copy` (2026-10-19); `msg::{FLAG_NO_CACHE, FLAG_PLATE,
   FLAG_REPLY, FLAG_COPY, FLAGS_MASK, REPLY_MIN_ROWS}` are public.
+- `msg::Message::Colours { req_id, spans: Vec<(u8, [u8; 3])> }` (2026-10-19, section 3b): n 1..255,
+  span indexes strictly increasing, else `Range`. `marks::with_colours(text, spans)` writes them
+  into a TRANSLATE text (the scene's merge).
 - Extra public items beyond D.2 (additive): `strip::{decode_strip_detail, DecodeDetail, Reject,
   Mode::{ALL, magic, bits, name, index}, frame_capacity, max_chunk_data, parse_frame_bytes}` and
   the format constants, `tags::diagnose`, `cards::{Mask::get, Mask::count, StickyWidth}` and the
@@ -530,7 +653,11 @@ Each is backed by a measured fact; the tests named reproduce it.
   allocated). The protocol colours carry an `art-ok: protocol colour` comment.
 - The TRANSLATE text is cut at 1024 bytes on a UTF-8 boundary; when a cut happens and the last
   0x02 mark is after the last 0x03, the text is cut before that 0x02 (same rule as
-  `Glossary.PromptText`). Pairs that are not `{string, string}` are skipped; pairs stop at the
+  `Glossary.PromptText`). `Bridge.MarkSpan(name, rgb)` (2026-10-19) builds one marked span of
+  section 3a; the stub (`tests\stubs\Bridge.lua`) has the same function and the harness checks both
+  build the same bytes. `Bridge.ColoursMessage(reqId, text)` (section 3b) builds the COLOURS of a
+  text or returns nil, and `Bridge.TranslateMessage` takes the colours out of the text before its
+  cut (one local `SplitColours` for both; the stub has the same code). Pairs that are not `{string, string}` are skipped; pairs stop at the
   first one that would pass 512 bytes.
 - When the queue drains, the encoder composes no further frame: `Update` returns false,
   `IsIdle()` turns true, the strip hides, and the next queued message is composed on the next

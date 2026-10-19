@@ -1,8 +1,8 @@
 -- Bridge.lua against the Python reference vectors (driven by tests/bridge/run.js).
--- Globals set by run.js: SRC_BRIDGE (the addon file), then TRACE / TAGS / MESSAGES (vectors).
+-- Globals set by run.js: SRC_BRIDGE (the addon file), then TRACE / TAGS / MESSAGES / MARKS (vectors).
 TEST_FAILURES = 0
 local counts = { traces = 0, ticks = 0, frames = 0, blocks = 0, setColor = 0, tags = 0, markup = 0, messages = 0,
-    raw = 0, api = 0 }
+    raw = 0, api = 0, marks = 0, colours = 0 }
 
 local function fail(msg)
     TEST_FAILURES = TEST_FAILURES + 1
@@ -301,6 +301,10 @@ function RunMessages()
             out = B.TestMessage(a[1])
         elseif m.fn == "view" then
             out = B.ViewMessage(a[1])
+        elseif m.fn == "colours" then
+            -- nil (no coloured span) is the vector's empty hex
+            counts.colours = counts.colours + 1
+            out = B.ColoursMessage(a[1], a[2]) or ""
         elseif m.fn == "utf8cut" then
             out = B.Utf8Cut(a[1], a[2])
         elseif m.fn == "raw" then
@@ -312,6 +316,17 @@ function RunMessages()
             check(out and hex(out) == m.hex, "message " .. i .. " " .. m.fn .. " " .. (m.note or ""))
         end
     end
+end
+
+---------------------------------------------------------------------------- marked spans
+-- marks.json "encode": Bridge.MarkSpan(name, rgb) must build the reference bytes (0x02 [0x04
+-- RRGGBB] name 0x03). The "decode" vectors are for Translate Companion's reader (no Lua reader).
+function RunMarks()
+    for i, m in ipairs(MARKS.encode) do
+        counts.marks = counts.marks + 1
+        check(hex(B.MarkSpan(m.name, m.rgb)) == m.hex, "mark " .. i .. " " .. (m.note or ""))
+    end
+    check(#MARKS.decode >= 10, "decode vectors present")
 end
 
 ---------------------------------------------------------------------------- addon wiring
@@ -404,6 +419,7 @@ end
 
 function Summary()
     print(string.format("traces %d, ticks %d, frames %d, blocks %d, SetColorTexture %d, tags %d, markup %d, "
-        .. "builder vectors %d (+%d parser-only), api checks %d", counts.traces, counts.ticks, counts.frames,
-        counts.blocks, counts.setColor, counts.tags, counts.markup, counts.messages, counts.raw, counts.api))
+        .. "builder vectors %d (+%d parser-only; %d COLOURS), marks %d, api checks %d", counts.traces, counts.ticks,
+        counts.frames, counts.blocks, counts.setColor, counts.tags, counts.markup, counts.messages, counts.raw,
+        counts.colours, counts.marks, counts.api))
 end
