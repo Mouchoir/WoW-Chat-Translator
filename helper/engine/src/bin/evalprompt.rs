@@ -15,6 +15,13 @@
 //! synthetic outputs to the console for a developer; never written to the report), --show-raw
 //! (also the raw model answers of every attempt, console only), --selftest
 //! (prints the engine selftest JSON and exits; never loads the model).
+//!
+//! Lengths (2026-10-19, integration review of the compact bubbles): for every `done` line the
+//! report keeps the number of characters of the source and of the shown output outside the
+//! protected spans (item names, `{...}` groups, IDs, URLs), and their ratio, per line
+//! (`pair`, `inChars`, `outChars`, `lengthRatio`) and summed up per script pair, all lines and
+//! those of 30 characters or more (`lengths`): the evidence
+//! for the addon's row factors (`Reserve.lua`, `docs\ADDON.md` decision 79). Counts only, never text.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -341,6 +348,47 @@ struct LineResult {
     unchanged: bool,
     calls: u32,
     ms: u64,
+    /// `done` lines: characters of the source and of the shown output outside the protected spans.
+    in_chars: Option<usize>,
+    out_chars: Option<usize>,
+}
+
+/// Characters of `text` once every protected span is taken out and the spaces are collapsed.
+fn chars_outside(text: &str, spans: &[String]) -> usize {
+    let mut s = text.to_string();
+    for sp in spans {
+        s = s.replace(sp.as_str(), " ");
+    }
+    s.split_whitespace().collect::<Vec<_>>().join(" ").chars().count()
+}
+
+/// The main script of a text ("latin", "cyrillic", "han", "kana", "hangul"), by letter count.
+fn main_script(text: &str) -> &'static str {
+    let k = scripts(text);
+    [(k.latin, "latin"), (k.cyrillic, "cyrillic"), (k.han, "han"), (k.kana, "kana"), (k.hangul, "hangul")]
+        .into_iter()
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, name)| name)
+        .unwrap_or("latin")
+}
+
+/// The script a target is written in.
+fn target_script(target: &str) -> &'static str {
+    match target {
+        "ru" => "cyrillic",
+        "zh" | "zh-TW" => "han",
+        "ko" => "hangul",
+        _ => "latin",
+    }
+}
+
+/// The value at quantile `q` (0..1) of sorted `v`, nearest rank.
+fn quantile(v: &[f64], q: f64) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let i = ((q * v.len() as f64).ceil() as usize).clamp(1, v.len()) - 1;
+    v[i]
 }
 
 fn all_groups(shown: &str, groups: &[Vec<String>]) -> Option<bool> {
@@ -424,6 +472,8 @@ fn run_line(s: &Session, smp: &Sample, variant: Variant, tuning: Tuning, show: b
             if !names.is_empty() {
                 r.restored = Some(names.iter().all(|sp| out.contains(sp.as_str())));
             }
+            r.in_chars = Some(chars_outside(&source, &spans));
+            r.out_chars = Some(chars_outside(out, &spans));
             if smp.same {
                 r.same_ok = Some(false);
             } else {
@@ -666,6 +716,31 @@ fn main() {
     let ms_mean = if ms.is_empty() { 0 } else { ms.iter().sum::<u64>() / ms.len() as u64 };
     let ms_max = ms.iter().copied().max().unwrap_or(0);
     let calls: u32 = results.iter().map(|(_, r)| r.calls).sum();
+    // output over source length outside the protected spans, per script pair (done lines), and
+    // for the lines of LONG_CHARS characters or more (shorter ones fit one row whatever the ratio)
+    const LONG_CHARS: usize = 30;
+    let pair_of = |i: usize| format!("{}>{}", main_script(&protect::unmarked(&samples[i].marked)), target_script(&samples[i].target));
+    let mut pairs: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+    for (i, r) in &results {
+        if let (Some(a), Some(b)) = (r.in_chars, r.out_chars) {
+            if a > 0 {
+                let key = pair_of(*i);
+                if a >= LONG_CHARS {
+                    pairs.entry(format!("{key} ({LONG_CHARS}+ chars)")).or_default().push(b as f64 / a as f64);
+                }
+                pairs.entry(key).or_default().push(b as f64 / a as f64);
+            }
+        }
+    }
+    let r3 = |v: f64| (v * 1000.0).round() / 1000.0;
+    let lengths: serde_json::Map<String, Value> = pairs
+        .into_iter()
+        .map(|(k, mut v)| {
+            v.sort_by(|a, b| a.total_cmp(b));
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            (k, json!({"lines": v.len(), "mean": r3(mean), "median": r3(quantile(&v, 0.5)), "p75": r3(quantile(&v, 0.75)), "p90": r3(quantile(&v, 0.9)), "max": r3(*v.last().unwrap_or(&0.0))}))
+        })
+        .collect();
     let report = json!({
         "promptVersion": PROMPT_VERSION,
         "variantTested": format!("{:?}", args.variant),
@@ -718,7 +793,10 @@ fn main() {
             "restored": r.restored, "verbatimOk": r.copy_ok, "freeOk": r.free_ok, "scriptOk": r.script_ok, "mustUseOk": r.must_ok, "namesOk": r.names_ok,
             "wordsOk": r.words_ok, "sameOk": r.same_ok, "wrongSame": r.wrong_same, "unchanged": r.unchanged,
             "calls": r.calls, "ms": r.ms,
+            "pair": pair_of(*i), "inChars": r.in_chars, "outChars": r.out_chars,
+            "lengthRatio": match (r.in_chars, r.out_chars) { (Some(a), Some(b)) if a > 0 => json!((b as f64 / a as f64 * 1000.0).round() / 1000.0), _ => Value::Null },
         })).collect::<Vec<_>>(),
+        "lengths": lengths,
         "rule": "E1b + L4: script 100%, first-pass placeholders >= 90%, item names restored 100%, IDs/URLs/addresses kept 100%, levels/prices/times left to the model 100%, must-use glossary >= 80%, wrong Same 0, same detected on every same line, no line without a result",
         "pass": pass,
         "reasons": reasons,
