@@ -9,13 +9,16 @@ window: write in your language, Translate Companion translates your reply into t
 language and puts it in the clipboard, you paste it with Ctrl+V and click the channel to send it.
 Ctrl-click `[T]` keeps the older way: a few rows open under the chat line and Translate Companion
 writes the translation in them, in the chat's own font over the chat background. The translation
-comes from a local AI model (llama.cpp with Qwen3 4B); nothing is sent over the network.
+comes from a local AI model (llama.cpp with Qwen3 4B); nothing is sent over the network. If you
+prefer, Translate Companion can use your own API key for DeepL, an OpenAI-compatible service,
+Google Gemini or Anthropic Claude instead (see "Remote translation services" below); the local
+model stays the default.
 Abbreviations can get an explanation from the addon's glossary (LFM, LF2M, BGs, DM, Stock, HoT...),
 with or without Translate Companion.
 
 Download Translate Companion: https://github.com/Mouchoir/WoW-Chat-Translator/releases
 
-Status: development build (addon 0.7.0, protocol build 6; Translate Companion 0.6.0, use them
+Status: development build (addon 0.7.0, protocol build 6; Translate Companion 0.7.0, use them
 together). See
 `docs\IN-GAME-CHECKS.md` for the checks that only the real client can make. Translate Companion was called TranslateProbe
 Helper (`TranslateProbeHelper.exe`) until 2026-10-19; the addon keeps its name, TranslateProbe.
@@ -128,7 +131,7 @@ your AddOns folder (that one file, nothing else) when it starts, every minute wh
 
 **Starting it:** double-click `WoWTranslateCompanion.exe` (a development build is in
 `helper\app\target\release`). No console opens; a small icon appears in the notification area
-(its tooltip: "Translate Companion 0.6.0 - ready, translator not loaded"). It finds the translator
+(its tooltip: "Translate Companion 0.7.0 - ready, translator not loaded"). It finds the translator
 runtime from `runtimeDir` in `%APPDATA%\TranslateProbe\settings.json` (set it once; else the Ollama
 install) and the model in the Ollama store, so no argument is needed. Start it before WoW and `[T]`
 works at once; started later, confirm it once in the popup (above). It writes its status into
@@ -148,11 +151,66 @@ what the status file said.
 
 Settings: `%APPDATA%\TranslateProbe\settings.json`. Logs: `%LOCALAPPDATA%\TranslateProbe\logs`
 (the folders keep the project's name, so settings and logs carry over from TranslateProbe Helper).
-The tray icon's tooltip shows the version and the translator's state. Its menu has "Unload
-translator now", "Get updates" (opens https://github.com/Mouchoir/WoW-Chat-Translator/releases in
+The tray icon's tooltip shows the version and the translator's state. Its menu has "Translation
+engine..." (below), "Unload translator now", "Get updates" (opens https://github.com/Mouchoir/WoW-Chat-Translator/releases in
 the browser), "Open log folder", "Copy translated replies to the clipboard" (on: the in-game
 consent is the approval; off: replies are shown, never copied), "Sound when a reply is copied"
 (off) and "Exit".
+
+## Remote translation services (Translate Companion 0.7.0)
+
+You can let Translate Companion use your own API key for a remote service, for a stronger or
+faster model. The local translator stays the default; you can switch back at any time.
+
+**Setting a key:** right-click the tray icon, **Translation engine...**, pick the service, paste
+the API key, tick **Send the text of chat messages and glossary terms to this service**, click
+**Test** (it translates one made-up sentence and shows the result or the error), then **Save**.
+
+| Service | Key | Default model | Notes |
+|---|---|---|---|
+| DeepL | DeepL API key (a free key ends in `:fx`) | DeepL's own | a translation service, not a chat model; item links, IDs and addresses are kept as tags DeepL never translates |
+| OpenAI-compatible | the service's key | `gpt-6-luna` on OpenAI; another server needs its model name | base URL: `https://api.openai.com/v1` by default; also OpenRouter, Mistral, Groq, DeepSeek, and LM Studio or Ollama on this PC or your home network (`http://...`, no key needed there) |
+| Google Gemini | a Gemini API key | `gemini-3.5-flash-lite` | |
+| Anthropic Claude | an Anthropic API key | `claude-opus-5-5` | `claude-sonnet-5-5` and `claude-haiku-5-5` cost less |
+
+**What it costs (rough, per 1,000 chat lines):** a chat line is about 60 characters; each request
+also carries a short instruction (about 100 tokens), so count about 150 tokens in and 30 out per
+line, plus the model's own thinking where it cannot be turned off. Prices from the providers' pages
+read on 2026-10-21; check them before you rely on them.
+
+| Model | Price (per million tokens, in / out) | About, per 1,000 lines |
+|---|---|---|
+| OpenAI `gpt-6-luna` | $0.10 / $0.50 | $0.03 |
+| Gemini `gemini-3.5-flash-lite` | $0.30 / $2.50 (a free tier exists) | $0.12 to $0.20 |
+| Claude `claude-haiku-5-5` | $0.10 / $0.50 | $0.03 to $0.15 |
+| Claude `claude-sonnet-5-5` | $2 / $10 | $0.60 to $2.60 |
+| Claude `claude-opus-5-5` | $4 / $20 | $1.20 to $5 |
+| DeepL | billed per character of text sent (the glossary context is not billed) | about 60,000 characters |
+
+The **daily limit** (characters per day, 0 = none) caps what is sent and received each day; past
+it, lines are translated locally.
+
+**When the service fails** (no network, invalid key, quota, refusal, timeout) or the daily limit
+is reached, the line is translated by the local model instead and ends with a small amber
+warning sign. Hover the sign: a tooltip says why, for example "Translated locally after an error
+from Claude - HTTP 401 - invalid x-api-key". An easy way to see it: save an invalid key, then
+translate a line. A line holding more links, IDs or addresses than can be hidden is also kept on
+this PC, with the same sign ("not sent to ...").
+
+**What is sent, and where your key lives:**
+
+- Sent: the text of the message you translate (item links, IDs, web and e-mail addresses
+  replaced by placeholders) and the matching glossary terms, with a short instruction. Never the
+  sender's name, the channel or the realm (names written inside the message are part of its
+  text). The service handles it under its own terms and privacy policy.
+- Keys are typed only in Translate Companion, never in the game. They are stored in
+  `%APPDATA%\TranslateProbe\keys.bin`, encrypted with Windows DPAPI for your Windows account, never
+  in `settings.json` and never in a log. A key belongs to one service: a key saved for one
+  OpenAI-compatible server is never sent to another one.
+- The connection is HTTPS (plain `http` only for a server on this PC or your home network, and
+  never with a key), through your Windows proxy settings.
+- The log records only the service, the model's name when it is one of the suggestions, HTTP
+  status, timings and character counts.
 
 ## Options panel
 
@@ -209,9 +267,11 @@ links or icons get no `[T]`.
 
 ## Privacy
 
-- Translations run on this PC; Translate Companion opens no network connection except to its own
-  translator process on 127.0.0.1 (with a random key). "Get updates" only opens the releases page
-  in your browser.
+- With the local translator (the default), translations run on this PC; Translate Companion
+  opens no network connection except to its own translator process on 127.0.0.1 (with a random
+  key). With a remote service you chose and agreed to, the message text and glossary terms go to
+  that service only (see "Remote translation services"). "Get updates" only opens the releases
+  page in your browser.
 - The addon's saved variables keep only your settings and your glossary entries: never message
   text, sender names or line ids. Older telemetry is deleted at load.
 - **Conversations are kept in memory only**: messages, translation requests, drafts, sent
@@ -252,7 +312,8 @@ links or icons get no `[T]`.
 | "Not copied - you copied something else" | you copied something after clicking Translate: Translate Companion left it alone; click Translate again |
 | No status line above a reply | start or update Translate Companion (a version older than the addon cannot read replies), then click Translate again |
 | No "bridge OK" message | run the game in Windowed (Fullscreen) mode; try `scripts\helper.ps1 -Run --capture gdi`; with strong colour filters try `/tpr mode robust` |
-| "Translator files not found" | install Ollama and pull `hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M`, or start Translate Companion with `--runtime` and `--model` |
+| "Translator files not found" | install Ollama and pull `hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M`, or start Translate Companion with `--runtime` and `--model` (with a remote service the local model is only the fallback) |
+| A small amber sign after a translation | it was translated locally because the remote service failed or the daily limit was reached: hover the sign for the reason (an invalid key shows "HTTP 401" or "HTTP 403"); fix the key in "Translation engine..." and click Test |
 | "Not enough free memory for the translator" | free some RAM (the CPU translator needs about 3.6 GB available) |
 | Slow first translation | the translator is loading (a few seconds on the CPU; the first GPU run prepares its shaders, up to a minute) |
 | Anything else | `scripts\helper.ps1 -Run -Diag` and send the files from `%LOCALAPPDATA%\TranslateProbe\logs` |

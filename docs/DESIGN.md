@@ -8,10 +8,12 @@ with Ctrl held, reserves a few rows under the line (inline mode), and asks **Tra
 line with a local AI model (llama.cpp and Qwen3 4B). The Helper draws the translation on the
 reserved rows, in the chat or in the window's bubbles. From the window the player can also reply:
 the Helper translates the reply and puts it in the clipboard, the player pastes it and clicks the
-channel. Nothing leaves the PC, and the Helper never touches the game process: the addon and the
-Helper talk through pixels only.
+channel. By default nothing leaves the PC; since Translate Companion 0.7.0 the player may choose a
+remote translation service with their own API key instead (section O). The Helper never touches
+the game process: the addon and the Helper talk through pixels only.
 
-This file is the design as it was built (addon 0.7.0, protocol build 6; Translate Companion 0.6.0;
+This file is the design as it was built (addon 0.7.0, protocol build 6; Translate Companion 0.7.0;
+section O for the remote translation services of 2026-10-20 and 2026-10-21;
 section L for the hint lanes and the rename of 2026-10-19 (the lanes are gone since build 6),
 section M for the links of a message and the tokens the model must copy, section N for the
 Translate Companion presence check and the compact bubbles, all the same day). Sections I to M keep
@@ -1157,3 +1159,101 @@ when the game starts. A second deploy kept that file byte for byte (`/XF`) and u
    "Translate Companion detected" in green; Continue opens the window with the line.
 4. A line like "Cherche [Encantamiento: Encantar arma 2M: impacto]": a compact bubble, one row
    (two at most) of translation, the links bar right under it, no gold hint anywhere.
+
+## O. Remote translation services (2026-10-20 and 2026-10-21, user decision)
+
+The user asked whether players can enter their own API keys for remote AI services ("for a better
+model, faster or other"). Built in two work packages (engine, app), reviewed twice (security and
+privacy; correctness and UX), then integrated (2026-10-21). Version: Translate Companion 0.7.0; the
+addon is unchanged (0.7.0, protocol build 6), since keys are never entered in WoW and the badge is
+drawn by the Companion. Details: `docs\ENGINE.md` section 13 (providers, transport, routing, keys,
+the review fixes), `docs\HELPER.md` "Remote translation services" (the settings window, the badge
+and its tooltip), README "Remote translation services" (setup, costs, privacy).
+
+### O.1 Decisions
+
+| # | Decision | As built |
+|---|---|---|
+| O1 | Providers of the first version: DeepL, any OpenAI-compatible endpoint, Google Gemini, Anthropic Claude; the local Qwen model stays the default | `tp_engine::remote` (`deepl.rs`, `openai.rs`, `gemini.rs`, `claude.rs`), request formats read on each provider's documentation; OpenAI-compatible also covers OpenRouter, Mistral, Groq, DeepSeek, LM Studio and Ollama (on this PC or a private address, no key) |
+| O2 | Keys only in Translate Companion: a window from the tray ("Translation engine..."), built in code, localized en/fr, with a provider list, a masked key, a model combo, a base URL (OpenAI-compatible), a privacy notice, a required consent, a daily character cap, Test, Save, Cancel | `settings_window.rs` (`Form` state machine, Win32 window); the window may take the focus (the player opened it) |
+| O3 | Keys encrypted with DPAPI next to settings.json, never in settings.json, never logged | `keys.bin`: `TPK1` + a DPAPI blob (current user), one key per service id (provider, or host, port and base path for an OpenAI-compatible server), written by the Companion's own process |
+| O4 | HTTPS through WinHTTP (system proxy, TLS by the OS), connect 5 s, total 15 s | `winhttp.rs`; each request on its own thread because WinHTTP's own timeouts did not bound the total (measured); one quick retry for 408, 429, 5xx and 529 |
+| O5 | Requests carry only the protected message text and the glossary pairs; post-processing shared with the local path; the cache key holds provider and model; logs hold provider, model label, status, latency and character counts | as decided; lines whose URLs, e-mail addresses or IDs would reach the service in clear stay local (`kept_local`) |
+| O6 | On any remote failure, or once the daily cap is reached, translate locally and show a warning badge with the reason on hover | `Update::fallback`; the overlay draws an amber triangle after the last text line; a tiny hit-testable layered window per badge (`WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`, `MA_NOACTIVATE`, `TrackMouseEvent`) shows a Companion-drawn tooltip ("Translated locally after an error from Claude", "HTTP 401 - invalid x-api-key") |
+
+### O.2 Review findings
+
+| Finding (severity, review) | Status |
+|---|---|
+| A DeepL answer with an entity before CJK, Hangul or Cyrillic text panicked (a string cut at byte 12); the release build aborts, so another player's line could close the Companion (major, security) | fixed: byte-wise search; tests through `remote::call` |
+| A saved OpenAI-compatible key was sent to any base URL typed later, also plain http to this PC (major, security) | fixed: keys per service id; the window shows no saved key for another server |
+| The window could erase `keys.bin` when the keys were not read (test runs, the echo translator, an unreadable file) (major, correctness) | fixed: such a window is read-only (no key field, no Remove, "Saved keys cannot be read or changed right now.") and its backend refuses every write |
+| The privacy notice said player names are never sent, but names typed in a message are (major, correctness) | fixed in en and fr: the sender's name, the channel and the realm are never sent; names written inside a message are part of its text |
+| `*.localhost` counted as this PC though Windows resolves it through DNS (minor, security) | fixed: `localhost` and loopback literals only |
+| The Brackets retry and spans past the 9th sent URLs, e-mail addresses and IDs in clear (minor, security) | fixed: such lines stay local with `kept_local` (badge "not sent to ...") |
+| No output limit for OpenAI-compatible servers; the cap counted the input only (minor, security) | fixed: 4000 tokens; the answer counts too |
+| Keys in header values and the key store's JSON were not zeroed; the DPAPI entropy comment overstated (minor, security) | fixed (best effort, documented); comment reworded |
+| Consent and cache covered the host only (minor, correctness) | fixed: the base path is part of the service id |
+| Gemini: every finishReason a refusal, enum names redacted; `minimal` sent to `gemini-3.1-flash-lite` (minor, correctness) | fixed: the content filters only; enum and model names kept; levels only for the models of the thinking table |
+| The "translator files not found" balloon showed with a working remote service (minor, correctness) | fixed: not shown while a service is in use |
+| An Ollama on the home network (http, no key) could not be set up (minor, correctness) | fixed: private address literals need no key; a key over http stays refused |
+| Failed requests counted toward the cap and hid the real error; old badges showed today's cap (minor, correctness) | fixed: counted only when the service answered; the cap in force goes with the reason |
+| OpenAI-compatible: gpt-6-luna filled in for other servers (minor, correctness) | fixed: only for OpenAI's own server; cleared when the URL names another |
+
+### O.3 Integration results (2026-10-21)
+
+Same PC, after a reboot at 22:39 on 2026-10-20; the WoW client was not running and the user's
+Translate Companion was not running before the release build. No real remote service was called
+(no key is available to the project): every remote test runs on a fake transport or a 127.0.0.1
+stub. One llama-server at a time, CPU only, 4 threads, 60 s watchdog, after checking that WowB.exe
+was not running and that about 13.7 GB of RAM was free; none was left running.
+
+| Command | Result |
+|---|---|
+| `npm test` (enUS, frFR, bridge) | enUS 789/789, frFR 789/789, bridge byte identity all passed |
+| `luacheck addon` | 0 warnings, 0 errors in 26 files |
+| `cargo test --offline`, `helper\bridge` | 73 passed, 2 ignored; `--release -- --ignored`: 2 passed (200,000 corrupted captures, 0 undetected; at 1080p strip decode 10.7 us, view scan 263.0 us, cards 235.0 us) |
+| `cargo test --offline`, `helper\engine` | 157 + 5 passed, 3 ignored; `--ignored`: 3 passed, `real_server_cpu_smoke` server ready in 8.3 s, first result 12.3 s, the cached one at once, shutdown 159 ms |
+| `cargo test --offline`, `helper\app` | lib 201, clipprobe 4, graceful_exit 3, native_look 5, presence_card 2, sentinel 2, tagscan_equiv 5 passed (7 ignored); `--release -- --ignored`: window_pipeline 2/2, render 0.574 ms, candidates 0.118 ms, `sample_card` 336.3 us, discovery scan 0.671 ms (whole client) and 1.349 ms (with the presence areas) |
+| `cargo test --offline`, `helper\testkit` | 17 passed |
+| `cargo clippy --offline --all-targets` | engine: no warning; app: no warning in the changed code (two in `settings_window.rs` fixed), older warnings elsewhere unchanged |
+| `scripts\helper.ps1 -Build` | `WoWTranslateCompanion.exe` 1,520,128 bytes (WinHTTP and the providers: +183 KB), "Translate Companion 0.7.0" |
+
+**End to end, echo translator, WGC, `--no-overlay --no-clipboard`**
+
+| Scenario | TRANSLATE P99 ms | band failures / checks | hidden | masks | missing | done | presence | CPU whole run % | CPU after 2 s % |
+|---|---|---|---|---|---|---|---|---|---|
+| basic | 135.2 | 0 / 3516 | pass | pass | pass (0) | 3/3 | - | 2.69 | 1.29 |
+| scroll | 80.8 | 0 / 3350 | pass | pass | pass (0) | 3/3 | - | 1.77 | 1.15 |
+| fade | 157.4 | 0 / 1325 | pass | pass | pass (0) | 2/2 | - | 2.33 | 1.47 |
+| cover | 76.7 | 0 / 3960 | pass | pass | pass (0) | 2/2 | - | 2.25 | 1.23 |
+| tabs | 75.5 | 0 / 2005 | pass | pass | pass (0) | 2/2 | - | 2.12 | 1.19 |
+| altz | 74.9 | 0 / 2768 | pass | pass | pass (0) | 2/2 | - | 2.82 | 1.32 |
+| dropped | 87.8 | 0 / 1365 | pass | pass | pass (1) | 2/2 | - | 2.44 | 1.18 |
+| late_start | 65.5 | 0 / 1674 | pass | pass | pass (3) | 1/1 | - | 3.36 | 1.29 |
+| gamma22 | 70.1 | 0 / 3520 | pass | pass | pass (0) | 3/3 | - | 2.24 | 1.10 |
+| conv | 172.2 | 0 / 2997 | pass | pass | pass (0) | 4/4 | - | 3.42 | 1.83 |
+| presence | 65.5 | 0 / 590 | pass | pass | pass (0) | 1/1 | pass: 181.4 ms, VIEW 201 | 3.07 | 1.29 |
+| presence_late | 92.0 | 0 / 505 | pass | pass | pass (0) | 1/1 | pass: 104.3 ms, discovery, samples (36, 30, 24) | 3.63 | 1.33 |
+
+- Every functional check passes in all 12 scenarios (conv: window_fill, reply_status,
+  partial_rows, no_duplicate and cpu_vs_i2 too). The CPU rule (3% of one core over the whole run)
+  fails in 4 of 12 (3.07 to 3.63%; 1.29 to 1.83% after the first 2 s), as in every run on this
+  machine (6 of 12 on 2026-10-20). The test runs log `RemoteChoice { provider: "local", allowed:
+  false }`: they never read the key file.
+- A grep of the 48 fresh diag, truth, report and log files for 14 words of the scenarios' player
+  lines and senders: 0 hits. run.py reported no leftover process.
+- Translate Companion 0.7.0 was then started for the user, detached (WMI `Win32_Process.Create`,
+  outside the development shell's container): its log has Start 0.7.0, Settings loaded, the
+  engine's Discovery (runtime and model found), TrayIcon, `RemoteChoice { provider: "local",
+  allowed: true }` and `StatusFile { state: "running" }`.
+
+### O.4 In-game and by-hand checks (not done here)
+
+1. Tray, "Translation engine...": the window at the user's DPI, both languages (the layout was
+   only checked by the tests at 96 to 192 dpi and by `settings_window_snapshot`).
+2. A real key per provider: Test, Save, then a few lines (the request formats were checked against
+   the providers' documentation, never against the live services).
+3. An invalid key: a line gets the amber sign after its text; hovering shows "Translated locally
+   after an error from <service>" and "HTTP 401 ..." (or 403 for DeepL); the game keeps the focus.
+4. The daily limit: a small cap, then the "daily limit ... is reached" tooltip with that cap.
