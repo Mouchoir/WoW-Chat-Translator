@@ -158,9 +158,26 @@ pub fn root_at(x: i32, y: i32) -> isize {
     }
 }
 
+/// True for a layered window of this process that the mouse can reach: the fallback badge's
+/// hover target (`crate::badge`), which sits over a card's last line. The overlay and the toast
+/// are click-through, so `WindowFromPoint` never returns them.
+pub fn is_own_hit_target(root: isize) -> bool {
+    if root == 0 {
+        return false;
+    }
+    let h = hwnd(root);
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(h, Some(&mut pid as *mut u32));
+    }
+    pid == std::process::id() && (unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32 & WS_EX_LAYERED.0) != 0
+}
+
 /// Covering test (design D.3 step 5): a 3x3 grid of points over `rect` (screen coordinates) must
 /// all resolve to `target`. A point on no monitor cannot be covered by anything (and nothing we
 /// draw there is visible), so it counts as uncovered: this keeps an off-screen test window usable.
+/// A point on our own fallback badge says nothing about the card under it and is skipped (else
+/// the badge would hide its own card).
 pub fn rect_covered(target: isize, x: i32, y: i32, w: i32, h: i32) -> bool {
     for i in 0..3 {
         for j in 0..3 {
@@ -169,7 +186,8 @@ pub fn rect_covered(target: isize, x: i32, y: i32, w: i32, h: i32) -> bool {
             if !point_on_monitor(px, py) {
                 continue;
             }
-            if root_at(px, py) != target {
+            let root = root_at(px, py);
+            if root != target && !is_own_hit_target(root) {
                 return true;
             }
         }
@@ -190,8 +208,12 @@ pub fn rect_fully_covered(target: isize, x: i32, y: i32, w: i32, h: i32) -> bool
             if !point_on_monitor(px, py) {
                 continue;
             }
+            let root = root_at(px, py);
+            if is_own_hit_target(root) {
+                continue;
+            }
             on_monitor += 1;
-            if root_at(px, py) == target {
+            if root == target {
                 return false;
             }
         }

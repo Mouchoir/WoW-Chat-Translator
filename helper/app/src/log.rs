@@ -87,6 +87,18 @@ pub enum AppEvent {
     /// at, the addon folders found, the files written, the writes that failed and the folders
     /// skipped as reparse points (a junction or a link). Never a path.
     StatusFile { state: &'static str, roots: u32, targets: u32, written: u32, failed: u32, skipped: u32 },
+    /// The translation service handed to the engine (2026-10-20): the saved provider id, whether
+    /// the engine uses it (`active`), why not (`ConfigError::code`: no consent, no key, a bad
+    /// URL...), the daily cap, and whether this run may use one (`Cli::remote_allowed`). Never the
+    /// key, the URL or a model name.
+    RemoteChoice { provider: &'static str, active: bool, error: Option<&'static str>, daily_cap: u32, allowed: bool },
+    /// The settings window: what it did (open, save, cancel, test, remove_key, write_settings),
+    /// the provider id shown, and whether it worked. Never anything typed into it.
+    EngineSettings { action: &'static str, provider: &'static str, ok: bool },
+    /// The key file could not be read (`error`: io, corrupt, decrypt): no keys this run.
+    KeyFile { ok: bool, error: &'static str },
+    /// A fallback badge was hovered: its request, the fallback kind, whether the tooltip showed.
+    FallbackTip { req: u16, kind: &'static str, shown: bool },
     Exit { code: i32, uptime_s: u64 },
     Panic { line: u32 },
 }

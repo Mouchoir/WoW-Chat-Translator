@@ -14,6 +14,15 @@ painted "Translate Companion detected" in green whenever the Helper sees it, als
 while the popup is open) and **no hint lanes** any more (the addon of build 6 draws none; the lane
 search and its cover are gone). The Helper speaks `STATUS.addonBuild` 6 and serves builds 2 to 6.
 
+**Version 0.7.0 (2026-10-21): remote translation services (2026-10-20, user decision).** Players may use their own API key
+for DeepL, any OpenAI-compatible endpoint, Google Gemini or Anthropic Claude: the tray's
+"Translation engine..." window (keys stored with DPAPI, a required consent per service, a daily
+character limit, a Test button); the local translator stays the default. A line the engine had to
+translate locally after a remote failure ends with a small amber warning badge whose tooltip says
+why (section "Remote translation services" below; engine side: `docs\ENGINE.md` section 13). The
+two reviews of 2026-10-21 (security and privacy; correctness and UX) were fixed before release:
+`docs\ENGINE.md` section 13, "Review fixes", and the app items in that section below.
+
 **Naming (user request U2, 2026-10-19).** Everything users see says Translate Companion: the exe
 (Cargo `[[bin]]` `WoWTranslateCompanion`), the tray tooltip (with the version) and menu, the
 balloons, the toasts, the status strings, `--help` and `--version`. Internal identifiers users
@@ -46,7 +55,10 @@ windows' titles say "Translate Companion". Download page (user request U3): `tp_
 | `src\clip.rs` | Clipboard of translated replies: `ReplyClip` (begin, finish, release), `ClipOs` with the real `WinClip` and the tests' `FakeClip`, `one_line_255` |
 | `src\reply.rs` | The UI thread's replies: one `ReplyBook` per reply request (clipboard state, the request's own text), memory only |
 | `src\backdrop.rs` | The chat background around each card's rows, sampled in the current capture (native look) |
-| `src\overlay\{mod,window,render,fit,fonts}.rs` | Layered windows, pixel composition, wrapping, fonts |
+| `src\overlay\{mod,window,render,fit,fonts}.rs` | Layered windows, pixel composition, wrapping, fonts; the fallback badge glyph and `BadgeSpot`s |
+| `src\remote.rs` | The app's side of the remote services: the service list (`Choice`), the key file, the engine's remote configuration, the badge tooltip and Test failure texts |
+| `src\settings_window.rs` | The "Translation engine..." window: `Form` (the state machine), `Backend` (key file, Test, today's count), the Win32 window built in code |
+| `src\badge.rs` | The fallback badges' hover windows (`TPHelperBadge`) and their tooltip (`TPHelperTip`) |
 | `src\toast.rs`, `src\tray.rs` | Bridge toast, notification-area icon |
 | `src\app.rs` | Process: UI thread, capture thread, engine wiring |
 | `src\bin\capprobe.rs` | Capture self-check on its own window |
@@ -101,8 +113,9 @@ hidden test flags: [--instance-name NAME] [--assume-background] [--status-root D
   file without `--status-root`, so the E2E rig and the window tests never touch the user's WoW
   folders (`Cli::status_file_on`).
 - `--help` starts with the app's name and the download page; `--version` prints
-  "Translate Companion 0.6.0" (0.4.0 at the rename, 0.5.0 since the link colours and the verbatim
-  tokens, 0.6.0 since the status file and the presence card, all 2026-10-19).
+  "Translate Companion 0.7.0" (0.4.0 at the rename, 0.5.0 since the link colours and the verbatim
+  tokens, 0.6.0 since the status file and the presence card, all 2026-10-19; 0.7.0 since the
+  remote translation services, 2026-10-21).
 - Exit codes: 0 normal, 1 failed start or failed probe, 2 another instance is running
   (`Local\TranslateProbeHelper`, also taken by an old `TranslateProbeHelper.exe`), 64 bad arguments.
 - Stopping: the tray's Exit, `--exit-after`, or `taskkill /IM WoWTranslateCompanion.exe` without
@@ -115,10 +128,13 @@ hidden test flags: [--instance-name NAME] [--assume-background] [--status-root D
 ## Threads
 
 - **UI thread**: hidden window `TPHelperMain` (a plain top-level window, never shown, also the
-  clipboard owner of replies), tray icon (tooltip "Translate Companion 0.6.0 - <translator state>";
-  menu: Unload translator now, Get updates (opens `RELEASES_URL` in the default browser with
+  clipboard owner of replies), tray icon (tooltip "Translate Companion 0.7.0 - <translator state>",
+  or "... - <service> (local: <translator state>)" with a remote service; menu: Translation
+  engine... (the settings window of the remote services), Unload translator now, Get updates (opens `RELEASES_URL` in the default browser with
   `ShellExecuteW`, on the user's own click only; logged as `TrayUpdates`), Open log folder, the two
-  reply switches, Exit), overlay windows (`TPHelperOverlay`, one per VIEW id) and
+  reply switches, Exit), overlay windows (`TPHelperOverlay`, one per VIEW id), the fallback
+  badges' hover windows (`TPHelperBadge`) and tooltip (`TPHelperTip`), the settings window
+  (`TPHelperSettings`, while open; its messages go through `IsDialogMessageW`) and
   the toast (`TPHelperToast`, created hidden at start unless `--no-overlay`). With overlay windows
   it sets two out-of-context WinEvent hooks (foreground change, minimize start/end) so that the
   overlay's z-order follows the game window at once (decision D12, below). `WM_CLOSE` on any of these windows exits like the tray's
@@ -482,6 +498,110 @@ dark plate showed. Now:
   `overlay::window::tests::z_order_right_above_the_game_window` (hidden windows of the test only:
   nothing is shown and the focus never changes).
 
+## Remote translation services (2026-10-20, user decision)
+
+The user asked whether players can use their own API keys for a remote AI service ("a better
+model, faster or other"). Decisions (user and lead, 2026-10-20): DeepL, any OpenAI-compatible
+endpoint, Google Gemini and Anthropic Claude; the local Qwen model stays the default; keys are
+entered only in Translate Companion, never in WoW; when the service fails or the daily limit is
+reached, the line is translated locally and gets a small warning badge whose tooltip says why.
+The engine side (requests, retries, routing, DPAPI key store, daily count) is `docs\ENGINE.md`
+section 13; this section is the app side.
+
+**Settings window** (`settings_window.rs`, class `TPHelperSettings`): the tray's first item,
+"Translation engine..." ("Moteur de traduction..."), opens it on the player's own click, so it
+may take the focus (a second click brings the open window to the front). Built in code (Win32
+controls, no resource file), in the Windows UI language, sized for the DPI of the monitor under
+the cursor and laid out again on `WM_DPICHANGED`, centred in that monitor's work area, with the
+app icon and a taskbar button. Controls get the common controls 6 look through an activation
+context made from the manifest Windows ships in `shell32.dll` (resource 124); without it they
+keep the classic look and work the same. Top to bottom:
+
+| Control | What |
+|---|---|
+| Service | Local translator (Qwen3, on this computer), DeepL, OpenAI-compatible (OpenAI, OpenRouter, Mistral, Groq...), Google Gemini, Anthropic Claude |
+| API key | Masked (`ES_PASSWORD`). A saved key is never shown: the field stays empty, an empty field keeps it, and the line under it says whether one is saved ("A key is saved, encrypted for your Windows account. Leave the field empty to keep it."), or that none is needed (an OpenAI-compatible server on this computer). "Remove saved key" deletes it at once. A key belongs to one service: the provider, or for an OpenAI-compatible server its host, port and base path, so another base URL shows "No key saved yet" until a key is typed for it and the saved one is never sent there. When the key file could not be read (or in a test run) the field and Remove are off and the line says "Saved keys cannot be read or changed right now.": nothing is ever written over a file that was not read. |
+| Model | Editable list with the engine's suggestions (`Provider::model_suggestions`); another service shows its default model, the saved service its saved model. For an OpenAI-compatible server other than OpenAI's the field starts empty, and OpenAI's default model is cleared when the base URL names another server, so Save asks for that server's model |
+| Base URL | OpenAI-compatible only; shows `https://api.openai.com/v1` when empty (saved empty) |
+| Daily limit | Characters per day, 0 or empty = no limit; the unit says how many were sent today (`remote::usage::read_today`) |
+| Privacy notice | Local: nothing is sent. Remote: what is sent to which service (the text of each translated chat message and the matching glossary terms; never the sender's name, the channel or the realm, while names written inside a message are part of its text), under its own terms and costs, and the local fallback with its sign |
+| Consent box | "Send the text of chat messages and glossary terms to this service", required to save a remote service. It belongs to one service (the engine's `service_id`: the provider, and the host, port and base path for an OpenAI-compatible server): another service, server or route unticks it, and going back ticks it again |
+| Test | One synthetic sentence (`remote::TEST_SENTENCE`, no player data, no consent needed) translated by the service on a `tp-test` thread, into the player's latest target when it is not English, else French (French Windows) or German. The line beside it shows "It works (N ms): <translation>" in green or "Test failed: HTTP 401 - invalid x-api-key" in red |
+| Save, Cancel | Enter is Save, Esc and the title bar's close button are Cancel |
+
+- **The state machine** is `settings_window::Form` (pure, tested): what each control holds, which
+  ones take input, what Save writes and what Test sends. Save checks, in order, the daily limit
+  (a whole number), the base URL, the consent, then the engine's own check
+  (`RemoteConfig::new`: a key unless the server is on this computer or on a private network
+  address, `https` or a keyless `http` to such a server, a model name for a server other than
+  OpenAI's, no spaces in the model) and shows the
+  first problem in red under Test; the window stays open.
+- **Keys**: `keys.bin` next to settings.json (`%APPDATA%\TranslateProbe\keys.bin`), the engine's
+  DPAPI key store (`tp_engine::remote::keystore`, one key per service id), written by the window
+  (a typed key on Save, before the settings; a removal at once). The window's backend
+  (`KeyFileBackend`) holds the keys as read when it opened; when the file could not be read, or
+  the run never touches it, it holds none and refuses every write. The key goes from the edit control into a `Secret`
+  (zeroed on drop) only for Save and Test, the temporary copies are zeroed, and the field is
+  emptied after Save. Written by the companion's own process, so the MSIX redirection of the
+  development shell does not apply at run time.
+- **Save** posts `WM_APP_SETTINGS` to the main window with the new `RemoteSettings` and the keys:
+  the UI thread writes settings.json from its own copy (a tray switch changed while the window
+  was open is kept) and gives the engine the service (`apply_remote`). The window posts the same
+  message with wParam 1 when one of its modal loops (moving it) ends, so the main window catches
+  up on the scene and result messages that loop dispatched.
+- **Keyboard**: the UI thread passes every message through `IsDialogMessageW` for the open
+  window (`settings_window::dialog_message`): Tab, Shift+Tab, Enter and Esc work as in a dialog.
+- **Z-order**: the overlay's "first window above the game that is not ours" (D12) now counts only
+  hidden or layered windows as ours (`overlay::window::ours`), so the overlay goes under the
+  settings window like under any other window (deviation 63).
+
+**Engine**: at start (`apply_remote`, also after Save and after a removed key) the UI thread
+builds the engine's remote configuration from `settings.translation` and the key file
+(`RemoteConfig::from_settings`: consent, key, URL and model checked) and calls
+`EngineHandle::set_remote`; a service that cannot be used (no consent, no key, a bad URL...) gives
+None, so the engine translates locally, and the log says why (`RemoteChoice`). A test run
+(`--instance-name`, `--no-overlay`, `--wow-class`, `--assume-*`, `--overlay-probe`) or the echo
+translator never reads the key file and never uses a service (`Cli::remote_allowed`). The tray
+tooltip names the service: "Translate Companion 0.7.0 - DeepL (local: translator ready (CPU))".
+While a service is in use, the "translator files not found" balloon is not shown at start (the
+local model is only the fallback then; the tray tooltip still says so).
+
+**Fallback badge**: every update of a job that was meant for the service and was translated
+locally carries `Update::fallback` (provider, kind, HTTP status, the service's sanitized message).
+The UI thread keeps it per request in memory (pruned with the results, never written or logged)
+and:
+
+- the overlay (`render_all`) ends a final result (`Done`, `Same`, `Nothing`, and a local failure
+  such as `Failed` or `LowMemory`) with a small amber warning triangle (WoW's
+  `NORMAL_FONT_COLOR`, the "!" knocked out, 0.85 of the band height, at least 9 px) after the last
+  line drawn, drawn like the text (black shadow, the occlusion mask, the card alpha); the text of
+  such a result is fitted `badge_reserve` px narrower (gap, badge, shadow), so the badge always
+  fits after it. Nothing while the result streams. In a reply card the badge follows the last text
+  row (or the status row when there is no text);
+- each render lists the badges drawn in shown views, with at least half of their square on
+  visible plate pixels (`overlay::BadgeSpot`); the UI thread puts one tiny window
+  (`badge::Badges`, class `TPHelperBadge`) over each: layered, alpha 1/255 over its whole square
+  (invisible, but the mouse reaches it: only fully transparent pixels let it through), not
+  click-through, `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`, `WM_MOUSEACTIVATE` answers
+  `MA_NOACTIVATE`, shown with `SWP_NOACTIVATE` only, clicks do nothing. It is placed in the
+  overlay's z-order mode (topmost with the game in front, right above the game window otherwise),
+  moved with its card on every render, follows z-order changes, and is destroyed when its card
+  goes (a covered card, a hidden scene, the game minimized, the tray menu open);
+- the badge window tracks the mouse (`TrackMouseEvent(TME_LEAVE)`) and posts `WM_APP_BADGE` to
+  the main window on enter and leave; the UI thread then shows (or hides) the tooltip
+  (`TPHelperTip`, click-through and never activated like the overlay): a dark rounded box drawn
+  by the app, the title in the badge's amber ("Translated locally after an error from Claude",
+  "Translated locally: the daily limit for DeepL is reached", "Translated locally: not sent to
+  Claude") and the reason in light grey ("HTTP 401 - invalid x-api-key", "no answer in time",
+  "refused by the service - <message>", "50000 characters per day" with the limit that applied
+  when the line was kept local, "the message holds links, IDs or addresses that are never sent
+  in clear"), up to 3 lines, at most 460 px wide, centred above the badge (below
+  it when there is no room) inside the monitor's work area, in the player's language, in the same
+  z-order mode, following its badge and hidden with it;
+- the covering test skips a grid point that lands on one of our layered hit-testable windows
+  (`wow::is_own_hit_target`), else the badge would hide its own card (deviation 64);
+- under `--no-overlay` the badges are computed and recorded, but no window is created.
+
 ## `--diag-json` (JSON Lines, `t` = Unix epoch ms, never any text)
 
 Design D.6 records, with extra fields and events:
@@ -502,7 +622,9 @@ Design D.6 records, with extra fields and events:
 {"t":..,"ev":"overlay","view":1,"shown":true,"rect":[x,y,w,h],"window":false,"px":13240,"textPx":1812,"tagPx":1536,"fillPx":0}
 {"t":..,"ev":"clip","req":904,"what":"begin|finish|release","outcome":"emptied|busy|not_allowed|copied|copied_cut|changed|off","cut":false,"excluded":true}
 {"t":..,"ev":"z","mode":"topmost|above","moved":true}
-{"t":..,"ev":"engine","req":5,"session":1234,"status":"done","ms":200}
+{"t":..,"ev":"engine","req":5,"session":1234,"status":"done","ms":200,"fallback":null|"http|timeout|network|refused|truncated|bad_answer|daily_cap"}
+{"t":..,"ev":"badge","n":1,"spots":[{"req":5,"session":1234,"view":1,"rect":[x,y,w,h]}],"windows":1}
+{"t":..,"ev":"tip","req":5,"kind":"http","status":401,"shown":true} / {"ev":"tip","shown":false}
 {"t":..,"ev":"capture","fresh":true,"method":"wgc","fg":true,"strip":true,"scan":true,"viewSkip":false}
 {"t":..,"ev":"wow","found":true,"w":1920,"h":1080,"x":0,"y":0} / {"ev":"wow","found":false}
 {"t":..,"ev":"session","old":1,"new":2}   {"t":..,"ev":"state","state":"ready_cpu"}
@@ -539,7 +661,11 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
 - `%APPDATA%\TranslateProbe\settings.json` (design D.6 fields, plus `replyClipboard` (true) and
   `replySound` (false), the two tray items of the conversation window, and `wowRoot` ("", since
   0.6.0: the WoW folder of the status file; empty: the ones the Battle.net agent's product.db
-  names)). Invalid values fall back
+  names), and `translation` (2026-10-20: the engine's `RemoteSettings`, `{"provider":"local",
+  "model":"","baseUrl":"","consent":"","dailyCharCap":0}`; a bad value is fixed and logged as
+  `translation.provider`, `translation.model` or `translation.baseUrl`)). Never a key: the keys
+  are in `keys.bin` next to it, DPAPI-encrypted for the Windows user (the engine's key store).
+  Invalid values fall back
   to their defaults (each fix is logged by field name); an unreadable file is left untouched and
   the defaults are used. A tray switch is saved to the file at once (not when the file was
   unreadable: the switch then lasts until the Helper exits).
@@ -550,6 +676,11 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
 - The logger only accepts `AppEvent` and `tp_engine::EngineEvent` (numbers, enums, fixed names).
   Chat text travels in `ChatText` (no Debug, no Display). A panic logs its line number only.
 - Translations stay in memory (last 512 jobs) and are never written anywhere.
+- Remote services (2026-10-20): the fallback reasons stay in memory with the results; the log gets
+  `RemoteChoice` (the provider id, whether the engine uses it, why not as a code, the daily limit,
+  whether this run may use one), `EngineSettings` (the window's action, the provider id, ok),
+  `KeyFile` (an unreadable key file, as a code) and `FallbackTip` (request id, fallback kind,
+  shown). Never a key, a URL, a model name, a service message or anything typed in the window.
 
 ## Tests
 
@@ -559,6 +690,8 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
 | `cargo test --offline` (2026-10-19 additions) | clipboard flow on a fake clipboard (empty on receipt, copy when unchanged, Changed, Busy after 3 tries, a busy empty still copies when nothing changed, release only when own, no consent and switch off touch nothing, `one_line_255` with UTF-8, word boundaries and pipes); replies (start, finish only on a final result, Same and Nothing copy the player's text, failures write nothing, exit releases); the lane (clean, under a tooltip, absent; removed in 0.6.0); scene (reply start, replace and end, urgent, never the language; build 2 and 3 without a toast; the lane tests removed in 0.6.0; the background rule of D12); overlay (row 0 colours and texts per outcome, window wording, status on row 0 and text below in pixels, window text origin, lane painted on passing columns only (removed in 0.6.0)); z-order with hidden windows; region planning and duplicate tags; settings, CLI, tray ids; `tests\tagscan_equiv.rs` overlapping views (each tag once, the window's reading equal to a full scan); `tests\sentinel.rs` reply flow |
 | `cargo test --offline` (integration review fixes) | the capture period in and out of front (`app::tests::the_strip_is_read_at_its_own_rate_in_the_background_too`), the hidden `--assume-background` flag, every exclusion format tried after a failure (`clip::tests::every_exclusion_format_is_tried_even_after_a_failure`), `ReplyClip::own_write`, clipprobe's skip rules (`unreadable_text_is_never_touched`) and its parent-side comparison of a child's reading |
 | `cargo test --offline` (2026-10-19, link colours L3) | fit: the marks and colour codes are never measured, the runs follow wrapping (a name over two lines), UTF-8 and the "..." cut (dots in the text colour), the same lines and size as the plain text; render: a colour span changes the glyph colour only (alpha, black shadow, pixel counts unchanged); overlay: a coloured link name drawn in its colour between text-coloured words, the same coverage as the plain line; fonts: the advance of "Vends " lands within 1 px of the first ink of the next glyph; clipboard and replies: a colour code never reaches the clipboard (`one_line_255`, a coloured Done, Same and Nothing); scene: build 5 served, builds 2 to 4 without a toast, build 6 told to update the app; COLOURS (integration review): written into the next TRANSLATE of its reqId and session only, used once, the newest 8 kept, dropped on CLEAR and on a session change (`scene::tests::colours_go_into_the_next_translate_of_their_request`) |
+| `cargo test --offline` (2026-10-20, remote services) | settings: `translation` round trip without any key field, validation (`translation.provider`, `translation.baseUrl`), an older file translates locally; the settings window's `Form`: local needs nothing, a remote service asks for a key and the consent (in that order) and never puts the key in the settings, a saved key is kept, shown as saved and removable, switching services shows their model and their consent, an OpenAI-compatible server is its own service (another host unticks the consent, the default URL is saved empty, a loopback server needs no key but a model name, plain `http` elsewhere and a bad URL or model are refused), the daily limit is a whole number (empty = none) and going local keeps it, Test needs no consent; the layout fits and nothing overlaps at 96, 120, 144 and 192 dpi; the Win32 window created hidden with a fake backend (never shown, the foreground never changes): built in code and localized, the key masked, a second open brings the same window, Esc and the close button cancel, a typed key enables Test, Test shows the translation in green or "Test failed: HTTP 401 - invalid x-api-key" in red, Save is refused without the consent and then saves the service with its trimmed key, "Remove saved key", a key file that cannot be written keeps the window open; the visual styles context; `remote`: the service list follows the engine's ids, tooltips name the service, the HTTP status and the message (the same words once, the daily limit), every configuration error has a message, the engine gets a service only with its consent and key, the key file from a temp folder only, the Test's target language; overlay: the warning glyph's shape, badge sizes, a fallen-back result ends with the badge after its text (in its own spot, nothing amber otherwise), no badge before the final result, one after a status line, a long text gives up the badge's room, a badge under a game tooltip is neither drawn nor hoverable (and none on a covered card or a hidden scene), a reply's badge follows its last text row; badge windows: the tooltip stays in the work area (above, else below, both screen edges, a second monitor; a badge on no monitor keeps its tooltip next to it, so a test never puts one on a screen), alpha 1/255, windows follow their cards (moved, destroyed with the card or the hidden scene; layered, never transparent, no-activate, skipped by the covering test) and never take the focus, none under `--no-overlay`, `MA_NOACTIVATE`, clicks do nothing, enter and leave reported once each, the tooltip (click-through, never active) shows over its badge and goes with it or on leave, its panel holds the amber title and the grey reason within 460 px; z-order: a visible ordinary window of ours is not skipped; CLI: only a normal run with the real translator uses a service; the tray tooltip names the service and fits 127 characters; menu ids |
+| `cargo test --offline` (2026-10-21, review fixes) | a saved OpenAI key belongs to its server only (another base URL has no saved key, Test needs a key typed for it, a home network server needs none and is not sent the saved one); another OpenAI-compatible server must name its model (OpenAI's default cleared, a typed model kept); a key file that was not read is never written (`KeyFileBackend` without keys refuses Save and Remove, a read one keeps the other keys, a locked window has no key field and says why); the privacy notice's new wording; tooltips for `kept_local` and the cap that applied |
 | `cargo test --offline --release --lib -- --ignored --nocapture render_cost candidate_cost` | render and candidate-row timings |
 | `cargo test --offline --release --test native_look -- --ignored --nocapture` | background sampling cost of a 6-row card |
 | `cargo test --offline` (2026-10-19, integration review and hint lanes) | removed with the hint lanes in 0.6.0 (`lane.rs`, `tests\hint_lane.rs`); the scene's build tests remain (builds 2 to 6 served) |
@@ -1069,3 +1202,31 @@ visible, else `idle`; `nowow` / `minimized` when there was no usable window.
     `BUBBLE_RGB` fill with `CompanionDialog.CardMetrics` (fractional px), sends VIEW 201 as the
     addon rounds it, and checks both runs' samples against the fill; with the old 6-unit left fill
     the discovery run fails.
+62. **The badge is drawn by the overlay; its window is an invisible hit target (2026-10-20).** The
+    design asks for a small hit-testable window per badge. Drawing the glyph in that window would
+    put it above the overlay window in the z-order (the overlay paints the plate's background
+    over the whole band) and outside the occlusion mask, so a game tooltip over the line's end
+    would show the badge on top of it. The overlay draws the glyph like the text (shadow, mask,
+    card alpha) and the badge window covers it at alpha 1/255: invisible, but the mouse reaches it
+    (only fully transparent pixels of a layered window let the mouse through). A badge with less
+    than half of its square on visible plate pixels gets no window.
+63. **The z-order counts only hidden or layered windows as ours (2026-10-20).** `insert_after`
+    skipped every window of the process above the game window, so with the settings window right
+    above the game (the game in the background) the overlay went above the settings window.
+    `ours` now means a window of the process that is hidden (the main window) or layered (overlay,
+    toast, badge, tooltip); the settings window counts like any other window
+    (`overlay::window::tests::a_visible_ordinary_window_of_ours_is_not_skipped_by_the_z_order`).
+64. **The covering test skips our badge windows (2026-10-20).** A badge window is hit-testable, so
+    `WindowFromPoint` returns it for a grid point on it: the card would be "covered" by its own
+    badge, dropped, its badge destroyed, then drawn again. A point on a layered window of the
+    process (`wow::is_own_hit_target`) now says nothing: it is skipped like a point on no monitor.
+65. **The settings window does not write settings.json (2026-10-20).** It posts the saved service
+    to the main window, which writes its own copy of the settings: the window's copy dates from
+    when it opened, so writing it would undo a tray switch changed meanwhile. The key file is
+    written by the window (before the settings are posted), so a key that could not be saved
+    keeps the window open with "The settings could not be saved."
+66. **Test runs never use a remote service (2026-10-20).** A run with `--instance-name`,
+    `--no-overlay`, `--wow-class`, `--assume-foreground`, `--assume-background` or
+    `--overlay-probe`, or with the echo translator, neither reads the key file nor hands a service
+    to the engine (`Cli::remote_allowed`), so an E2E or window test never sends text to the
+    player's paid service with the player's key.

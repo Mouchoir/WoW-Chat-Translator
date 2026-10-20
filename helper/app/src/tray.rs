@@ -1,8 +1,9 @@
-//! Notification-area icon of Translate Companion: state tooltip (with the version), balloons and
-//! a small menu (unload, "Get updates" (opens `RELEASES_URL` in the browser), log folder, the two
-//! reply switches "Copy translated replies to the clipboard" and "Sound when a reply is copied",
-//! exit). The icon is drawn at runtime (`CreateIconIndirect`), so the exe carries no resource
-//! file.
+//! Notification-area icon of Translate Companion: state tooltip (with the version, and the remote
+//! service when one is used), balloons and a small menu ("Translation engine..." (the settings
+//! window of the remote services, 2026-10-20), unload, "Get updates" (opens `RELEASES_URL` in the
+//! browser), log folder, the two reply switches "Copy translated replies to the clipboard" and
+//! "Sound when a reply is copied", exit). The icon is drawn at runtime (`CreateIconIndirect`), so
+//! the exe carries no resource file.
 //!
 //! The menu follows the documented notification-icon pattern: `SetForegroundWindow` on the hidden
 //! main window right before `TrackPopupMenuEx`, and a `WM_NULL` after it. Without it the menu does
@@ -29,6 +30,8 @@ pub enum MenuCmd {
     ReplySound = 5,
     /// Opens the releases page (`crate::RELEASES_URL`) in the default browser.
     Updates = 6,
+    /// Opens the "Translation engine..." window (`crate::settings_window`).
+    EngineSettings = 7,
 }
 
 impl MenuCmd {
@@ -40,6 +43,7 @@ impl MenuCmd {
             4 => MenuCmd::CopyReplies,
             5 => MenuCmd::ReplySound,
             6 => MenuCmd::Updates,
+            7 => MenuCmd::EngineSettings,
             _ => return None,
         })
     }
@@ -81,8 +85,8 @@ fn copy_wide(dst: &mut [u16], s: &str) {
     dst[w.len()] = 0;
 }
 
-/// 32x32 ARGB icon: a blue rounded square with a white "T".
-fn make_icon() -> Option<HICON> {
+/// 32x32 ARGB icon: a blue rounded square with a white "T" (also the settings window's icon).
+pub fn make_icon() -> Option<HICON> {
     const N: i32 = 32;
     unsafe {
         let bmi = BITMAPINFO {
@@ -269,7 +273,7 @@ mod tests {
 
     #[test]
     fn menu_ids_round_trip() {
-        for c in [MenuCmd::Unload, MenuCmd::OpenLogs, MenuCmd::Exit, MenuCmd::CopyReplies, MenuCmd::ReplySound, MenuCmd::Updates] {
+        for c in [MenuCmd::Unload, MenuCmd::OpenLogs, MenuCmd::Exit, MenuCmd::CopyReplies, MenuCmd::ReplySound, MenuCmd::Updates, MenuCmd::EngineSettings] {
             assert_eq!(MenuCmd::from_id(c as i32), Some(c));
         }
         assert_eq!(MenuCmd::from_id(0), None, "menu dismissed");

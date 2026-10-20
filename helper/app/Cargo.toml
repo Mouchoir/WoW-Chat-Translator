@@ -1,6 +1,6 @@
 [package]
 name = "translateprobe-helper"
-version = "0.6.0"
+version = "0.7.0"
 license = "AGPL-3.0-or-later"
 edition = "2021"
 publish = false
@@ -75,6 +75,11 @@ features = [
   # conversation window replies: the clipboard (design B.3 H3)
   "Win32_System_DataExchange",
   "Win32_System_Memory",
+  # translation engine window and fallback badges (2026-10-20): mouse leave tracking, the
+  # common controls 6 activation context, edit cue banners
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_System_ApplicationInstallationAndServicing",
+  "Win32_UI_Controls",
 ]
 
 [profile.release]

@@ -28,6 +28,13 @@
 //! Z-order (decision D12): with the game window in front, the overlay windows are topmost; when
 //! another window is in front, they sit right above the game window, so that window (and any
 //! other above the game) hides them, and no card is ever drawn over another application.
+//!
+//! Fallback badge (2026-10-20, remote translation services): a final result that the local
+//! translator made because the remote service failed (or its daily limit was reached) gets a
+//! small amber warning triangle after its last text line, drawn like the text (shadow, mask, card
+//! alpha). Its text is fitted `badge_reserve` px narrower so the badge always fits. Each render
+//! lists where the badges are ([`BadgeSpot`]); the UI thread puts a small hit-testable window over
+//! each one for the hover tooltip (`crate::badge`).
 
 pub mod fit;
 pub mod fonts;
@@ -110,6 +117,43 @@ pub enum Content {
 
 /// The presence card's text colour: WoW's GREEN_FONT_COLOR, as the reply's "Ready".
 pub const PRESENCE_RGB: [u8; 3] = REPLY_GREEN;
+/// The fallback badge's colour: WoW's NORMAL_FONT_COLOR (amber), as a reply that was not copied.
+pub const BADGE_RGB: [u8; 3] = REPLY_AMBER;
+/// The badge needs at least this many visible (mask) pixels of its square, as a fraction, for its
+/// hover window to exist: a badge under a tooltip of the game is neither drawn nor hoverable.
+pub const BADGE_MIN_VISIBLE: f32 = 0.5;
+
+/// Where a fallback badge was drawn in this render: the request, its view and the badge's square
+/// `[x, y, w, h]` in client coordinates (physical px).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BadgeSpot {
+    pub key: JobKey,
+    pub view: u8,
+    pub rect: [i32; 4],
+}
+
+/// The badge's side in px for a band `band_h` px tall: 0.85 of it, at least 9 px (never more than
+/// the band).
+pub fn badge_px(band_h: i32) -> i32 {
+    (((band_h as f32) * 0.85).round() as i32).max(9).min(band_h.max(1))
+}
+
+/// Space between the end of the text and the badge.
+pub fn badge_gap(size: i32) -> i32 {
+    (size / 3).max(3)
+}
+
+/// The width a fallen-back result's text gives up so the badge fits after its last line (gap,
+/// badge, 1 px of shadow).
+pub fn badge_reserve(band_h: i32) -> i32 {
+    let s = badge_px(band_h);
+    badge_gap(s) + s + 1
+}
+
+/// A final status: the badge shows only once the result is in (not while it streams).
+pub fn is_final(s: &Status) -> bool {
+    matches!(s, Status::Done(_) | Status::Same | Status::Nothing | Status::Failed(_) | Status::LowMemory | Status::NotInstalled)
+}
 
 /// Engine status name for logs and `--diag-json`.
 pub fn status_name(s: &Status) -> &'static str {
@@ -311,6 +355,8 @@ pub struct OverlayManager {
     pub animating: bool,
     /// Where the overlay windows sit in the z-order (decision D12).
     z: ZMode,
+    /// The fallback badges of the last render, in shown views only.
+    badges: Vec<BadgeSpot>,
 }
 
 /// One fitted line to draw: its band, text, face, supersampled size, colour, alpha multiplier
@@ -389,7 +435,13 @@ impl OverlayManager {
             last: HashMap::new(),
             animating: false,
             z: ZMode::Topmost,
+            badges: Vec::new(),
         }
+    }
+
+    /// The fallback badges drawn by the last render (only in views that are shown).
+    pub fn badges(&self) -> &[BadgeSpot] {
+        &self.badges
     }
 
     /// The z-order mode in use.
@@ -514,6 +566,7 @@ impl OverlayManager {
         sc: &SceneCard,
         results: &HashMap<JobKey, Status>,
         replies: &HashMap<JobKey, ReplyBook>,
+        fell_back: &dyn Fn(&JobKey) -> bool,
         fallback: Lang,
         pulse_mul: f32,
     ) -> PaintStats {
@@ -521,13 +574,21 @@ impl OverlayManager {
         // presence card in any view (in discovery its view is the whole client, a "chat" view)
         let window_copy = (view.kind == ViewKind::Window || sc.kind == CardKind::Presence).then(|| window_card(&sc.card).0);
         let card = window_copy.as_ref().unwrap_or(&sc.card);
-        let (status, reply) = match &sc.kind {
-            CardKind::Request { key, .. } => (results.get(key), replies.get(key)),
-            _ => (None, None),
+        let (key, status, reply) = match &sc.kind {
+            CardKind::Request { key, .. } => (Some(*key), results.get(key), replies.get(key)),
+            _ => (None, None, None),
         };
         let content = card_content_in(sc, status, reply, view.kind, fallback);
         let size = self.font_size(view, card, Face::Latin);
         let width = if card.text_width_px > 0 { card.text_width_px } else { card.bands.iter().map(|b| b.text_rect.w).max().unwrap_or(0) };
+        // a final result the local translator made after a remote failure: its last line ends
+        // with the badge, so its text gives up the badge's room (already while it streams, so
+        // the lines do not wrap again when the result is in)
+        let band_h = card.bands.iter().map(|b| b.text_rect.h).min().unwrap_or(0);
+        let reserve = badge_reserve(band_h);
+        let room = key.is_some_and(|k| fell_back(&k)) && status.is_some_and(|s| is_final(s) || matches!(s, Status::Partial(_))) && width > reserve + 24;
+        let badge = room && status.is_some_and(is_final);
+        let text_w = if room { width - reserve } else { width };
         let mut lines: Vec<LineDraw> = Vec::new();
         if size >= 6 * SS && width > 0 {
             match content {
@@ -535,7 +596,7 @@ impl OverlayManager {
                 Content::Lines { text, target, rows } => {
                     let face = face_for_target(&target);
                     let size = self.font_size(view, card, face);
-                    let fitted = self.fitted(face, size, &text, rows, width);
+                    let fitted = self.fitted(face, size, &text, rows, text_w);
                     for (i, line) in fitted.lines.into_iter().enumerate() {
                         if let Some(bi) = card.bands.iter().position(|b| usize::from(b.row) == i) {
                             let runs = fitted.runs.get(i).cloned().unwrap_or_default();
@@ -548,7 +609,7 @@ impl OverlayManager {
                     if animated {
                         self.animating = true;
                     }
-                    let fitted = self.fitted(Face::Latin, size, &text, 1, width);
+                    let fitted = self.fitted(Face::Latin, size, &text, 1, text_w);
                     let first = card.bands.iter().enumerate().min_by_key(|(_, b)| b.row).map(|(i, _)| i);
                     if let (Some(bi), Some(line)) = (first, fitted.lines.into_iter().next()) {
                         lines.push(LineDraw::plain(bi, line, Face::Latin, fitted.size, rgb, if animated { pulse_mul } else { 1.0 }));
@@ -563,12 +624,14 @@ impl OverlayManager {
                     }
                 }
                 Content::Reply { status, text, target, rows } => {
-                    // row 0: the status, in the player's language
+                    // row 0: the status, in the player's language (it holds the badge only when
+                    // there is no text below it)
+                    let status_w = if text.is_some() { width } else { text_w };
                     if let Some(bi) = card.bands.iter().position(|b| b.row == 0) {
                         if status.animated {
                             self.animating = true;
                         }
-                        let fitted = self.fitted(Face::Latin, size, &status.text, 1, width);
+                        let fitted = self.fitted(Face::Latin, size, &status.text, 1, status_w);
                         if let Some(line) = fitted.lines.into_iter().next() {
                             lines.push(LineDraw::plain(bi, line, Face::Latin, fitted.size, self.tone_rgb(status.tone), if status.animated { pulse_mul } else { 1.0 }));
                         }
@@ -577,7 +640,7 @@ impl OverlayManager {
                     if let Some(text) = text {
                         let face = face_for_target(&target);
                         let fsize = self.font_size(view, card, face);
-                        let fitted = self.fitted(face, fsize, &text, rows, width);
+                        let fitted = self.fitted(face, fsize, &text, rows, text_w);
                         for (i, line) in fitted.lines.into_iter().enumerate() {
                             if let Some(bi) = card.bands.iter().position(|b| usize::from(b.row) == i + 1) {
                                 let runs = fitted.runs.get(i).cloned().unwrap_or_default();
@@ -588,6 +651,18 @@ impl OverlayManager {
                 }
             }
         }
+        // the badge after the last line drawn (the lowest row): its band and its column
+        let glyph = if badge {
+            lines.iter().max_by_key(|l| card.bands[l.band].row).map(|l| {
+                let tr = card.bands[l.band].text_rect;
+                let s = badge_px(tr.h);
+                let end = self.fonts.advance_px(l.face, l.size, &l.text);
+                let x_off = (end + badge_gap(s)).min(tr.w - s).max(0);
+                (l.band, x_off, s, tr)
+            })
+        } else {
+            None
+        };
         // rasterized lines with their link colour columns
         let covs: Vec<(LineDraw, Rc<Coverage>, Vec<ColorSpan>)> = lines
             .into_iter()
@@ -598,8 +673,20 @@ impl OverlayManager {
                 (l, cov, spans)
             })
             .collect();
-        let texts: Vec<TextDraw> = covs.iter().map(|(l, cov, spans)| TextDraw { band: l.band, cov: cov.as_ref(), rgb: l.rgb, alpha_mul: l.mul, spans }).collect();
-        paint_card(canvas, card, &sc.bg, &texts, self.diag_outlines)
+        let glyph_cov = glyph.map(|(bi, x_off, s, tr)| (bi, render::warning_glyph(s, x_off, tr.w)));
+        let mut texts: Vec<TextDraw> = covs.iter().map(|(l, cov, spans)| TextDraw { band: l.band, cov: cov.as_ref(), rgb: l.rgb, alpha_mul: l.mul, spans }).collect();
+        if let Some((bi, cov)) = &glyph_cov {
+            texts.push(TextDraw { band: *bi, cov, rgb: BADGE_RGB, alpha_mul: 1.0, spans: &[] });
+        }
+        let stats = paint_card(canvas, card, &sc.bg, &texts, self.diag_outlines);
+        // the hover window goes where the badge is visible (not under a tooltip of the game)
+        if let (Some(k), Some((bi, x_off, s, tr))) = (key, glyph) {
+            let rect = Rect { x: tr.x + x_off, y: tr.y + (tr.h - s) / 2, w: s, h: s };
+            if visible_fraction(card.bands[bi].mask.as_ref(), rect) >= BADGE_MIN_VISIBLE {
+                self.badges.push(BadgeSpot { key: k, view: view.id, rect: [rect.x, rect.y, rect.w, rect.h] });
+            }
+        }
+        stats
     }
 
     /// Draws the scene (chat requests only, no reply state). Returns the views whose state
@@ -611,7 +698,23 @@ impl OverlayManager {
     /// Draws the scene with the UI thread's reply state. Returns the views whose state changed
     /// (for `--diag-json`).
     pub fn render_with(&mut self, scene: &Scene, results: &HashMap<JobKey, Status>, replies: &HashMap<JobKey, ReplyBook>, pulse_mul: f32, ui_lang: Lang) -> Vec<ViewReport> {
+        self.render_all(scene, results, replies, &|_| false, pulse_mul, ui_lang)
+    }
+
+    /// [`OverlayManager::render_with`] with the requests whose result the local translator made
+    /// after a remote failure (`fell_back`): their final result ends with the badge, listed in
+    /// [`OverlayManager::badges`].
+    pub fn render_all(
+        &mut self,
+        scene: &Scene,
+        results: &HashMap<JobKey, Status>,
+        replies: &HashMap<JobKey, ReplyBook>,
+        fell_back: &dyn Fn(&JobKey) -> bool,
+        pulse_mul: f32,
+        ui_lang: Lang,
+    ) -> Vec<ViewReport> {
         self.animating = false;
+        self.badges.clear();
         let fallback = scene.lang_target.as_deref().map(i18n::for_target).unwrap_or(ui_lang);
         let mut reports = Vec::new();
         let mut live: Vec<u8> = Vec::new();
@@ -623,8 +726,9 @@ impl OverlayManager {
                 let mut canvas = self.canvases.remove(&view.id).unwrap_or_else(|| Canvas::new(view.rect));
                 canvas.reset(view.rect);
                 let mut stats = PaintStats::default();
+                let first_badge = self.badges.len();
                 for sc in view.cards.iter().filter(|c| !c.covered) {
-                    let s = self.paint(&mut canvas, view, sc, results, replies, fallback, pulse_mul);
+                    let s = self.paint(&mut canvas, view, sc, results, replies, fell_back, fallback, pulse_mul);
                     stats.tag_px += s.tag_px;
                     stats.fill_px += s.fill_px;
                     stats.text_px += s.text_px;
@@ -632,10 +736,14 @@ impl OverlayManager {
                 let px = canvas.painted();
                 let r = view.rect;
                 if px == 0 {
+                    self.badges.truncate(first_badge);
                     self.canvases.insert(view.id, canvas);
                     continue;
                 }
                 let shown = self.present(view.id, wow.origin_x + r.x, wow.origin_y + r.y, &canvas);
+                if !shown {
+                    self.badges.truncate(first_badge);
+                }
                 self.canvases.insert(view.id, canvas);
                 live.push(view.id);
                 reports.push(ViewReport { id: view.id, shown, rect: [r.x, r.y, r.w, r.h], px, stats, window: !self.no_overlay });
@@ -712,6 +820,7 @@ impl OverlayManager {
             self.hide(id);
         }
         self.last.clear();
+        self.badges.clear();
     }
 
     /// Bytes of the in-memory rendering of a view (`--no-overlay`), for tests.
@@ -721,6 +830,18 @@ impl OverlayManager {
             _ => None,
         }
     }
+}
+
+/// The part of `r` (client coordinates) where the band's mask lets text land (1.0 without a mask:
+/// no-plate mode and synthetic cards draw everywhere in the band).
+pub fn visible_fraction(mask: Option<&Mask>, r: Rect) -> f32 {
+    let Some(m) = mask else { return 1.0 };
+    let n = (r.w.max(0) * r.h.max(0)) as f32;
+    if n == 0.0 {
+        return 0.0;
+    }
+    let set = (r.y..r.y + r.h).flat_map(|y| (r.x..r.x + r.w).map(move |x| (x, y))).filter(|&(x, y)| m.get(x, y)).count();
+    set as f32 / n
 }
 
 /// Union of a card's band and tag rectangles (client coordinates).
@@ -1362,5 +1483,195 @@ mod tests {
         // the gaps between rows are filled too (no dark seam), and nothing under the last row
         assert_eq!(px(150, 914), (fill, 255));
         assert!((946..990).all(|y| (0..400).all(|x| px(x, y).1 == 0)), "the links bar under the card is never painted");
+    }
+
+    // ---- fallback badge (2026-10-20, remote translation services) ----
+
+    /// Pixels of the in-memory view (400 px wide, from client y 16) as premultiplied RGB.
+    fn rgb_at(bits: &[u8], x: i32, y: i32) -> [i32; 3] {
+        let i = (((y - 16) * 400 + x) * 4) as usize;
+        [i32::from(bits[i + 2]), i32::from(bits[i + 1]), i32::from(bits[i])]
+    }
+
+    fn amber(p: [i32; 3]) -> bool {
+        p[0] > 120 && p[1] > 80 && p[2] < 60
+    }
+
+    fn light_blue(p: [i32; 3]) -> bool {
+        p[2] > 120 && p[2] >= p[1] && p[2] > p[0] + 30
+    }
+
+    /// Columns of the pixels of rows `y0..y1` that pass `f`.
+    fn columns(bits: &[u8], y0: i32, y1: i32, f: &dyn Fn([i32; 3]) -> bool) -> Vec<i32> {
+        let mut v: Vec<i32> = (y0..y1).flat_map(|y| (0..400).map(move |x| (x, y))).filter(|&(x, y)| f(rgb_at(bits, x, y))).map(|(x, _)| x).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    fn done(text: &str) -> Status {
+        Status::Done(ChatText::new(text.into()))
+    }
+
+    #[test]
+    fn the_warning_glyph_is_a_triangle_with_the_mark_knocked_out() {
+        let g = render::warning_glyph(12, 5, 30);
+        assert_eq!((g.w, g.h), (30, 12));
+        // nothing left of the offset or right of the square
+        assert!((0..12).all(|y| (0..5).chain(17..30).all(|x| g.at(x, y) == 0)));
+        // narrow at the apex, wide at the base
+        let row = |y: i32| (0..30).filter(|&x| g.at(x, y) > 128).count();
+        let base = (8..12).map(row).max().unwrap();
+        assert!(row(1) <= 2 && base >= 8, "apex {} base {}", row(1), base);
+        // the "!" is a hole in the middle, between filled sides
+        let mid = 5 + 6;
+        assert!(g.at(mid, 6) < 60 && g.at(mid - 1, 6) < 128, "bar knocked out: {} {}", g.at(mid, 6), g.at(mid - 1, 6));
+        assert!(g.at(mid - 3, 8) > 200 && g.at(mid + 2, 8) > 200, "the sides are filled");
+    }
+
+    #[test]
+    fn badge_sizes_follow_the_band() {
+        assert_eq!(badge_px(14), 12);
+        assert_eq!(badge_px(20), 17);
+        assert_eq!(badge_px(8), 8, "never taller than the band");
+        assert_eq!(badge_px(10), 9);
+        assert_eq!(badge_gap(12), 4);
+        assert_eq!(badge_reserve(14), 4 + 12 + 1);
+    }
+
+    #[test]
+    fn a_fallen_back_result_ends_with_the_badge() {
+        let key = JobKey { session: 9, req_id: 1 };
+        let mut results = HashMap::new();
+        results.insert(key, done("Bonjour tout le monde"));
+        let scene = scene_with(vec![req(3, 1, "fr")]);
+        // not fallen back: no badge, nothing amber
+        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
+        m.render_all(&scene, &results, no_replies(), &|_| false, 1.0, Lang::En);
+        assert!(m.badges().is_empty());
+        assert!(columns(&m.memory_pixels(0).unwrap(), 900, 932, &amber).is_empty());
+        // fallen back: the badge after the line, in the same row, listed for its hover window
+        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
+        m.render_all(&scene, &results, no_replies(), &|k| *k == key, 1.0, Lang::En);
+        let spots = m.badges().to_vec();
+        assert_eq!(spots.len(), 1);
+        let s = spots[0];
+        assert_eq!((s.key, s.view), (key, 0));
+        let [x, y, w, h] = s.rect;
+        assert_eq!((y, w, h), (901, 12, 12), "row 0 (y 900, 14 px): centred, 12 px");
+        let bits = m.memory_pixels(0).unwrap();
+        let text = columns(&bits, 900, 914, &light_blue);
+        let badge = columns(&bits, 900, 914, &amber);
+        assert!(!text.is_empty() && !badge.is_empty());
+        let (t1, b0, b1) = (*text.last().unwrap(), badge[0], *badge.last().unwrap());
+        assert!(t1 < x && t1 + 2 < b0, "the badge follows the text: text ends {t1}, badge {b0}..{b1}, spot x {x}");
+        assert!(b0 >= x && b1 < x + w, "drawn inside its spot: {b0}..{b1} in {x}..{}", x + w);
+        assert!(columns(&bits, 916, 932, &amber).is_empty(), "row 1 holds nothing");
+    }
+
+    #[test]
+    fn the_badge_waits_for_the_final_result_and_follows_a_status_line() {
+        let key = JobKey { session: 9, req_id: 1 };
+        let scene = scene_with(vec![req(3, 1, "fr")]);
+        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
+        for st in [Status::Partial(ChatText::new("Bonjour".into())), Status::Translating, Status::Queued { ahead: 1 }] {
+            let mut results = HashMap::new();
+            results.insert(key, st);
+            m.render_all(&scene, &results, no_replies(), &|_| true, 1.0, Lang::En);
+            assert!(m.badges().is_empty(), "no badge before the final result");
+        }
+        // "Already in French" (a status line) and a local failure after the remote one
+        for st in [Status::Same, Status::Failed(tp_engine::FailKind::Timeout)] {
+            let mut results = HashMap::new();
+            results.insert(key, st);
+            m.render_all(&scene, &results, no_replies(), &|_| true, 1.0, Lang::En);
+            assert_eq!(m.badges().len(), 1);
+            assert_eq!(m.badges()[0].rect[1], 901, "after the status on row 0");
+        }
+    }
+
+    #[test]
+    fn a_long_fallen_back_text_gives_up_the_room_of_the_badge() {
+        let key = JobKey { session: 9, req_id: 1 };
+        let long = "Je cherche un groupe pour le donjon ce soir, il nous manque un soigneur et un tank";
+        let mut results = HashMap::new();
+        results.insert(key, done(long));
+        let scene = scene_with(vec![req(3, 1, "fr")]);
+        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
+        m.render_all(&scene, &results, no_replies(), &|_| true, 1.0, Lang::En);
+        let bits = m.memory_pixels(0).unwrap();
+        // text rect x 60..260: every line ends before the badge's room (the shadow adds 1 px)
+        let limit = 260 - badge_reserve(14) + 1;
+        for (y0, y1) in [(900, 914), (916, 930)] {
+            let text = columns(&bits, y0, y1, &light_blue);
+            assert!(text.last().is_some_and(|&x| x <= limit), "row at {y0} ends at {:?} (limit {limit})", text.last());
+        }
+        let s = m.badges()[0];
+        assert_eq!(s.rect[1], 917, "after the last line, on row 1");
+        assert!(s.rect[0] + s.rect[2] <= 260, "inside the text rectangle: {:?}", s.rect);
+        // while it streams (locally, after the remote failure) the room is already kept, so the
+        // lines do not wrap again when the result is in; the badge itself waits
+        let mut streaming = HashMap::new();
+        streaming.insert(key, Status::Partial(ChatText::new(long.into())));
+        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
+        m.render_all(&scene, &streaming, no_replies(), &|_| true, 1.0, Lang::En);
+        assert!(m.badges().is_empty());
+        let partial = m.memory_pixels(0).unwrap();
+        assert_eq!(columns(&partial, 900, 930, &light_blue), columns(&bits, 900, 930, &light_blue), "the same lines as the final result");
+        assert!(columns(&partial, 900, 930, &amber).is_empty());
+    }
+
+    #[test]
+    fn a_badge_under_a_game_tooltip_is_not_hoverable() {
+        let key = JobKey { session: 9, req_id: 1 };
+        let mut results = HashMap::new();
+        results.insert(key, done("Bonjour"));
+        let mut sc = req(3, 1, "fr");
+        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
+        m.render_all(&scene_with(vec![sc.clone()]), &results, no_replies(), &|_| true, 1.0, Lang::En);
+        let [x, y, w, h] = m.badges()[0].rect;
+        // a tooltip of the game over the badge: the plate's mask is cleared there
+        let mask = sc.card.bands[0].mask.as_mut().unwrap();
+        for yy in y..y + h {
+            for xx in x - 1..x + w + 1 {
+                let i = ((yy - mask.rect.y) * mask.rect.w + (xx - mask.rect.x)) as usize;
+                mask.bits[i] = 0;
+            }
+        }
+        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
+        m.render_all(&scene_with(vec![sc]), &results, no_replies(), &|_| true, 1.0, Lang::En);
+        assert!(m.badges().is_empty(), "no hover window over a hidden badge");
+        assert!(columns(&m.memory_pixels(0).unwrap(), 900, 914, &amber).is_empty(), "and nothing drawn there");
+        // a covered card has neither
+        let mut covered = req(3, 1, "fr");
+        covered.covered = true;
+        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
+        m.render_all(&scene_with(vec![covered]), &results, no_replies(), &|_| true, 1.0, Lang::En);
+        assert!(m.badges().is_empty());
+        // a hidden scene neither
+        let mut hidden = scene_with(vec![req(3, 1, "fr")]);
+        hidden.hidden = Some(Hidden::Minimized);
+        m.render_all(&hidden, &results, no_replies(), &|_| true, 1.0, Lang::En);
+        assert!(m.badges().is_empty());
+    }
+
+    #[test]
+    fn a_reply_badge_follows_its_last_text_row() {
+        let key = JobKey { session: 9, req_id: 40 };
+        let mut os = FakeClip::new();
+        let mut r = Replies::new();
+        r.start(&mut os, key, true, true, ChatText::new("x".into()));
+        let d = done("Brechen wir auf");
+        r.on_status(&mut os, &key, &d);
+        let mut results = HashMap::new();
+        results.insert(key, d);
+        let mut m = OverlayManager::new(true, false, [0xA8, 0xD8, 0xFF], 1.0);
+        m.render_all(&window_scene(vec![reply_card()]), &results, r.books(), &|k| *k == key, 1.0, Lang::En);
+        let s = m.badges()[0];
+        // rows at y 900 (status), 916 and 932: the text is on row 1
+        assert_eq!((s.view, s.rect[1]), (200, 917));
+        let bits = m.memory_pixels(200).unwrap();
+        assert!(columns(&bits, 900, 914, &amber).is_empty(), "no badge after the green status");
+        assert!(!columns(&bits, 916, 930, &amber).is_empty());
     }
 }

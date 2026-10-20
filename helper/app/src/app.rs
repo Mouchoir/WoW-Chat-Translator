@@ -16,6 +16,11 @@
 //! - Presence card (slot 125, the addon's Translate Companion popup): found in a VIEW of its own,
 //!   or, before any VIEW (an app started while the popup is open), by the discovery scan, which
 //!   also searches the middle of the client for it (`discovery_areas`).
+//! - Remote translation services (2026-10-20): the tray's "Translation engine..." opens the
+//!   settings window (`settings_window`); the saved service, its consent and its key (`keys.bin`,
+//!   DPAPI) go to the engine (`EngineHandle::set_remote`). A result the engine translated locally
+//!   after a remote failure carries the reason (`Update::fallback`): the overlay ends it with a
+//!   warning badge and the UI thread puts a hover window over the badge for its tooltip (`badge`).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
@@ -41,6 +46,7 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::backdrop::{self, CardBg};
+use crate::badge::{Badges, WM_APP_BADGE};
 use crate::capture::gdi::GdiGrabber;
 use crate::capture::wgc::{self, WgcGrabber};
 use crate::capture::{self, GrabStatus, Grabber, Method};
@@ -50,10 +56,14 @@ use crate::i18n::{self, Lang};
 use crate::log::{AppEvent, DiagSink, Level, Logger};
 use crate::overlay::{self, window::hinstance, window::ZMode, OverlayManager};
 use crate::perf::{self, Stage, Stages, ThreadClock};
+use crate::remote::{self as remote_ui, Choice};
 use crate::reply::{ClipEvent, Replies};
 use crate::tagscan::{CardCache, TagScanner};
 use crate::scene::*;
 use crate::settings::{self, LoadOutcome, Settings};
+use crate::settings_window::{self, KeyFileBackend, OpenArgs, SettingsEvent, WM_APP_SETTINGS};
+use tp_engine::remote::keystore::Keys;
+use tp_engine::remote::{Fallback, Provider};
 use crate::status_file::{StatusWriter, WriterConfig};
 use crate::toast::Toaster;
 use crate::tray::{MenuCmd, MenuItem, Tray, WM_APP_TRAY};
@@ -237,6 +247,16 @@ fn state_key(s: EngineState) -> &'static str {
         EngineState::ReadyCpu => "tray.state.ready_cpu",
         EngineState::Busy => "tray.state.busy",
         EngineState::Error => "tray.state.error",
+    }
+}
+
+/// The tray tooltip: the version and the translator's state, with the remote service in front
+/// when one is used ("Translate Companion 0.7.0 - DeepL (local: translator ready (CPU))").
+pub fn tray_tip(lang: Lang, remote: Option<Provider>, state: EngineState) -> String {
+    let st = i18n::tr(lang, state_key(state));
+    match remote {
+        Some(p) => i18n::tr_fmt(lang, "tray.tip_remote", &[("version", VERSION), ("provider", remote_ui::provider_name(lang, p)), ("state", st)]),
+        None => i18n::tr_fmt(lang, "tray.tip", &[("version", VERSION), ("state", st)]),
     }
 }
 
@@ -1547,6 +1567,20 @@ struct Ui {
     /// The z-order mode last reported (diag `z` record).
     z_reported: Option<bool>,
     settings_path: Option<std::path::PathBuf>,
+    /// The fallback badges' hover windows and tooltip.
+    badges: Badges,
+    /// Why the engine translated a request locally instead of with the remote service (the
+    /// badge's tooltip). Memory only, pruned with `results`.
+    fallbacks: HashMap<JobKey, Fallback>,
+    /// The API keys (the key file, DPAPI); empty when remote services are not allowed.
+    keys: Keys,
+    /// The remote service the engine uses now (None: local only).
+    remote_active: Option<Provider>,
+    /// A normal run with the real translator (`Cli::remote_allowed`).
+    remote_allowed: bool,
+    /// The last engine state (the tray tooltip is rebuilt when the service changes).
+    engine_state: EngineState,
+    app_icon: Option<HICON>,
 }
 
 impl Ui {
@@ -1569,6 +1603,7 @@ impl Ui {
         let fg = self.assume_fg || wow::foreground_root() == w.hwnd;
         let z = if fg { ZMode::Topmost } else { ZMode::Above(w.hwnd) };
         let moved = self.overlay.set_z(z);
+        self.badges.set_z(z);
         if self.z_reported != Some(fg) || moved {
             self.z_reported = Some(fg);
             self.log.app(Level::Debug, AppEvent::ZOrder { topmost: fg, moved });
@@ -1587,6 +1622,7 @@ impl Ui {
         }
         if wow::is_minimized(w.hwnd) {
             self.overlay.hide_all();
+            self.badges.hide_all();
             return;
         }
         self.update_z();
@@ -1611,6 +1647,7 @@ impl Ui {
             self.exclude = Some(want);
             let ok = self.overlay.set_exclude(want);
             self.toaster.set_exclude(want);
+            self.badges.set_exclude(want);
             self.log.app(Level::Info, AppEvent::OverlayAffinity { exclude: want, ok });
         }
     }
@@ -1619,7 +1656,9 @@ impl Ui {
         let t0 = Instant::now();
         self.update_z();
         let pulse = overlay::pulse(self.start.elapsed().as_secs_f64());
-        let reports = self.overlay.render_with(&self.scene, &self.results, self.replies.books(), pulse, self.ui_lang);
+        let fallbacks = &self.fallbacks;
+        let reports = self.overlay.render_all(&self.scene, &self.results, self.replies.books(), &|k| fallbacks.contains_key(k), pulse, self.ui_lang);
+        self.sync_badges();
         self.shared.renders.fetch_add(1, Ordering::Relaxed);
         self.shared.render_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if self.diag.enabled() {
@@ -1638,6 +1677,48 @@ impl Ui {
                     let _ = KillTimer(Some(self.main), TIMER_ANIM);
                 }
             }
+        }
+    }
+
+    /// The badges' hover windows follow the last render: one over each badge drawn, none while
+    /// the cards are hidden (and none in the overlay probe). A change is recorded (`badge` diag
+    /// record, client coordinates).
+    fn sync_badges(&mut self) {
+        let origin = match (self.scene.hidden, self.scene.wow) {
+            (None, Some(w)) if self.probe.is_none() => Some((w.origin_x, w.origin_y)),
+            _ => None,
+        };
+        let changed = match origin {
+            Some(o) => self.badges.sync(self.overlay.badges(), o, self.overlay.z_mode()),
+            None => {
+                let had = !self.badges.placed().is_empty();
+                self.badges.hide_all();
+                had
+            }
+        };
+        if changed && self.diag.enabled() {
+            let spots: Vec<Value> = self.overlay.badges().iter().map(|s| json!({"req": s.key.req_id, "session": s.key.session, "view": s.view, "rect": s.rect})).collect();
+            self.diag.emit(json!({"ev": "badge", "n": spots.len(), "spots": spots, "windows": self.badges.hwnds().len()}));
+        }
+    }
+
+    /// The mouse entered (or left) a badge's hover window: its tooltip, in the player's language.
+    fn on_badge(&mut self, entered: bool, hwnd: isize) {
+        if !entered {
+            let had = self.badges.tip_for().is_some();
+            self.badges.leave(hwnd);
+            if had && self.diag.enabled() {
+                self.diag.emit(json!({"ev": "tip", "shown": false}));
+            }
+            return;
+        }
+        let Some((key, _)) = self.badges.key_of(hwnd) else { return };
+        let Some(f) = self.fallbacks.get(&key) else { return };
+        let text = remote_ui::tip_text(f, self.lang(), self.settings.translation.daily_char_cap);
+        let shown = self.badges.show_tip(hwnd, &text);
+        self.log.app(Level::Debug, AppEvent::FallbackTip { req: key.req_id, kind: f.kind.code(), shown });
+        if self.diag.enabled() {
+            self.diag.emit(json!({"ev": "tip", "req": key.req_id, "kind": f.kind.code(), "status": f.status, "shown": shown}));
         }
     }
 
@@ -1669,11 +1750,22 @@ impl Ui {
                     message_beep_ok();
                 }
             }
+            // every update of a job meant for the remote service and translated locally carries
+            // the reason; an update without one (a new route for the same request) clears it
+            match u.fallback {
+                Some(f) => {
+                    self.fallbacks.insert(u.key, f);
+                }
+                None => {
+                    self.fallbacks.remove(&u.key);
+                }
+            }
             self.results.insert(u.key, u.status);
         }
         while self.order.len() > 512 {
             if let Some(k) = self.order.pop_front() {
                 self.results.remove(&k);
+                self.fallbacks.remove(&k);
             }
         }
         self.redraw = true;
@@ -1686,12 +1778,12 @@ impl Ui {
         if self.diag.enabled() {
             self.diag.emit(json!({"ev": "state", "state": state_name(s)}));
         }
-        let tip = i18n::tr_fmt(self.ui_lang, "tray.tip", &[("version", VERSION), ("state", i18n::tr(self.ui_lang, state_key(s)))]);
-        if let Some(t) = self.tray.as_mut() {
-            t.set_tip(&tip);
-        }
+        self.engine_state = s;
+        self.update_tray_tip();
         match s {
-            EngineState::NotInstalled if !self.notinstalled_warned => {
+            // with a remote service in use the local model is only the fallback: no install
+            // prompt (the tray tooltip still says "local: translator files not found")
+            EngineState::NotInstalled if !self.notinstalled_warned && self.remote_active.is_none() => {
                 self.notinstalled_warned = true;
                 self.balloon(BalloonKind::NotInstalled);
             }
@@ -1700,6 +1792,98 @@ impl Ui {
                 self.balloon(BalloonKind::ServerFailed);
             }
             _ => {}
+        }
+    }
+
+    /// "Translate Companion 0.7.0 - <state>", or with a remote service
+    /// "Translate Companion 0.7.0 - DeepL (local: <state>)".
+    fn update_tray_tip(&mut self) {
+        let l = self.ui_lang;
+        let tip = tray_tip(l, self.remote_active, self.engine_state);
+        if let Some(t) = self.tray.as_mut() {
+            t.set_tip(&tip);
+        }
+    }
+
+    /// Gives the engine the saved remote service (consent and key checked), or None: local only.
+    /// Logged with the provider id and the reason it cannot be used, never the key or the URL.
+    fn apply_remote(&mut self) {
+        let choice = Choice::of(&self.settings.translation);
+        let (cfg, err) = if self.remote_allowed { remote_ui::engine_remote(&self.settings.translation, &self.keys) } else { (None, None) };
+        self.remote_active = cfg.as_ref().map(|c| c.provider);
+        self.log.app(
+            Level::Info,
+            AppEvent::RemoteChoice {
+                provider: choice.id(),
+                active: cfg.is_some(),
+                error: err.map(|e| e.code()),
+                daily_cap: self.settings.translation.daily_char_cap,
+                allowed: self.remote_allowed,
+            },
+        );
+        if let Some(e) = &self.engine {
+            e.set_remote(cfg);
+        }
+        self.update_tray_tip();
+    }
+
+    /// The tray's "Translation engine...": opens the settings window (in the Windows UI
+    /// language), or brings the open one to the front.
+    fn open_engine_settings(&mut self) {
+        let keys_path = settings::default_path().map(|p| remote_ui::keys_path(&p)).unwrap_or_else(|| settings::data_dir().join("keys.bin"));
+        // the key file as it is now (another instance may not write it, but a fresh read costs
+        // little and shows what Save would keep). A file that could not be read, or a run that
+        // never touches it (tests, the echo translator), gives a read-only window: Save and
+        // Remove must never write a key set that was not read over the real file.
+        let keys = if self.remote_allowed {
+            match remote_ui::load_keys(settings::default_path().as_deref()) {
+                (k, None) => Some(k),
+                (_, Some(_)) => None,
+            }
+        } else {
+            None
+        };
+        let backend = KeyFileBackend::new(keys_path, keys, settings::data_dir());
+        let ok = settings_window::open(OpenArgs {
+            lang: self.ui_lang,
+            saved: self.settings.translation.clone(),
+            backend: Box::new(backend),
+            notify: self.main.0 as isize,
+            test_target: remote_ui::test_target(self.ui_lang, self.scene.lang_target.as_deref()),
+            show: true,
+            icon: self.app_icon,
+        });
+        if !ok {
+            self.log.app(Level::Warn, AppEvent::EngineSettings { action: "open", provider: Choice::of(&self.settings.translation).id(), ok: false });
+        }
+    }
+
+    /// What the settings window did: logged, and a Save or a removed key goes to settings.json
+    /// (the UI thread's copy: tray switches changed meanwhile are kept) and to the engine.
+    fn on_settings_events(&mut self) {
+        for ev in settings_window::take_events() {
+            match ev {
+                SettingsEvent::Log { action, provider, ok } => {
+                    self.log.app(if ok { Level::Info } else { Level::Warn }, AppEvent::EngineSettings { action, provider, ok });
+                }
+                SettingsEvent::KeysChanged(keys) => {
+                    self.keys = if self.remote_allowed { keys } else { Keys::default() };
+                    self.apply_remote();
+                }
+                SettingsEvent::Saved { translation, keys } => {
+                    self.settings.translation = translation;
+                    if self.remote_allowed {
+                        self.keys = keys;
+                    }
+                    let saved = self.settings_path.as_ref().map(|p| self.settings.save(p).is_ok());
+                    if saved == Some(false) {
+                        self.log.app(Level::Warn, AppEvent::EngineSettings { action: "write_settings", provider: Choice::of(&self.settings.translation).id(), ok: false });
+                    }
+                    self.apply_remote();
+                    self.redraw = true;
+                }
+                SettingsEvent::Closed => {}
+            }
         }
     }
 
@@ -1803,11 +1987,14 @@ impl Ui {
         };
         // While the menu is open the UI thread sits in its modal loop, which dispatches (and so
         // drops) the scene, result, state and event messages: the cards would freeze over the
-        // game. Hide them, and drain the inbox again once the menu is closed.
+        // game. Hide them (and the badges' hover windows), and drain the inbox again once the
+        // menu is closed.
         self.overlay.hide_all();
+        self.badges.hide_all();
         let l = self.ui_lang;
         let items = [
-            MenuItem { cmd: MenuCmd::Unload, label: i18n::tr(l, "tray.unload"), checked: None, separator_before: false },
+            MenuItem { cmd: MenuCmd::EngineSettings, label: i18n::tr(l, "tray.engine_settings"), checked: None, separator_before: false },
+            MenuItem { cmd: MenuCmd::Unload, label: i18n::tr(l, "tray.unload"), checked: None, separator_before: true },
             MenuItem { cmd: MenuCmd::Updates, label: i18n::tr(l, "tray.updates"), checked: None, separator_before: false },
             MenuItem { cmd: MenuCmd::OpenLogs, label: i18n::tr(l, "tray.open_logs"), checked: None, separator_before: false },
             MenuItem { cmd: MenuCmd::CopyReplies, label: i18n::tr(l, "tray.copy_replies"), checked: Some(self.settings.reply_clipboard), separator_before: true },
@@ -1818,11 +2005,13 @@ impl Ui {
             Some(t) => t.menu(&items, anchor),
             None => None,
         };
-        for m in [WM_APP_SCENE, WM_APP_RESULT, WM_APP_STATE, WM_APP_EVENT] {
+        for m in [WM_APP_SCENE, WM_APP_RESULT, WM_APP_STATE, WM_APP_EVENT, WM_APP_SETTINGS] {
             self.shared.post(m);
         }
         self.redraw = true;
         match chosen {
+            // the user's own click: the window may take the focus
+            Some(MenuCmd::EngineSettings) => self.open_engine_settings(),
             Some(MenuCmd::Unload) => {
                 if let Some(e) = &self.engine {
                     e.unload_now();
@@ -1936,8 +2125,27 @@ impl Ui {
                         self.on_foreground();
                         continue;
                     }
+                    WM_APP_BADGE => {
+                        self.on_badge(msg.wParam.0 != 0, msg.lParam.0);
+                        continue;
+                    }
+                    WM_APP_SETTINGS => {
+                        // wParam 1: a modal loop of the settings window (moving it) ended; it
+                        // dispatched (and so dropped) the messages that came meanwhile
+                        if msg.wParam.0 == 1 {
+                            for m in [WM_APP_SCENE, WM_APP_RESULT, WM_APP_STATE, WM_APP_EVENT] {
+                                self.shared.post(m);
+                            }
+                        }
+                        self.on_settings_events();
+                        continue;
+                    }
                     _ => {}
                 }
+            }
+            // Tab, Enter and Esc in the settings window
+            if settings_window::dialog_message(&msg) {
+                continue;
             }
             unsafe {
                 let _ = TranslateMessage(&msg);
@@ -2348,7 +2556,10 @@ pub fn run(cli: Cli) -> i32 {
             let name = overlay::status_name(&u.status);
             if d.enabled() {
                 let ms = sh_u.submit_times.lock().ok().and_then(|t| t.get(&u.key).map(|s| s.elapsed().as_millis() as u64));
-                d.emit(json!({"ev": "engine", "req": u.key.req_id, "session": u.key.session, "status": name, "ms": ms}));
+                // "fallback": the kind when the engine translated it locally after a remote
+                // failure (never the service's message)
+                let fb = u.fallback.as_ref().map(|f| f.kind.code());
+                d.emit(json!({"ev": "engine", "req": u.key.req_id, "session": u.key.session, "status": name, "ms": ms, "fallback": fb}));
             }
             if let Ok(mut n) = sh_u.status_names.lock() {
                 n.insert(u.key, name);
@@ -2371,7 +2582,27 @@ pub fn run(cli: Cli) -> i32 {
         t
     };
 
+    // The API keys of the remote services (DPAPI, next to settings.json): a normal run with the
+    // real translator only; a test run never reads them (`Cli::remote_allowed`).
+    let remote_allowed = cli.remote_allowed() && !probe_mode;
+    let keys = if remote_allowed {
+        let (k, err) = remote_ui::load_keys(settings::default_path().as_deref());
+        if let Some(e) = err {
+            log.app(Level::Warn, AppEvent::KeyFile { ok: false, error: e });
+        }
+        k
+    } else {
+        Keys::default()
+    };
+
     let mut ui = Ui {
+        badges: Badges::new(cli.no_overlay, main.0 as isize),
+        fallbacks: HashMap::new(),
+        keys,
+        remote_active: None,
+        remote_allowed,
+        engine_state: EngineState::Unloaded,
+        app_icon: crate::tray::make_icon(),
         overlay: OverlayManager::new(cli.no_overlay, cli.diag, settings.text_rgb(), settings.font_scale),
         toaster: Toaster::new(cli.no_overlay),
         settings: settings.clone(),
@@ -2404,6 +2635,10 @@ pub fn run(cli: Cli) -> i32 {
     };
     if cli.clipboard_off() {
         log.app(Level::Info, AppEvent::ReplySwitches { copy: false, sound: settings.reply_sound });
+    }
+    // the saved remote service (or local only) for the engine's first job
+    if !probe_mode {
+        ui.apply_remote();
     }
     // D12: follow foreground changes at once (overlay windows only)
     let hooks = if cli.no_overlay || probe_mode { [0, 0] } else { hook_foreground() };
@@ -2471,9 +2706,16 @@ pub fn run(cli: Cli) -> i32 {
             ui.clip_event(key, ev);
         }
     }
+    settings_window::close();
     ui.overlay.hide_all();
+    ui.badges.hide_all();
     ui.toaster.hide();
     ui.tray = None;
+    if let Some(i) = ui.app_icon.take() {
+        unsafe {
+            let _ = DestroyIcon(i);
+        }
+    }
     if let Some(p) = ui.probe.take() {
         let pass = p.samples > 0 && p.overlay_hits == 0 && !p.fg_changed && p.shown_seen;
         let summary = json!({"probe": "overlay", "samples": p.samples, "overlayHits": p.overlay_hits, "foregroundChanged": p.fg_changed,
@@ -2502,6 +2744,22 @@ pub fn run(cli: Cli) -> i32 {
 mod tests {
     use super::*;
     use crate::scene::tests::card;
+
+    #[test]
+    fn the_tray_tooltip_names_the_remote_service() {
+        let v = VERSION;
+        assert_eq!(tray_tip(Lang::En, None, EngineState::ReadyCpu), format!("Translate Companion {v} - translator ready (CPU)"));
+        assert_eq!(tray_tip(Lang::En, Some(Provider::DeepL), EngineState::Unloaded), format!("Translate Companion {v} - DeepL (local: ready, translator not loaded)"));
+        assert_eq!(tray_tip(Lang::Fr, Some(Provider::Claude), EngineState::ReadyGpu), format!("Translate Companion {v} - Claude (local : traducteur prêt (carte graphique))"));
+        // the notification area cuts tooltips at 127 characters
+        for lang in [Lang::En, Lang::Fr] {
+            for p in Provider::ALL {
+                for s in [EngineState::NotInstalled, EngineState::Error, EngineState::ReadyGpu] {
+                    assert!(tray_tip(lang, Some(p), s).encode_utf16().count() <= 127, "{lang:?} {p:?} {s:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn mask_runs_cover_set_bits() {

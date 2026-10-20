@@ -84,6 +84,48 @@ fn color_at(spans: &[ColorSpan], x: i32, base: [u8; 3]) -> [u8; 3] {
     spans.iter().find(|s| x >= s.x0 && x < s.x1).map_or(base, |s| s.rgb)
 }
 
+/// The fallback badge (2026-10-20): a warning triangle with the "!" knocked out, `size` px square,
+/// starting at column `x_off` of a coverage `w` px wide (a line's coverage starts at the text
+/// rectangle's left edge). Drawn as a text line, so it gets the same black shadow (which shows
+/// through the "!"), mask and card alpha as the text. Rasterized at 4 x 4 samples per pixel.
+pub fn warning_glyph(size: i32, x_off: i32, w: i32) -> Coverage {
+    let (size, w) = (size.max(1), w.max(1));
+    let mut cov = Coverage { w, h: size, a: vec![0; (w * size) as usize] };
+    const N: i32 = 4;
+    let s = size as f32;
+    // unit square: apex at the top, base at the bottom; the "!" bar and dot in the middle
+    let inside = |u: f32, v: f32| -> bool {
+        let (top, bottom) = (0.04, 0.96);
+        if !(top..=bottom).contains(&v) {
+            return false;
+        }
+        let half = 0.5 * (v - top) / (bottom - top);
+        if (u - 0.5).abs() > half {
+            return false;
+        }
+        let in_bar = (u - 0.5).abs() <= 0.075 && (0.34..=0.70).contains(&v);
+        let in_dot = (u - 0.5).abs() <= 0.075 && (0.77..=0.88).contains(&v);
+        !(in_bar || in_dot)
+    };
+    for y in 0..size {
+        for x in 0..size {
+            let mut hits = 0;
+            for sy in 0..N {
+                for sx in 0..N {
+                    let u = (x as f32 + (sx as f32 + 0.5) / N as f32) / s;
+                    let v = (y as f32 + (sy as f32 + 0.5) / N as f32) / s;
+                    hits += i32::from(inside(u, v));
+                }
+            }
+            let cx = x + x_off;
+            if hits > 0 && cx >= 0 && cx < w {
+                cov.a[(y * w + cx) as usize] = ((hits * 255 + N * N / 2) / (N * N)) as u8;
+            }
+        }
+    }
+    cov
+}
+
 /// Pixel counts painted by one card (for `--diag-json`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaintStats {

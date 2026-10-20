@@ -178,7 +178,7 @@ fn the_status_file_says_running_then_stopped_after_taskkill_without_f() {
     let leftovers: Vec<String> = std::fs::read_dir(&forever).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
     let log = std::fs::read_to_string(dir.join("logs").join("helper.log")).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(running.contains(r#"TranslateProbe_CompanionStatus = { v = 1, version = "0.6.0", build = 6, state = "running", heartbeat = "#), "{running}");
+    assert!(running.contains(r#"TranslateProbe_CompanionStatus = { v = 1, version = "0.7.0", build = 6, state = "running", heartbeat = "#), "{running}");
     assert!(sent, "taskkill refused");
     assert_eq!(status.expect("the Helper did not exit within 8 s of taskkill without /F").code(), Some(0));
     assert!(stopped.contains(r#"state = "stopped""#), "{stopped}");

@@ -194,6 +194,13 @@ impl Cli {
     pub fn status_file_on(&self) -> bool {
         !self.no_status_file && (self.status_root.is_some() || !self.test_run())
     }
+
+    /// True when the saved remote translation service may be used (2026-10-20): a normal run
+    /// with the real translator. A test run or the echo translator never sends anything to a
+    /// service (nor reads the key file).
+    pub fn remote_allowed(&self) -> bool {
+        !self.test_run() && self.translator == TranslatorChoice::Llama
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -456,5 +463,15 @@ mod tests {
     fn assume_foreground_alone() {
         let c = p(&["--assume-foreground"]).unwrap();
         assert!(c.assume_foreground && !c.no_overlay && c.foreground_assumed());
+    }
+
+    #[test]
+    fn only_a_normal_run_with_the_real_translator_uses_a_remote_service() {
+        assert!(Cli::default().remote_allowed());
+        assert!(p(&["--backend", "cpu", "--no-tray"]).unwrap().remote_allowed());
+        assert!(!p(&["--translator", "echo"]).unwrap().remote_allowed());
+        for args in [&["--instance-name", "e2e"][..], &["--no-overlay"], &["--wow-class", "TPFakeWow"], &["--assume-foreground"], &["--overlay-probe"]] {
+            assert!(!p(args).unwrap().remote_allowed(), "{args:?}");
+        }
     }
 }

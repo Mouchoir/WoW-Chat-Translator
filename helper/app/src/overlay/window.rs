@@ -26,6 +26,8 @@ use super::render::Canvas;
 
 pub const OVERLAY_CLASS: PCWSTR = w!("TPHelperOverlay");
 pub const TOAST_CLASS: PCWSTR = w!("TPHelperToast");
+/// The fallback badge's tooltip (`crate::badge`): click-through like the overlay.
+pub const TIP_CLASS: PCWSTR = w!("TPHelperTip");
 
 unsafe extern "system" fn layered_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
@@ -47,11 +49,11 @@ pub fn hinstance() -> HINSTANCE {
     unsafe { GetModuleHandleW(PCWSTR::null()).map(|m| m.into()).unwrap_or_default() }
 }
 
-/// Registers `TPHelperOverlay` and `TPHelperToast` once per process.
+/// Registers `TPHelperOverlay`, `TPHelperToast` and `TPHelperTip` once per process.
 pub fn register_classes() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| unsafe {
-        for class in [OVERLAY_CLASS, TOAST_CLASS] {
+        for class in [OVERLAY_CLASS, TOAST_CLASS, TIP_CLASS] {
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 lpfnWndProc: Some(layered_proc),
@@ -173,13 +175,19 @@ pub enum ZMode {
     Above(isize),
 }
 
-/// True when `h` belongs to this process (the overlay, the toast, the main window).
+/// True when `h` is one of this process's overlay-like windows: a layered one (overlay, toast,
+/// fallback badge and its tooltip) or a hidden one (the main window). The settings window is ours
+/// too but neither: it is an ordinary window the overlay must stay under, like any other.
 fn ours(h: HWND) -> bool {
     let mut pid = 0u32;
     unsafe {
         GetWindowThreadProcessId(h, Some(&mut pid as *mut u32));
     }
-    pid == std::process::id()
+    pid == std::process::id() && (is_layered(h) || !unsafe { IsWindowVisible(h) }.as_bool())
+}
+
+fn is_layered(h: HWND) -> bool {
+    (unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32 & WS_EX_LAYERED.0) != 0
 }
 
 fn is_topmost(h: HWND) -> bool {
@@ -253,7 +261,18 @@ pub struct LayeredWindow {
 impl LayeredWindow {
     pub fn create(class: PCWSTR) -> Option<LayeredWindow> {
         register_classes();
-        let ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        Self::create_ex(class, WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+    }
+
+    /// A layered window that is NOT click-through (the fallback badge's hover target, of a class
+    /// the caller registered): the mouse reaches it wherever its pixels are not fully
+    /// transparent. It still never activates (its class answers `WM_MOUSEACTIVATE` with
+    /// `MA_NOACTIVATE`, and it is shown with `SWP_NOACTIVATE` only).
+    pub fn create_hit_target(class: PCWSTR) -> Option<LayeredWindow> {
+        Self::create_ex(class, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+    }
+
+    fn create_ex(class: PCWSTR, ex: WINDOW_EX_STYLE) -> Option<LayeredWindow> {
         let hwnd = unsafe { CreateWindowExW(ex, class, w!("Translate Companion"), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinstance()), None) }.ok()?;
         Some(LayeredWindow { hwnd, shown: false, exclude: None, dib: None, pos: (0, 0, 0, 0), prev_dirty: None, z: ZMode::Topmost })
     }
@@ -434,15 +453,19 @@ mod tests {
                 assert!(!IsWindowVisible(h).as_bool());
             }
         }
-        // creation order puts the newest on top: o, a, w
+        // creation order puts the newest on top: o, a, w. Other tests create windows on other
+        // threads meanwhile (badges, the settings window), and one created between `w` and `a`
+        // lands between them: the window right above `w` stands for the other application.
         let is_ours = |h: HWND| h == o;
         let wid = w.0 as isize;
-        assert_eq!(insert_after_with(ZMode::Above(wid), &is_ours), Some(a));
+        let above_w = unsafe { GetWindow(w, GW_HWNDPREV) }.unwrap_or_default();
+        assert!(!above_w.0.is_null() && above_w != o);
+        assert_eq!(insert_after_with(ZMode::Above(wid), &is_ours), Some(above_w));
         assert!(!right_above_with(o, wid, &is_ours));
-        unsafe { SetWindowPos(o, Some(a), 0, 0, 0, 0, flags) }.unwrap();
+        unsafe { SetWindowPos(o, Some(above_w), 0, 0, 0, 0, flags) }.unwrap();
         // a, o, w: the overlay is right above the game window, and the anchor skips it
         assert!(right_above_with(o, wid, &is_ours));
-        assert_eq!(insert_after_with(ZMode::Above(wid), &is_ours), Some(a));
+        assert_eq!(insert_after_with(ZMode::Above(wid), &is_ours), Some(above_w));
         // the game window is the highest window that is not topmost: the top of that band
         unsafe { SetWindowPos(a, Some(HWND_TOPMOST), 0, 0, 0, 0, flags) }.unwrap();
         assert!(is_topmost(a));
@@ -460,6 +483,28 @@ mod tests {
         unsafe {
             let _ = DestroyWindow(a);
             let _ = DestroyWindow(o);
+        }
+    }
+
+    /// The settings window (2026-10-20) is ours but an ordinary window: the overlay goes under it
+    /// like under any other window, so `ours` counts only the hidden and the layered windows.
+    #[test]
+    fn a_visible_ordinary_window_of_ours_is_not_skipped_by_the_z_order() {
+        register_classes();
+        let fg = unsafe { GetForegroundWindow() };
+        let plain = unsafe { CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, OVERLAY_CLASS, w!("z test"), WS_POPUP, -32000, -32000, 4, 4, None, None, Some(hinstance()), None) }.unwrap();
+        assert!(ours(plain), "hidden: like the main window");
+        unsafe {
+            // shown far off-screen, without activation
+            let _ = SetWindowPos(plain, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            assert!(IsWindowVisible(plain).as_bool());
+        }
+        assert!(!ours(plain), "a visible ordinary window of ours is a window like any other");
+        let layered = LayeredWindow::create(OVERLAY_CLASS).unwrap();
+        assert!(ours(HWND(layered.hwnd() as *mut core::ffi::c_void)));
+        unsafe {
+            let _ = DestroyWindow(plain);
+            assert_eq!(GetForegroundWindow(), fg);
         }
     }
 

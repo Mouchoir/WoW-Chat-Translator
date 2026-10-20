@@ -1,9 +1,16 @@
 //! `%APPDATA%\TranslateProbe\settings.json` (design D.6): numbers, flags and paths only.
 //! Created with defaults on first run; invalid values are replaced by their defaults.
+//!
+//! Translation engine (2026-10-20, the player's own API keys): `translation` holds the chosen
+//! service, its model, the OpenAI-compatible base URL, the service the player allowed to receive
+//! chat text and the daily character cap (`tp_engine::remote::RemoteSettings`, written by the
+//! settings window). API keys are never in this file: they live in `keys.bin` next to it,
+//! encrypted with DPAPI (`tp_engine::remote::keystore`).
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tp_engine::remote::RemoteSettings;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -38,6 +45,9 @@ pub struct Settings {
     /// flavour folder. Empty: every "World of Warcraft" folder the Battle.net agent's product.db
     /// names.
     pub wow_root: String,
+    /// The translation service (tray "Translation engine..."): `local` (Qwen3 on this computer,
+    /// the default) or a remote service with the player's own key and consent.
+    pub translation: RemoteSettings,
 }
 
 /// Default translation text colour (native look, 2026-10-18).
@@ -66,6 +76,7 @@ impl Default for Settings {
             reply_clipboard: true,
             reply_sound: false,
             wow_root: String::new(),
+            translation: RemoteSettings::default(),
         }
     }
 }
@@ -127,6 +138,14 @@ impl Settings {
         if !["error", "warn", "info", "debug"].contains(&self.log_level.as_str()) {
             self.log_level = d.log_level.clone();
             fixed.push("logLevel");
+        }
+        for f in self.translation.validate() {
+            fixed.push(match f {
+                "provider" => "translation.provider",
+                "model" => "translation.model",
+                "baseUrl" => "translation.baseUrl",
+                _ => "translation",
+            });
         }
         fixed
     }
@@ -213,8 +232,39 @@ mod tests {
         let expected = serde_json::json!({"version":1,"backend":"auto","gpuMarginMb":1500,"cpuThreads":0,
             "idleUnloadMinutes":10,"keepLoaded":false,"capture":"auto","captureHzActive":30,"hideFromRecordings":false,
             "textColor":"A8D8FF","fontScale":1.0,"runtimeDir":"","model":"","logLevel":"info",
-            "replyClipboard":true,"replySound":false,"wowRoot":""});
+            "replyClipboard":true,"replySound":false,"wowRoot":"",
+            "translation":{"provider":"local","model":"","baseUrl":"","consent":"","dailyCharCap":0}});
         assert_eq!(v, expected);
+    }
+
+    #[test]
+    fn a_file_from_before_the_remote_services_translates_locally() {
+        let old: Settings = serde_json::from_str(r#"{"backend":"cpu","wowRoot":""}"#).unwrap();
+        assert_eq!(old.translation, RemoteSettings::default());
+        assert_eq!(old.translation.provider(), None, "local");
+    }
+
+    #[test]
+    fn the_translation_choice_round_trips_and_is_validated() {
+        let path = temp_file("remote");
+        let mut s = Settings::default();
+        s.translation.provider = "openai".into();
+        s.translation.base_url = "https://api.groq.com/openai/v1".into();
+        s.translation.model = "llama-3.3-70b-versatile".into();
+        s.translation.daily_char_cap = 50_000;
+        s.translation.give_consent();
+        s.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.to_ascii_lowercase().contains("key"), "no key field in settings.json");
+        let (back, _, fixed) = Settings::load(&path);
+        assert!(fixed.is_empty());
+        assert_eq!(back.translation, s.translation);
+        assert!(back.translation.has_consent());
+        // a bad provider and a bad URL fall back to their defaults, with the field names logged
+        let mut bad: Settings = serde_json::from_str(r#"{"translation":{"provider":"babelfish","baseUrl":"ftp://x"}}"#).unwrap();
+        assert_eq!(bad.validate(), vec!["translation.provider", "translation.baseUrl"]);
+        assert_eq!(bad.translation.provider, "local");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
