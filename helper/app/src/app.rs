@@ -2078,6 +2078,15 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
         return LRESULT(0);
     }
     match msg {
+        // The shell sends notification-icon callbacks straight to the window procedure (they never
+        // reach GetMessage), so re-post them: the message loop opens the menu (`on_tray`). Without
+        // this a right-click on the icon did nothing (seen in use on 2026-10-20).
+        WM_APP_TRAY => {
+            unsafe {
+                let _ = PostMessageW(Some(h), WM_APP_TRAY, wp, lp);
+            }
+            LRESULT(0)
+        }
         // Like the tray's Exit: the message loop ends, then the workers stop (llama-server is
         // killed) and the log is flushed. `taskkill` without /F sends WM_CLOSE to one window
         // only; the overlay and toast windows forward it the same way (`overlay::window`).
