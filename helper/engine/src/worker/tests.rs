@@ -11,6 +11,7 @@ use crate::device::{AdapterInfo, Snapshot};
 use crate::discover::{Discovery, Runtime};
 use crate::model::ModelFile;
 use crate::server::LaunchSpec;
+use crate::remote::fake::{FakeReply, FakeTransport};
 use crate::testutil::{temp_dir, FakeHttp, Reply};
 use crate::{BackendPref, EngineConfig, EngineState, JobKey, Status, Translator};
 
@@ -38,6 +39,12 @@ fn fast() -> Timing {
         echo_load: crate::echo::LOAD,
         echo_work: crate::echo::WORK,
         rediscover_every: Duration::from_millis(100),
+        remote: remote::Policy {
+            connect: Duration::from_millis(300),
+            total: Duration::from_millis(800),
+            retry_wait: Duration::from_millis(10),
+            retry_floor: Duration::from_millis(100),
+        },
     }
 }
 
@@ -177,10 +184,22 @@ struct H {
     updates: Log,
     states: Arc<Mutex<Vec<EngineState>>>,
     events: Arc<Mutex<Vec<String>>>,
+    /// Every fallback reason an update carried (the badge tooltip).
+    fbs: Arc<Mutex<Vec<(JobKey, remote::Fallback)>>>,
     http: Arc<FakeHttp>,
     s: Spawns,
     dev: Dev,
     dir: PathBuf,
+    remote: Arc<FakeTransport>,
+}
+
+/// The status, then `|fb:<kind>:<status>` when the update carries a fallback reason.
+fn st_fb(u: &crate::Update) -> String {
+    let mut s = st(&u.status);
+    if let Some(f) = &u.fallback {
+        s.push_str(&format!("|fb:{}:{}", f.kind.code(), f.status.unwrap_or(0)));
+    }
+    s
 }
 
 fn st(s: &Status) -> String {
@@ -237,16 +256,19 @@ impl H {
             mtime_secs: 0,
         };
         let installed = o.installed;
+        let remote = Arc::new(FakeTransport::default());
         let deps = Deps {
             spawner: Box::new(FakeSpawner { http: http.clone(), s: s.clone() }),
             devices: Box::new(FakeDevices(dev.clone())),
             discover: Box::new(move || Discovery { runtime: Some(rt.clone()), model: installed.then(|| model.clone()), explicit_rejected: false }),
             flags: Box::new(|_| Ok((flags::features(&flags::parse_help(HELP_070)), true))),
+            transport: remote.clone(),
         };
         let updates: Log = Arc::default();
         let states: Arc<Mutex<Vec<EngineState>>> = Arc::default();
         let events: Arc<Mutex<Vec<String>>> = Arc::default();
-        let (u2, s2, e2) = (updates.clone(), states.clone(), events.clone());
+        let fbs: Arc<Mutex<Vec<(JobKey, remote::Fallback)>>> = Arc::default();
+        let (u2, s2, e2, f2) = (updates.clone(), states.clone(), events.clone(), fbs.clone());
         let cfg = EngineConfig {
             runtime_dir: None,
             model_path: None,
@@ -263,10 +285,15 @@ impl H {
             cfg,
             deps,
             o.timing,
-            Box::new(move |u| u2.lock().unwrap().push((u.key, st(&u.status)))),
+            Box::new(move |u| {
+                if let Some(fb) = &u.fallback {
+                    f2.lock().unwrap().push((u.key, fb.clone()));
+                }
+                u2.lock().unwrap().push((u.key, st_fb(&u)));
+            }),
             Box::new(move |s| s2.lock().unwrap().push(s)),
         );
-        H { engine: Some(engine), updates, states, events, http, s, dev, dir }
+        H { engine: Some(engine), updates, states, events, fbs, http, s, dev, dir, remote }
     }
 
     fn h(&self) -> EngineHandle {
@@ -326,6 +353,7 @@ impl Drop for H {
 }
 
 fn is_final(s: &str) -> bool {
+    let s = s.split("|fb:").next().unwrap_or(s);
     !(s.starts_with("queued") || s.starts_with("loading") || s == "translating" || s.starts_with("partial"))
 }
 
@@ -727,4 +755,237 @@ fn shutdown_is_fast_with_a_hanging_request() {
     drop(h.engine.take());
     assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
     assert!(h.proc_killed(0));
+}
+
+// ---------------------------------------------------------------- remote services (docs/ENGINE.md section 13)
+
+const RKEY: &str = "TPKEYSENTINEL-9f8e7d6c5b4a39281706";
+/// A word of the chat lines below: never in a log event.
+const CHAT_WORD: &str = "Zorbulax";
+
+fn claude(cap: u32) -> RemoteConfig {
+    RemoteConfig::new(remote::Provider::Claude, "", "", remote::Secret::new(RKEY), cap).unwrap()
+}
+
+fn claude_says(text: &str) -> FakeReply {
+    FakeReply::ok(serde_json::json!({"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"}))
+}
+
+fn claude_error(status: u16, message: &str) -> FakeReply {
+    FakeReply::status(status, serde_json::json!({"type": "error", "error": {"type": "authentication_error", "message": message}}))
+}
+
+/// No key, no piece of chat text and no translation in any log event.
+fn log_is_clean(h: &H) {
+    for e in h.events.lock().unwrap().iter() {
+        for bad in [RKEY, "TPKEYS", CHAT_WORD, "Linen", "Vends", "Bonjour"] {
+            assert!(!e.contains(bad), "{bad} in log event {e}");
+        }
+    }
+}
+
+const RMSG: &str = "wts \u{2}[Linen Cloth]\u{3} cheap Zorbulax";
+
+#[test]
+fn remote_happy_path_never_starts_the_local_server() {
+    let h = H::new(Opts::default());
+    h.h().set_remote(Some(claude(0)));
+    h.remote.push(claude_says("Vends {1} pas cher Zorbulax"));
+    h.submit(key(1, 1), RMSG);
+    assert_eq!(h.wait_final(key(1, 1), SECS), "done:Vends [Linen Cloth] pas cher Zorbulax");
+    assert_eq!(h.of(key(1, 1)), vec!["queued:0", "translating", "done:Vends [Linen Cloth] pas cher Zorbulax"]);
+    assert_eq!(h.s.attempts.load(Ordering::SeqCst), 0, "the local server never started");
+    h.remote.with_seen(|s| {
+        assert_eq!(s.len(), 1);
+        let user = s[0].body["messages"][0]["content"].as_str().unwrap();
+        assert!(user.ends_with("Glossary:\n- \"wts\" = \"vend\"\n\nMessage:\nwts {1} cheap Zorbulax"), "{user}");
+        assert!(!user.contains("<|") && !s[0].body["system"].as_str().unwrap().contains("<|"));
+        assert!(!user.contains("Linen"), "item names stay placeholders");
+    });
+    // cached under the remote identity: no second request
+    h.submit(key(1, 2), RMSG);
+    h.wait("cached", Duration::from_millis(500), |h| h.last(key(1, 2)).as_deref() == Some("done:Vends [Linen Cloth] pas cher Zorbulax"));
+    assert_eq!(h.remote.count(), 1);
+    assert!(h.has_event("RemoteConfigured { provider: \"claude\", model: \"claude-opus-5-5\", daily_cap: 0 }"));
+    assert!(h.has_event("RemoteRequest { req_id: 1, provider: \"claude\", model: \"claude-opus-5-5\", chars: 29, follow_up: false }"));
+    assert!(h.has_event("RemoteDone { req_id: 1, provider: \"claude\", model: \"claude-opus-5-5\", status: 200"));
+    assert!(h.fbs.lock().unwrap().is_empty());
+    log_is_clean(&h);
+}
+
+#[test]
+fn remote_failure_falls_back_to_the_local_model_with_the_reason() {
+    let h = H::new(Opts::default());
+    h.h().set_remote(Some(claude(0)));
+    h.remote.push(claude_error(401, &format!("invalid x-api-key {RKEY}")));
+    h.submit(key(1, 1), RMSG);
+    assert_eq!(h.wait_final(key(1, 1), SECS), "done:Vends [Linen Cloth] pas cher|fb:http:401");
+    let u = h.of(key(1, 1));
+    assert_eq!(&u[..2], &["queued:0", "translating"]);
+    assert!(u[2..].iter().all(|s| s.ends_with("|fb:http:401")), "every update after the fallback carries it: {u:?}");
+    assert!(u.contains(&"loading|fb:http:401".to_string()));
+    assert_eq!(h.s.attempts.load(Ordering::SeqCst), 1, "the local server served it");
+    // the badge tooltip: provider, status and the service's message without the key
+    let fbs = h.fbs.lock().unwrap().clone();
+    let (_, last) = fbs.last().unwrap();
+    assert_eq!((last.provider, last.kind, last.status), (remote::Provider::Claude, FallbackKind::Http, Some(401)));
+    assert_eq!(last.message, "invalid x-api-key [redacted]");
+    assert!(h.has_event("RemoteFallback { req_id: 1, provider: \"claude\", model: \"claude-opus-5-5\", kind: \"http\", status: 401"));
+    // a local answer to a remote job is not cached: the next request tries the service again
+    h.remote.push(claude_says("Vends {1} pas cher"));
+    h.submit(key(1, 2), RMSG);
+    assert_eq!(h.wait_final(key(1, 2), SECS), "done:Vends [Linen Cloth] pas cher");
+    assert_eq!(h.remote.count(), 2);
+    log_is_clean(&h);
+}
+
+#[test]
+fn daily_cap_sends_nothing_once_reached() {
+    let h = H::new(Opts::default());
+    // "wts {1} cheap Zorbulax" (22) + "wts" + "vend" (7) = 29 characters sent per job, and the
+    // answer "Vends {1} pas cher" (18) received
+    h.h().set_remote(Some(claude(40)));
+    h.remote.respond_with(|_| claude_says("Vends {1} pas cher"));
+    h.submit(key(1, 1), RMSG);
+    assert_eq!(h.wait_final(key(1, 1), SECS), "done:Vends [Linen Cloth] pas cher");
+    let text = std::fs::read_to_string(h.dir.join("remote_usage.json")).unwrap();
+    assert_eq!(text, format!("{{\"version\":1,\"day\":\"{}\",\"chars\":47}}", remote::usage::today()), "numbers only");
+    h.submit(key(1, 2), "wts \u{2}[Silk Cloth]\u{3} cheap Zorbulax");
+    assert_eq!(h.wait_final(key(1, 2), SECS), "done:Vends [Silk Cloth] pas cher|fb:daily_cap:0");
+    assert_eq!(h.remote.count(), 1, "nothing sent past the cap");
+    assert!(h.has_event("kind: \"daily_cap\""));
+    // the reason carries the cap that applied (the badge shows it even if the setting changes)
+    assert_eq!(h.fbs.lock().unwrap().last().map(|(_, f)| f.message.clone()).as_deref(), Some("40"));
+    // the count is on disk for the next start (same data dir)
+    assert_eq!(remote::usage::read_today(&h.dir), 47);
+    log_is_clean(&h);
+}
+
+#[test]
+fn failed_requests_do_not_count_toward_the_cap() {
+    let h = H::new(Opts::default());
+    h.h().set_remote(Some(claude(60)));
+    // an invalid key: every line falls back with the real error, and nothing is counted
+    for i in 1..=4u16 {
+        h.remote.push(claude_error(401, "invalid x-api-key"));
+        h.submit(key(1, i), &format!("wts \u{2}[Linen Cloth]\u{3} cheap Zorbulax {}", "x".repeat(i as usize)));
+        assert!(h.wait_final(key(1, i), SECS).ends_with("|fb:http:401"), "line {i}: the real error, never the daily limit");
+    }
+    assert_eq!(remote::usage::read_today(&h.dir), 0);
+    // a working answer counts what was sent and received
+    h.remote.push(claude_says("Vends {1} pas cher"));
+    h.submit(key(1, 9), RMSG);
+    assert_eq!(h.wait_final(key(1, 9), SECS), "done:Vends [Linen Cloth] pas cher");
+    assert_eq!(remote::usage::read_today(&h.dir), 47);
+}
+
+#[test]
+fn ids_and_addresses_never_reach_the_service_in_clear() {
+    let h = H::new(Opts::default());
+    h.h().set_remote(Some(claude(0)));
+    // the service lost a placeholder of a line holding an ID: no Brackets retry at the service
+    // (that form writes the ID inline); the line is translated locally with the reason
+    h.remote.push(claude_says("Vends {1} pas cher, ajoute"));
+    h.submit(key(1, 1), "wts \u{2}[Linen Cloth]\u{3} cheap, add Kiwi48213");
+    assert!(h.wait_final(key(1, 1), SECS).ends_with("|fb:kept_local:0"));
+    assert_eq!(h.remote.count(), 1);
+    // more IDs than placeholders: nothing is sent at all
+    let ids: Vec<String> = (1..=10).map(|i| format!("Kiwi{}", 48200 + i)).collect();
+    h.submit(key(1, 2), &format!("add {} please", ids.join(" ")));
+    assert!(h.wait_final(key(1, 2), SECS).ends_with("|fb:kept_local:0"));
+    assert_eq!(h.remote.count(), 1, "the second line was never sent");
+    h.remote.with_seen(|s| {
+        for r in s {
+            let body = r.body.to_string();
+            assert!(!body.contains("Kiwi48"), "an ID in clear: {body}");
+        }
+    });
+    assert!(h.has_event("kind: \"kept_local\""));
+    // a line with item links only still gets its Brackets retry at the service
+    h.remote.push(claude_says("Vends pas cher"));
+    h.remote.push(claude_says("Vends [Silk Cloth] pas cher"));
+    h.submit(key(1, 3), "wts \u{2}[Silk Cloth]\u{3} cheap");
+    assert_eq!(h.wait_final(key(1, 3), SECS), "done:Vends [Silk Cloth] pas cher");
+    assert_eq!(h.remote.count(), 3);
+    log_is_clean(&h);
+}
+
+#[test]
+fn cache_key_holds_provider_and_model() {
+    let h = H::new(Opts::default());
+    let gemini = RemoteConfig::new(remote::Provider::Gemini, "", "", remote::Secret::new(RKEY), 0).unwrap();
+    let haiku = RemoteConfig::new(remote::Provider::Claude, "claude-haiku-5-5", "", remote::Secret::new(RKEY), 0).unwrap();
+    h.h().set_remote(Some(claude(0)));
+    h.remote.push(claude_says("A {1}"));
+    h.submit(key(1, 1), MSG);
+    assert_eq!(h.wait_final(key(1, 1), SECS), "done:A [Linen Cloth]");
+    h.h().set_remote(Some(gemini));
+    h.remote.push(FakeReply::ok(serde_json::json!({"candidates": [{"content": {"parts": [{"text": "B {1}"}]}, "finishReason": "STOP"}]})));
+    h.submit(key(1, 2), MSG);
+    assert_eq!(h.wait_final(key(1, 2), SECS), "done:B [Linen Cloth]");
+    h.h().set_remote(Some(haiku));
+    h.remote.push(claude_says("C {1}"));
+    h.submit(key(1, 3), MSG);
+    assert_eq!(h.wait_final(key(1, 3), SECS), "done:C [Linen Cloth]");
+    h.h().set_remote(Some(claude(0)));
+    h.submit(key(1, 4), MSG);
+    h.wait("cached", Duration::from_millis(500), |h| h.last(key(1, 4)).as_deref() == Some("done:A [Linen Cloth]"));
+    assert_eq!(h.remote.count(), 3);
+    // back to the local model: its own entry, not a remote one
+    h.h().set_remote(None);
+    h.submit(key(1, 5), MSG);
+    assert_eq!(h.wait_final(key(1, 5), SECS), "done:Vends [Linen Cloth] pas cher");
+    assert_eq!(h.s.attempts.load(Ordering::SeqCst), 1);
+    assert!(h.has_event("RemoteConfigured { provider: \"local\""));
+}
+
+#[test]
+fn remote_follow_up_and_timeout() {
+    let h = H::new(Opts::default());
+    h.h().set_remote(Some(claude(0)));
+    // the placeholder was dropped: one Brackets retry at the same service
+    h.remote.push(claude_says("Vends pas cher"));
+    h.remote.push(claude_says("Vends [Linen Cloth] pas cher"));
+    h.submit(key(1, 1), MSG);
+    assert_eq!(h.wait_final(key(1, 1), SECS), "done:Vends [Linen Cloth] pas cher");
+    assert!(h.has_event("PlaceholderRetry { req_id: 1 }"));
+    assert!(h.has_event("follow_up: true"));
+    h.remote.with_seen(|s| {
+        assert_eq!(s.len(), 2);
+        assert!(s[1].body["messages"][0]["content"].as_str().unwrap().ends_with("Message:\nwts [Linen Cloth] cheap"));
+    });
+    assert_eq!(h.s.attempts.load(Ordering::SeqCst), 0);
+    // no answer within the budget (800 ms in these tests): local, with the reason
+    h.remote.push(FakeReply::Delay(Duration::from_secs(10), Box::new(claude_says("late"))));
+    let t = Instant::now();
+    h.submit(key(1, 2), "wts \u{2}[Silk Cloth]\u{3} cheap Zorbulax");
+    assert_eq!(h.wait_final(key(1, 2), SECS), "done:Vends [Silk Cloth] pas cher|fb:timeout:0");
+    assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+    log_is_clean(&h);
+}
+
+#[test]
+fn remote_without_a_local_model() {
+    let h = H::new(Opts { installed: false, ..Default::default() });
+    h.h().set_remote(Some(claude(0)));
+    h.remote.push(claude_says("Vends {1} pas cher"));
+    h.submit(key(1, 1), MSG);
+    assert_eq!(h.wait_final(key(1, 1), SECS), "done:Vends [Linen Cloth] pas cher", "no NotInstalled with a working service");
+    h.remote.push(claude_error(500, "boom"));
+    h.remote.push(claude_error(500, "boom again"));
+    h.submit(key(1, 2), "another line");
+    assert_eq!(h.wait_final(key(1, 2), SECS), "notinstalled|fb:http:500");
+    // a refusal is a fallback too
+    h.remote.push(FakeReply::ok(serde_json::json!({"content": [], "stop_reason": "refusal", "stop_details": {"category": "cyber"}})));
+    h.submit(key(1, 3), "third line");
+    assert_eq!(h.wait_final(key(1, 3), SECS), "notinstalled|fb:refused:0");
+}
+
+#[test]
+fn echo_translator_ignores_the_remote_service() {
+    let h = H::new(Opts { translator: Translator::Echo, ..Default::default() });
+    h.h().set_remote(Some(claude(0)));
+    h.submit(key(1, 1), MSG);
+    assert_eq!(h.wait_final(key(1, 1), SECS), "done:WTS [LINEN CLOTH] CHEAP");
+    assert_eq!(h.remote.count(), 0);
 }

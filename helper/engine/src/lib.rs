@@ -40,6 +40,7 @@ pub mod post;
 pub mod prompt;
 #[doc(hidden)]
 pub mod protect;
+pub mod remote;
 pub mod selftest;
 #[doc(hidden)]
 pub mod server;
@@ -51,6 +52,7 @@ mod testutil;
 
 pub use config::{BackendPref, EngineConfig, Translator};
 pub use events::{Backend, EngineEvent, EngineState, ServerLine};
+pub use remote::{Fallback, FallbackKind, Provider, RemoteConfig, RemoteSettings};
 pub use worker::{Engine, EngineHandle};
 
 /// Identifies one request: the addon session and its reqId.
@@ -103,4 +105,9 @@ pub enum Status {
 pub struct Update {
     pub key: JobKey,
     pub status: Status,
+    /// Set on every update of a job that was meant for the remote service and is being (or was)
+    /// translated locally instead: why (provider, kind, HTTP status, the service's short
+    /// message). The final status (`Done`, `Same`, `Failed`, `LowMemory`...) carries it too; the
+    /// companion shows the warning badge from it. None for every other job.
+    pub fallback: Option<Fallback>,
 }

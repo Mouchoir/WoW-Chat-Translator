@@ -23,6 +23,7 @@ use crate::policy::{self, Choice};
 use crate::prompt;
 use crate::protect;
 use crate::queue::{Emit, Entry, Pushed, Queue, St, Work};
+use crate::remote::{self, Fallback, FallbackKind, RemoteConfig, Transport};
 use crate::server::{self, RealSpawner, ServerProc, Spawner};
 use crate::{BackendPref, EngineConfig, EngineEvent, EngineState, FailKind, Job, JobKey, Translator, Update};
 
@@ -49,6 +50,8 @@ pub(crate) struct Timing {
     pub echo_load: Duration,
     pub echo_work: Duration,
     pub rediscover_every: Duration,
+    /// Remote requests: connect 5 s, total 15 s, one quick retry (docs/ENGINE.md section 13).
+    pub remote: remote::Policy,
 }
 
 impl Default for Timing {
@@ -74,6 +77,7 @@ impl Default for Timing {
             echo_load: crate::echo::LOAD,
             echo_work: crate::echo::WORK,
             rediscover_every: Duration::from_secs(30),
+            remote: remote::Policy::default(),
         }
     }
 }
@@ -98,6 +102,8 @@ pub(crate) struct Deps {
     pub devices: Box<dyn Devices>,
     pub discover: DiscoverFn,
     pub flags: FlagsFn,
+    /// HTTPS to the remote services (WinHTTP; a fake in tests).
+    pub transport: Arc<dyn Transport>,
 }
 
 impl Deps {
@@ -110,6 +116,7 @@ impl Deps {
             devices: Box::new(SystemDevices::default()),
             discover: Box::new(move || discover::discover(runtime.as_deref(), model.as_deref())),
             flags: Box::new(move |rt: &Runtime| flags::probe(&rt.exe, &rt.dir, &data_dir)),
+            transport: remote::system_transport(),
         }
     }
 }
@@ -121,6 +128,7 @@ enum Cmd {
     WowPresent(bool),
     SetBackend(BackendPref),
     UnloadNow,
+    SetRemote(Option<RemoteConfig>),
     Shutdown,
 }
 
@@ -128,6 +136,7 @@ enum Ev {
     Warm { gen: u64, ok: bool },
     Partial { gen: u64, text: String },
     Done { gen: u64, result: Result<String, ReqError> },
+    RemoteDone { gen: u64, result: Result<remote::Answer, remote::CallError> },
 }
 
 enum Msg {
@@ -242,6 +251,13 @@ impl EngineHandle {
     pub fn unload_now(&self) {
         self.send(Cmd::UnloadNow);
     }
+
+    /// The remote service for the next jobs (None: the local model only). A job already in
+    /// flight keeps its route. Build it with `RemoteConfig::from_settings` (consent and key
+    /// checked) when the settings are loaded or saved.
+    pub fn set_remote(&self, cfg: Option<RemoteConfig>) {
+        self.send(Cmd::SetRemote(cfg));
+    }
 }
 
 fn pref_of(b: Backend) -> BackendPref {
@@ -275,12 +291,24 @@ impl Srv {
     }
 }
 
-/// The HTTP request in flight.
+/// The HTTP request in flight (to llama-server, or to the remote service).
 struct Req {
     gen: u64,
     deadline: Instant,
     prepared: Prepared,
     gpu: bool,
+    remote: bool,
+    /// Remote request: the characters it sent (counted against the daily cap once it answers).
+    sent_chars: u32,
+}
+
+/// Where the job in flight is translated.
+#[derive(Clone)]
+enum Route {
+    Local,
+    Remote(Arc<RemoteConfig>),
+    /// Meant for the remote service, translated locally: every update carries the reason.
+    FellBack(Fallback),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -331,6 +359,12 @@ struct Worker {
     key_file: Option<PathBuf>,
     loading_first_gpu: bool,
     shutdown: bool,
+    /// The remote service (`set_remote`), if any.
+    remote: Option<Arc<RemoteConfig>>,
+    /// The daily character cap's count.
+    usage: remote::usage::Usage,
+    /// The route of the job in flight (None until it is chosen).
+    route: Option<Route>,
 }
 
 impl Worker {
@@ -344,6 +378,7 @@ impl Worker {
         killer: Arc<Mutex<Option<Killer>>>,
     ) -> Worker {
         let now = Instant::now();
+        let usage = remote::usage::Usage::load(Some(&cfg.data_dir));
         Worker {
             translator: cfg.translator,
             gpu_margin_mb: cfg.gpu_margin_mb,
@@ -383,6 +418,9 @@ impl Worker {
             key_file: None,
             loading_first_gpu: false,
             shutdown: false,
+            remote: None,
+            usage,
+            route: None,
         }
     }
 
@@ -427,29 +465,43 @@ impl Worker {
 
     fn emit_all(&self, out: Emit) {
         for (key, st) in out {
-            (self.on_update)(Update { key, status: st.to_status() });
+            (self.on_update)(Update { key, status: st.to_status(), fallback: None });
         }
     }
 
     fn emit(&self, key: JobKey, st: &St) {
-        (self.on_update)(Update { key, status: st.to_status() });
+        self.emit_with(key, st, None);
+    }
+
+    fn emit_with(&self, key: JobKey, st: &St, fallback: Option<&Fallback>) {
+        (self.on_update)(Update { key, status: st.to_status(), fallback: fallback.cloned() });
+    }
+
+    /// The fallback reason of the job in flight (its updates carry it).
+    fn flight_fallback(&self) -> Option<&Fallback> {
+        match &self.route {
+            Some(Route::FellBack(f)) => Some(f),
+            _ => None,
+        }
     }
 
     /// Non-final status for the job in flight.
     fn flight_update(&mut self, st: St) {
         for k in self.queue.flight_keys() {
-            self.emit(k, &st);
+            self.emit_with(k, &st, self.flight_fallback());
         }
         self.flight_status = st;
     }
 
     /// Final status for the job in flight; the queue moves on.
     fn finish_flight(&mut self, st: St, now: Instant) {
+        let fallback = self.flight_fallback().cloned();
+        self.route = None;
         let mut out = Emit::new();
         if let Some(e) = self.queue.finish_flight(&mut out) {
             let ms = now.duration_since(e.submitted).as_millis() as u64;
             for &k in &e.keys {
-                self.emit(k, &st);
+                self.emit_with(k, &st, fallback.as_ref());
                 match &st {
                     St::Failed(kind) => self.log(EngineEvent::JobFailed { req_id: k.req_id, kind: *kind, ms }),
                     St::Done(s) => self.log(EngineEvent::JobDone { req_id: k.req_id, ms, output_bytes: s.len() as u32, outcome: "done" }),
@@ -570,6 +622,13 @@ impl Worker {
                     self.pending_unload = Some("tray");
                 }
             }
+            Cmd::SetRemote(c) => {
+                self.log(match &c {
+                    Some(c) => EngineEvent::RemoteConfigured { provider: c.provider.id(), model: c.model_label(), daily_cap: c.daily_char_cap },
+                    None => EngineEvent::RemoteConfigured { provider: "local", model: "default", daily_cap: 0 },
+                });
+                self.remote = c.map(Arc::new);
+            }
             Cmd::Shutdown => self.shutdown = true,
         }
     }
@@ -590,14 +649,20 @@ impl Worker {
             self.log(EngineEvent::JobDone { req_id: key.req_id, ms: 0, output_bytes: 0, outcome });
             return;
         }
-        if self.translator == Translator::Llama && !self.installed(now) {
+        // With a remote service, a missing local model only matters if the service fails.
+        let remote = if self.translator == Translator::Llama { self.remote.clone() } else { None };
+        if self.translator == Translator::Llama && remote.is_none() && !self.installed(now) {
             self.emit(key, &St::NotInstalled);
             self.log(EngineEvent::JobDone { req_id: key.req_id, ms: 0, output_bytes: 0, outcome: "not_installed" });
             return;
         }
         let raw_pairs: Vec<(&str, &str)> = job.pairs.iter().map(|(t, m)| (t.as_str(), m.as_str())).collect();
         let pairs = pipeline::clean_pairs(&raw_pairs);
-        let ck = cache::key(&self.model_identity(), &job.target, &protected.text, &protected.span_key(), &pairs);
+        let identity = match &remote {
+            Some(c) => c.identity(),
+            None => self.model_identity(),
+        };
+        let ck = cache::key(&identity, &job.target, &protected.text, &protected.span_key(), &pairs);
         if !job.no_cache {
             if let Some(c) = self.cache.get(ck) {
                 let (st, n) = match c {
@@ -620,7 +685,7 @@ impl Worker {
             Pushed::Duplicate => {}
             Pushed::MergedInFlight => {
                 let st = self.flight_status.clone();
-                self.emit(key, &st);
+                self.emit_with(key, &st, self.flight_fallback());
             }
             Pushed::Waiting => {}
         }
@@ -667,11 +732,30 @@ impl Worker {
                 let r = self.req.take().unwrap();
                 self.on_result(r, result, now);
             }
+            Ev::RemoteDone { gen, result } => {
+                if self.req.as_ref().is_none_or(|r| r.gen != gen || !r.remote) {
+                    return;
+                }
+                let r = self.req.take().unwrap();
+                self.on_remote_result(r, result, now);
+            }
         }
     }
 
+    /// The cache key of the job in flight for one model identity (the route decides which:
+    /// the local model, or the remote provider and model).
+    fn flight_cache_key(&self, identity: &str) -> Option<u64> {
+        let e = self.queue.flight()?;
+        let protected = protect::protect(e.work.text.as_str(), prompt::DEFAULT);
+        let raw_pairs: Vec<(&str, &str)> = e.work.pairs.iter().map(|(t, m)| (t.as_str(), m.as_str())).collect();
+        let pairs = pipeline::clean_pairs(&raw_pairs);
+        Some(cache::key(identity, &e.work.target, &protected.text, &protected.span_key(), &pairs))
+    }
+
     fn on_result(&mut self, r: Req, result: Result<String, ReqError>, now: Instant) {
-        let ck = self.queue.flight().map(|e| e.cache_key);
+        // A local answer to a job meant for the remote service is not cached: the next request
+        // tries the service again.
+        let ck = if self.flight_fallback().is_some() { None } else { self.flight_cache_key(&self.model_identity()) };
         match result {
             Ok(raw) => {
                 let fin = pipeline::finish(&r.prepared, &raw);
@@ -737,7 +821,11 @@ impl Worker {
             self.check_exit(now);
             self.poll_start(now);
             if self.req.as_ref().is_some_and(|r| now > r.deadline) {
-                self.request_timeout(now);
+                if self.req.as_ref().is_some_and(|r| r.remote) {
+                    self.remote_timeout();
+                } else {
+                    self.request_timeout(now);
+                }
             }
             self.drive_flight(now);
             self.housekeeping(now);
@@ -810,11 +898,30 @@ impl Worker {
             return;
         }
         self.drop_orphan_flight(now);
-        if self.pending_unload.is_some() && !matches!(self.srv, Srv::None) {
-            // Unload first (backend change, VRAM guard, tray); the next job restarts it.
-            return;
+        if self.queue.flight().is_none() {
+            if self.pending_unload.is_some() && !matches!(self.srv, Srv::None) {
+                // Unload first (backend change, VRAM guard, tray); the next job restarts it.
+                return;
+            }
+            if !self.next_flight(now) {
+                return;
+            }
         }
-        if !self.next_flight(now) {
+        if self.route.is_none() {
+            self.route = Some(match &self.remote {
+                Some(c) => Route::Remote(c.clone()),
+                None => Route::Local,
+            });
+        }
+        if let Some(Route::Remote(cfg)) = &self.route {
+            let cfg = cfg.clone();
+            self.start_remote(cfg, now);
+            if self.req.is_some() || self.queue.flight().is_none() || matches!(self.route, Some(Route::Remote(_))) {
+                return;
+            }
+            // Fell back before anything was sent (daily cap): served locally below.
+        }
+        if self.pending_unload.is_some() && !matches!(self.srv, Srv::None) {
             return;
         }
         match &self.srv {
@@ -866,10 +973,158 @@ impl Worker {
             self.finish_flight(St::Failed(FailKind::Http), now);
             return;
         }
-        self.req = Some(Req { gen, deadline: now + limit, prepared: p, gpu });
+        self.req = Some(Req { gen, deadline: now + limit, prepared: p, gpu, remote: false, sent_chars: 0 });
         if !retried {
             self.flight_update(St::Translating);
         }
+    }
+
+    // ---------------------------------------------------------------- remote service
+
+    /// First request of a job routed to the remote service.
+    fn start_remote(&mut self, cfg: Arc<RemoteConfig>, now: Instant) {
+        let Some(e) = self.queue.flight() else { return };
+        let raw_pairs: Vec<(&str, &str)> = e.work.pairs.iter().map(|(t, m)| (t.as_str(), m.as_str())).collect();
+        match pipeline::prepare(&e.work.target, e.work.text.as_str(), &raw_pairs, prompt::DEFAULT) {
+            Prep::Nothing => self.finish_flight(St::Nothing, now),
+            Prep::Same => self.finish_flight(St::Same, now),
+            // more links, IDs and addresses than placeholders: the extra ones would go in clear
+            Prep::Ready(p) if p.protected.tokens_in_clear > 0 => self.keep_local(&cfg),
+            Prep::Ready(p) => self.send_remote(cfg, p, false, now),
+        }
+    }
+
+    /// The line is translated locally for privacy (nothing more is sent).
+    fn keep_local(&mut self, cfg: &RemoteConfig) {
+        let fb = Fallback { provider: cfg.provider, kind: FallbackKind::KeptLocal, status: None, message: String::new() };
+        self.fall_back(fb, cfg, 0, 0);
+    }
+
+    /// Sends one request to the service on its own thread (the daily cap is checked first; the
+    /// characters are counted when the service answers). `follow_up`: the Brackets or insist
+    /// retry of the same job.
+    fn send_remote(&mut self, cfg: Arc<RemoteConfig>, p: Prepared, follow_up: bool, now: Instant) {
+        let msg = remote::OwnedMessage::of(&p);
+        let chars = msg.message().counted_chars();
+        let day = remote::usage::today();
+        if !self.usage.allows(&day, cfg.daily_char_cap, chars) {
+            // the cap in force goes with the reason (the badge shows it, whatever it is later)
+            let fb = Fallback { provider: cfg.provider, kind: FallbackKind::DailyCap, status: None, message: cfg.daily_char_cap.to_string() };
+            self.fall_back(fb, &cfg, 0, 0);
+            return;
+        }
+        self.gen += 1;
+        let gen = self.gen;
+        for k in self.queue.flight_keys() {
+            self.log(EngineEvent::RemoteRequest { req_id: k.req_id, provider: cfg.provider.id(), model: cfg.model_label(), chars, follow_up });
+        }
+        let policy = self.t.remote;
+        let transport = self.deps.transport.clone();
+        let tx = self.tx.clone();
+        let c2 = cfg.clone();
+        let spawned = std::thread::Builder::new().name("tp-engine-remote".into()).spawn(move || {
+            let result = remote::call(&c2, &msg.message(), &*transport, policy);
+            let _ = tx.send(Msg::Ev(Ev::RemoteDone { gen, result }));
+        });
+        if spawned.is_err() {
+            let fb = Fallback { provider: cfg.provider, kind: FallbackKind::Network, status: None, message: String::new() };
+            self.fall_back(fb, &cfg, 0, 0);
+            return;
+        }
+        // The call enforces the total itself; this is only a backstop.
+        self.req = Some(Req { gen, deadline: now + policy.total + Duration::from_secs(2), prepared: p, gpu: false, remote: true, sent_chars: chars });
+        if !follow_up {
+            self.flight_update(St::Translating);
+        }
+    }
+
+    fn on_remote_result(&mut self, r: Req, result: Result<remote::Answer, remote::CallError>, now: Instant) {
+        let Some(Route::Remote(cfg)) = self.route.clone() else { return };
+        let (provider, model) = (cfg.provider.id(), cfg.model_label());
+        // The daily cap counts what a service answered for: the characters sent and the answer's
+        // (an answer the engine cannot use was billed too). A request that got an error status,
+        // no connection or no answer in time counts nothing.
+        let billed = match &result {
+            Ok(a) => Some(r.sent_chars.saturating_add(a.text.chars().count().min(u32::MAX as usize) as u32)),
+            Err(e) if matches!(e.fallback.kind, FallbackKind::Refused | FallbackKind::Truncated | FallbackKind::BadAnswer) => Some(r.sent_chars),
+            Err(_) => None,
+        };
+        if let Some(n) = billed {
+            self.usage.add(&remote::usage::today(), n);
+        }
+        match result {
+            Ok(a) => {
+                let out_chars = a.text.chars().count().min(u32::MAX as usize) as u32;
+                for k in self.queue.flight_keys() {
+                    self.log(EngineEvent::RemoteDone { req_id: k.req_id, provider, model, status: a.status, ms: a.ms, attempts: a.attempts, out_chars });
+                }
+                // The same post-processing and at most one follow-up as the local path.
+                let fin = pipeline::finish(&r.prepared, &a.text);
+                let marked = self.queue.flight().map(|e| e.work.text.as_str().to_string()).unwrap_or_default();
+                match pipeline::next(&r.prepared, fin, &marked) {
+                    // The Brackets form writes URLs, e-mail addresses and IDs inline: a line that
+                    // holds one is not asked again at the service (translated locally instead).
+                    Step::Again(p) if p.attempt == Attempt::Brackets && (p.protected.verbatim.iter().any(|v| *v) || p.protected.tokens_in_clear > 0) => {
+                        self.keep_local(&cfg);
+                    }
+                    Step::Again(p) => {
+                        for k in self.queue.flight_keys() {
+                            self.log(match p.attempt {
+                                Attempt::Insist => EngineEvent::InsistRetry { req_id: k.req_id },
+                                _ => EngineEvent::PlaceholderRetry { req_id: k.req_id },
+                            });
+                        }
+                        self.send_remote(cfg, p, true, now);
+                    }
+                    Step::Final(Finish::Done(s)) => {
+                        if let Some(ck) = self.flight_cache_key(&cfg.identity()) {
+                            self.cache.put(ck, Cached::Done(s.clone()));
+                        }
+                        self.finish_flight(St::Done(s), now);
+                    }
+                    Step::Final(Finish::Same) => {
+                        if let Some(ck) = self.flight_cache_key(&cfg.identity()) {
+                            self.cache.put(ck, Cached::Same);
+                        }
+                        self.finish_flight(St::Same, now);
+                    }
+                    Step::Final(_) => {
+                        let fb = Fallback { provider: cfg.provider, kind: FallbackKind::BadAnswer, status: None, message: String::new() };
+                        self.fall_back(fb, &cfg, a.ms, a.attempts);
+                    }
+                }
+            }
+            Err(e) => self.fall_back(e.fallback, &cfg, e.ms, e.attempts),
+        }
+    }
+
+    /// The remote request passed its backstop deadline (the call should have ended first).
+    fn remote_timeout(&mut self) {
+        if self.req.take().is_none() {
+            return;
+        }
+        self.gen += 1;
+        let Some(Route::Remote(cfg)) = self.route.clone() else { return };
+        let fb = Fallback { provider: cfg.provider, kind: FallbackKind::Timeout, status: None, message: String::new() };
+        let ms = (self.t.remote.total + Duration::from_secs(2)).as_millis() as u64;
+        self.fall_back(fb, &cfg, ms, 1);
+    }
+
+    /// The job meant for the service is translated locally from now on (the next `drive_flight`
+    /// serves it); every later update carries `fb`.
+    fn fall_back(&mut self, fb: Fallback, cfg: &RemoteConfig, ms: u64, attempts: u8) {
+        for k in self.queue.flight_keys() {
+            self.log(EngineEvent::RemoteFallback {
+                req_id: k.req_id,
+                provider: cfg.provider.id(),
+                model: cfg.model_label(),
+                kind: fb.kind.code(),
+                status: fb.status.unwrap_or(0),
+                ms,
+                attempts,
+            });
+        }
+        self.route = Some(Route::FellBack(fb));
     }
 
     // ---------------------------------------------------------------- server lifecycle
@@ -954,9 +1209,12 @@ impl Worker {
             reason: dec.reason,
         });
         if dec.choice == Choice::LowMemory {
-            let mut out = Emit::new();
-            self.queue.fail_waiting(St::LowMemory, &mut out);
-            self.emit_all(out);
+            // Waiting jobs fail too, unless a remote service may still translate them.
+            if self.remote.is_none() {
+                let mut out = Emit::new();
+                self.queue.fail_waiting(St::LowMemory, &mut out);
+                self.emit_all(out);
+            }
             return Err(St::LowMemory);
         }
         let vulkan_dev = match (backend, &snap.adapter) {
@@ -1102,7 +1360,7 @@ impl Worker {
             }
             Srv::Ready { proc, backend, client } => {
                 self.srv = Srv::Ready { proc, backend, client };
-                self.server_crashed(now, self.req.is_some());
+                self.server_crashed(now, self.req.as_ref().is_some_and(|r| !r.remote));
             }
             Srv::None => {}
         }
@@ -1165,7 +1423,8 @@ impl Worker {
     }
 
     fn housekeeping(&mut self, now: Instant) {
-        let idle = self.req.is_none();
+        // A remote request does not use the local server.
+        let idle = self.req.as_ref().is_none_or(|r| r.remote);
         if let Some(reason) = self.pending_unload {
             if idle && !matches!(self.srv, Srv::Starting { .. } | Srv::Warming { .. }) {
                 self.pending_unload = None;

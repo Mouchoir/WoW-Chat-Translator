@@ -10,7 +10,8 @@ description = "TranslateProbe local translation engine: llama-server lifecycle, 
 tp_bridge = { path = "../bridge" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# No TLS: the engine only talks to its own llama-server on 127.0.0.1.
+# No TLS in ureq: it only talks to the engine's own llama-server on 127.0.0.1. The remote
+# translation services go through WinHTTP (TLS by the OS, system proxy settings).
 ureq = { version = "3.4.2", default-features = false, features = ["json"] }
 
 [dependencies.windows]
@@ -28,6 +29,7 @@ features = [
   "Win32_System_LibraryLoader",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
+  "Win32_Networking_WinHttp",
 ]
 
 [profile.release]

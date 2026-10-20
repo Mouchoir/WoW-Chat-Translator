@@ -34,6 +34,10 @@ pub struct Protected {
     pub verbatim: Vec<bool>,
     /// Brackets variant: true when this span was wrapped in `[...]` by us (restore unwraps it).
     pub wrapped: Vec<bool>,
+    /// Verbatim tokens (URLs, e-mail addresses, IDs) left as plain text because the 9
+    /// placeholders were taken: a remote service would see them in clear (docs/ENGINE.md
+    /// section 13), so such a line stays local.
+    pub tokens_in_clear: usize,
     pub variant: Variant,
     /// Letters outside the spans (`char::is_alphabetic`).
     pub plain_letters: usize,
@@ -192,6 +196,7 @@ pub fn protect(marked: &str, variant: Variant) -> Protected {
         colors: Vec::new(),
         verbatim: Vec::new(),
         wrapped: Vec::new(),
+        tokens_in_clear: 0,
         variant,
         plain_letters: 0,
         plain_hangul: 0,
@@ -217,6 +222,7 @@ pub fn protect(marked: &str, variant: Variant) -> Protected {
                 if tokens_seen <= token_room {
                     p.push_span(s, None, true);
                 } else {
+                    p.tokens_in_clear += 1;
                     p.push_plain(&s);
                 }
             }

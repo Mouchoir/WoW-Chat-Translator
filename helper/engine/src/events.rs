@@ -97,6 +97,17 @@ pub enum EngineEvent {
     GpuBlocked { reason: &'static str },
     Unload { reason: &'static str },
     State(EngineState),
+    /// The remote service changed (`provider` "local" when none; `model` a known suggestion,
+    /// "default" or "custom"; never the key, the URL or a typed model name).
+    RemoteConfigured { provider: &'static str, model: &'static str, daily_cap: u32 },
+    /// A job was sent to the remote service. `chars`: what the daily cap counts; `follow_up`:
+    /// the Brackets (or insist) retry.
+    RemoteRequest { req_id: u16, provider: &'static str, model: &'static str, chars: u32, follow_up: bool },
+    /// The service answered with text (`out_chars` of the raw answer).
+    RemoteDone { req_id: u16, provider: &'static str, model: &'static str, status: u16, ms: u64, attempts: u8, out_chars: u32 },
+    /// The service failed or the daily cap was reached: the job is translated locally. `kind` is
+    /// `FallbackKind::code`; `status` 0 when there was no HTTP status.
+    RemoteFallback { req_id: u16, provider: &'static str, model: &'static str, kind: &'static str, status: u16, ms: u64, attempts: u8 },
 }
 
 #[cfg(test)]

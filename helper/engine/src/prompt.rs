@@ -98,9 +98,15 @@ pub fn system_prefix(target: &str, v: Variant) -> String {
 }
 
 pub fn system_prefix_with(target: &str, v: Variant, style: Style) -> String {
+    format!("<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n", system_text(target, v, style))
+}
+
+/// The system message alone (no ChatML). The local model gets it inside the ChatML system turn;
+/// the remote LLM providers (docs/ENGINE.md section 13) send it as their system message.
+pub fn system_text(target: &str, v: Variant, style: Style) -> String {
     // Unknown targets cannot come from the addon (Lang.TARGETS); English is the safe fallback.
     let lang = language_name(target).unwrap_or("English");
-    let system = match style {
+    match style {
         Style::Plain => {
             let rules = match v {
                 Variant::Placeholders => SYSTEM_PLACEHOLDERS,
@@ -118,8 +124,7 @@ pub fn system_prefix_with(target: &str, v: Variant, style: Style) -> String {
                 "You translate chat messages from the online game World of Warcraft into {lang}. Write natural, casual {lang}, the way {who} would write in chat. Keep {items}, player names and game abbreviations {CASUAL_ABBREVIATIONS} unchanged. Use the official {lang} World of Warcraft names when you know them. Reply with the {lang} translation only."
             )
         }
-    };
-    format!("<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n")
+    }
 }
 
 /// Builds the full prompt with the default style. `protected` is the neutralized text
@@ -131,6 +136,15 @@ pub fn build(target: &str, protected: &str, pairs: &[(&str, &str)], v: Variant) 
 
 pub fn build_with(target: &str, protected: &str, pairs: &[(&str, &str)], v: Variant, o: Opts) -> String {
     let mut s = system_prefix_with(target, v, o.style);
+    s.push_str(&user_text(target, protected, pairs, v, o));
+    s.push_str("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+    s
+}
+
+/// The user turn alone (no ChatML): `Glossary:` (omitted without pairs), the insist block (V2),
+/// then `Message:` and the text. Shared by the local prompt and the remote LLM providers.
+pub fn user_text(target: &str, protected: &str, pairs: &[(&str, &str)], v: Variant, o: Opts) -> String {
+    let mut s = String::with_capacity(protected.len() + 64);
     if !pairs.is_empty() {
         s.push_str("Glossary:\n");
         for (term, meaning) in pairs {
@@ -148,7 +162,6 @@ pub fn build_with(target: &str, protected: &str, pairs: &[(&str, &str)], v: Vari
     }
     s.push_str("Message:\n");
     s.push_str(protected);
-    s.push_str("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
     s
 }
 
@@ -326,6 +339,22 @@ brb, lfm inv {1}<|im_end|>\n\
         let p = build_with("en", "vds [x]", &[], Variant::Brackets, Opts { style: Style::Casual, insist: true });
         assert!(p.contains("only item names in [brackets], player names"));
         assert!(p.contains("<|im_start|>user\nThis message is not in English yet."));
+    }
+
+    #[test]
+    fn system_and_user_text_compose_the_chatml_prompt() {
+        // The remote LLM providers send these two parts; the local prompt wraps them in ChatML.
+        let pairs = [("wts", "vend"), ("cheap", "pas cher")];
+        let o = Opts { style: Style::Casual, insist: false };
+        let sys = system_text("fr", Variant::Placeholders, Style::Casual);
+        let user = user_text("fr", "wts {1} x20 cheap", &pairs, Variant::Placeholders, o);
+        assert!(!sys.contains("<|") && !user.contains("<|"));
+        assert_eq!(user, "Glossary:\n- \"wts\" = \"vend\"\n- \"cheap\" = \"pas cher\"\n\nMessage:\nwts {1} x20 cheap");
+        assert_eq!(
+            format!("<|im_start|>system\n{sys}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"),
+            GOLDEN_FR_CASUAL_GLOSSARY
+        );
+        assert_eq!(user_text("en", "hi", &[], Variant::Placeholders, o), "Message:\nhi");
     }
 
     #[test]

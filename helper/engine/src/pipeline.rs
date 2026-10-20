@@ -87,7 +87,15 @@ pub struct Prepared {
     pub source: String,
     /// Neutralized single-line pairs (all of them).
     pub pairs: Vec<(String, String)>,
+    /// The pairs the prompt lists (all of them minus the ones V4 expanded into the message); the
+    /// remote providers send these.
+    pub listed: Vec<(String, String)>,
+    /// The local model's full ChatML prompt.
     pub prompt: String,
+    /// The same request as a system message and a user message (no ChatML), for the remote LLM
+    /// providers (docs/ENGINE.md section 13).
+    pub system: String,
+    pub user: String,
     pub grammar: &'static str,
     /// min(256, 32 + input bytes).
     pub n_predict: u32,
@@ -229,14 +237,20 @@ fn make(target: &str, mut protected: Protected, source: String, pairs: Vec<(Stri
     let refs: Vec<(&str, &str)> = listed.iter().map(|(t, m)| (t.as_str(), m.as_str())).collect();
     let opts = Opts { style: tuning.style, insist: attempt == Attempt::Insist };
     let prompt = prompt::build_with(target, &protected.text, &refs, protected.variant, opts);
+    let system = prompt::system_text(target, protected.variant, tuning.style);
+    let user = prompt::user_text(target, &protected.text, &refs, protected.variant, opts);
+    let listed: Vec<(String, String)> = listed.into_iter().cloned().collect();
     Prepared {
         target: target.to_string(),
         n_predict: n_predict(&protected.text),
         grammar: grammar::for_target(target),
         protected,
         source,
+        listed,
         pairs,
         prompt,
+        system,
+        user,
         tuning,
         attempt,
         fallback,

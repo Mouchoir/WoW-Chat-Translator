@@ -15,6 +15,7 @@ h.submit(job); h.cancel(key); h.clear_session(session);
 h.set_wow_present(false);         // starts the 60 s unload countdown
 h.set_backend(BackendPref::Cpu);  // unloads after the request in flight; next start uses it
 h.unload_now();                   // tray "Unload translator now"
+h.set_remote(Some(cfg));          // remote service with the player's key (section 13); None: local
 engine.shutdown();                // or drop: kills llama-server, joins within 2 s
 let json = tp_engine::selftest::run(&cfg);   // --selftest, never loads the model
 ```
@@ -37,6 +38,12 @@ let json = tp_engine::selftest::run(&cfg);   // --selftest, never loads the mode
 - `Failed` kinds: `Timeout` (request deadline or 30 s in the queue), `ServerDied` (start failure,
   crash, or the Error state), `BadOutput`, `Http`, `Overloaded` (pushed out of a full queue).
 - `EngineState`: `NotInstalled`, `Unloaded`, `Loading`, `ReadyGpu`, `ReadyCpu`, `Busy`, `Error`.
+  It describes the local engine only (a request to a remote service does not make it `Busy`).
+- Remote services (2026-10-20, section 13): with `set_remote(Some(..))` a job goes to the service
+  first (`Queued`, `Translating`, then `Done` or `Same`; no `Loading`, no `Partial`). When the
+  service fails, the job runs the local path above and every later `Update` of it carries
+  `fallback: Some(Fallback)` (provider, kind, HTTP status, the service's short message); every
+  other update has `fallback: None`.
 - `EngineEvent` (log only) carries numbers, enums and `&'static str`. The one exception is
   `ServerOutput { line: ServerLine }`: a llama-server line that passed the allowlist, sent only
   after a crash or a failed start. `ServerLine` can only be built by the filter (see section 4).
@@ -155,7 +162,11 @@ free, the session switches to CPU (unload after the request in flight).
   FNV-1a 64 of `PROMPT_VERSION` (3), model identity (digest, else size and mtime), target, protected
   text (default variant), the spans' contents and colours (`Protected::span_key`) and pairs, each
   field length-prefixed. The spans are in the key since 2026-10-19 (review fix, deviation 24):
-  "wts {1}" for two different items, IDs or colours are two results.
+  "wts {1}" for two different items, IDs or colours are two results. With a remote service the
+  model identity is `remote:<provider>:<model>` (`remote:openai:<host[:port]>:<model>` for an
+  OpenAI-compatible server), so a result of one service or model is never served for another;
+  a result is stored under the identity of the route that produced it, and a local answer to a
+  job that fell back is not stored (section 13).
 
 ## 6. Prompt, protection, post-processing
 
@@ -286,7 +297,9 @@ never starts llama-server whatever is installed on the machine.
 - Chat text travels only in `ChatText` (no Debug, Display, Clone or Serialize) and in the
   engine's internal status type, which has no Debug either.
 - Log events have no text field; the server ring filter refuses prompt and completion lines.
-- Nothing is written to disk except `flags.json` (flag names), the key file and the Vulkan marker.
+- Nothing is written to disk except `flags.json` (flag names), the key file, the Vulkan marker
+  and, with a remote service, `remote_usage.json` (a date and a character count). The API keys
+  file `keys.bin` (DPAPI) is written by the app through `remote::keystore` (section 13).
 - `evalprompt` reports hold ids, counts and timings only. `--show` (outputs) and `--show-raw`
   (raw answers of every attempt) print synthetic outputs to the console for a developer; they
   are never written to a file. Both corpora are synthetic.
@@ -297,7 +310,7 @@ From `helper\engine`:
 
 | Command | What |
 |---|---|
-| `cargo test --offline` | 111 unit tests in the library (2 ignored: the child process of the job-object test, and `selftest_on_this_machine`, which may run `llama-server --help`), 5 in `evalprompt`, 1 ignored integration test |
+| `cargo test --offline` | 157 unit tests in the library (2 ignored: the child process of the job-object test, and `selftest_on_this_machine`, which may run `llama-server --help`), 5 in `evalprompt`, 1 ignored integration test; the remote-service tests (section 13) never leave 127.0.0.1 |
 | `cargo test --offline --test real_server -- --ignored --nocapture` (env `TPROBE_LLAMA_RUNTIME`) | the public Engine API against the real llama-server on CPU, 60 s watchdog; since 2026-10-19 the synthetic line holds a coloured link and a synthetic ID, which must come back as a coloured mark and exactly as written (2026-10-19: first result after 13.9 s including the load, WoW running) |
 | `cargo run --offline --release --bin evalprompt -- --runtime %TPROBE_LLAMA_RUNTIME% --cpu --threads 4 --out ..\..\tests\eval\out\report.json` | E1 with the shipped tuning, E1b and E1c lines included (`--tuning v0`, `v1+v3+v4`... for the others; `--samples ..\..\tests\eval\echo_samples.tsv` for the echo set); since E1d every `done` line also has its lengths outside the protected spans |
 
@@ -638,6 +651,22 @@ change their factors.
     first label of 4 characters or 3 labels, and full-width letters, digits and punctuation are
     read as ASCII. New E1 expectation `free=<token>`: a token the engine must not protect, checked
     on the engine's own protection without the model (metric `freeTokens`, rule 100%).
+28. **Remote services (2026-10-20, section 13): the fallback reason is a field of `Update`**
+    (`fallback: Option<Fallback>`), not a new `Status` variant: `Status`, the queue's `St` and
+    the merge semantics stay as they were, and a job that fell back still ends with the status
+    the local path gives it (`Done`, `Same`, `Failed`, `LowMemory`, `NotInstalled`). The only
+    other interface changes are `EngineHandle::set_remote`, the `remote` module and four log
+    events (`RemoteConfigured`, `RemoteRequest`, `RemoteDone`, `RemoteFallback`).
+29. **The prompt is split for the remote LLMs:** `prompt::system_text` and `prompt::user_text`
+    are the two halves of `build_with` (ChatML wrapper unchanged, goldens unchanged,
+    `PROMPT_VERSION` still 3); `Prepared` gained `system`, `user` and `listed` (the pairs the
+    prompt lists).
+30. **WinHTTP total timeout enforced by the caller** (fact in section 13): each request runs on
+    its own thread and the caller waits at most the total.
+31. **Review fixes (2026-10-21, section 13):** keys are stored per service id, not per provider
+    (`keys.bin` version 2); a new `FallbackKind::KeptLocal` (`kept_local`) for the lines whose
+    URLs, e-mail addresses or IDs would otherwise reach a service in clear; `Protected` gained
+    `tokens_in_clear`; the daily cap counts the answer too and only what a service answered for.
 
 ## 12. M0 skeleton notes (kept)
 
@@ -646,3 +675,235 @@ change their factors.
   in `events.rs`; `Engine` and `EngineHandle` in `worker.rs`. All are re-exported at the crate
   root.
 - `prompt::Variant` derives `Clone, Copy, Debug, PartialEq, Eq`.
+
+## 13. Remote translation services (2026-10-20, user request)
+
+**Request and decisions.** The user asked whether players can enter their own API keys for remote
+AI services, for a better or faster model. Decisions (user and lead, 2026-10-20): the providers
+of the first version are DeepL, any OpenAI-compatible endpoint, Google Gemini and Anthropic
+Claude; the local Qwen model stays the default; keys are entered only in Translate Companion
+(never in WoW) and stored encrypted with DPAPI; when the service fails (network, quota, invalid
+key, refusal, timeout) or the daily character cap is reached, the job is translated locally and
+its result carries the reason, which the companion shows as a warning badge with a tooltip.
+Module: `helper\engine\src\remote\` (`mod.rs`, `http.rs`, `winhttp.rs`, `deepl.rs`, `openai.rs`,
+`gemini.rs`, `claude.rs`, `keystore.rs`, `usage.rs`; tests in `tests.rs` and `fake.rs`).
+
+### Interface for the app
+
+```rust
+use tp_engine::remote::{self, keystore, RemoteConfig, RemoteSettings, Secret};
+let keys_path = keystore::path_next_to(&settings_json_path);       // %APPDATA%\TranslateProbe\keys.bin
+let keys = keystore::load(&keys_path)?;                             // missing file: no keys
+match RemoteConfig::from_settings(&remote_settings, &keys) {        // consent, key, URL, model checked
+    Ok(cfg) => h.set_remote(cfg),                                   // Ok(None) for "local"
+    Err(e) => { /* e.code(): no_consent, no_key, bad_url, insecure_url, model_required, bad_model */ }
+}
+keystore::save(&keys_path, &keys)?;                                 // Keys::set(&service_id, Secret::new(..))
+let cfg = RemoteConfig::new(provider, model, base_url, Secret::new(key), cap)?;   // the Test button
+let r = remote::test_translation(&cfg, target, &*remote::system_transport());     // blocking, <= 15 s
+let used_today = remote::usage::read_today(&data_dir);
+```
+
+- `RemoteSettings` (serde, camelCase, for settings.json): `provider` (`local`, `deepl`, `openai`,
+  `gemini`, `claude`), `model` (empty: the provider's default), `baseUrl` (OpenAI-compatible
+  only, empty: `https://api.openai.com/v1`), `consent`, `dailyCharCap` (0 = none). `validate()`
+  fixes invalid values like the app's own settings.
+- Service id (`remote::service_id(provider, base_url)`, `RemoteSettings::service_id()`,
+  `RemoteConfig::service_id()`): `deepl`, `gemini`, `claude`, or for an OpenAI-compatible server
+  `openai:<host[:port]><base path>` (`openai:api.openai.com/v1`; the query, a trailing `/` and
+  `/chat/completions` are left out, so one server written two ways is one service). It names
+  both the consent and the saved key. Consent: `consent` holds the service id the player agreed
+  to send chat text and glossary terms to; `give_consent()` records it, `has_consent()` checks
+  it. Another provider, server or route behind the same host needs a new consent.
+- Keys: `keystore::Keys` maps a service id to a `Secret` (`get(id)`, `set(id, key)`,
+  `remove(id)`, `slots()`). `from_settings` takes the key saved for the settings' very service
+  id, so a key saved for one OpenAI-compatible server is never sent to another one, nor to a
+  keyless server on this PC. `remote::key_needed(provider, base_url)` says whether a key is
+  required (every service but an OpenAI-compatible server on this PC or a private address).
+- `Provider`: `id()`, `from_id()`, `display_name()` (product names; the app localizes the
+  "OpenAI-compatible" label), `default_model()`, `model_suggestions()` (the first is the
+  default), `uses_base_url()`.
+- `Fallback` (on `Update::fallback`): `provider`, `kind` (`FallbackKind`: `Http`, `Timeout`,
+  `Network`, `Refused`, `Truncated`, `BadAnswer`, `DailyCap`, `KeptLocal`; `code()` gives `http`,
+  `timeout`, `network`, `refused`, `truncated`, `bad_answer`, `daily_cap`, `kept_local` for the
+  locale tables), `status` (HTTP status when the service answered with an error) and `message`
+  (the service's own short message, English as the service wrote it, sanitized: no key, at most
+  160 characters, may be empty; for `DailyCap` the cap in force, in decimal digits, so an old
+  badge shows the limit that applied). Its Debug prints provider, kind and status only.
+- `remote::test_translation` sends `TEST_SENTENCE` (synthetic, no player data) through the same
+  pre- and post-processing; `Err` is the `Fallback` the badge would show.
+
+### Providers
+
+Formats checked on the providers' documentation on 2026-10-20 (DeepL, Gemini and OpenAI with
+WebFetch; Claude from Anthropic's API reference given by the lead). Every request carries only
+the protected message text (placeholders for item links, IDs and URLs, as for the local model)
+and the glossary pairs; never a sender name, a channel or a realm.
+
+| Provider | Request | Model (default, suggestions) | Answer |
+|---|---|---|---|
+| DeepL | `POST https://api.deepl.com/v2/translate` (key ending in `:fx`: `api-free.deepl.com`), `Authorization: DeepL-Auth-Key <key>`; `text: [xml]`, `target_lang`, `context`, `tag_handling: xml`, `ignore_tags: ["x"]`, `preserve_formatting: true`, `formality: prefer_less`, `model_type` when set | DeepL's own default; `latency_optimized`, `quality_optimized`, `prefer_quality_optimized` | `translations[0].text` |
+| OpenAI-compatible | `POST {base}/chat/completions` (`/chat/completions` appended unless the URL ends with it), `Authorization: Bearer <key>` (none without a key); `model`, `messages: [system, user]`, `stream: false`, an output limit of 4000 tokens (`max_completion_tokens` on `api.openai.com`, `max_tokens` elsewhere); `reasoning_effort` only on `api.openai.com` (`none` for gpt-6-luna, `low` for gpt-5/gpt-6/o-series) | `gpt-6-luna` on OpenAI's host, required elsewhere; `gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra` | `choices[0].message.content`; `message.refusal` or `finish_reason: content_filter` refused, `length` truncated |
+| Google Gemini | `POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent`, `x-goog-api-key` (never `?key=`); `systemInstruction`, `contents[user]`, `generationConfig: {maxOutputTokens: 4000, thinkingConfig}`, safety thresholds `BLOCK_ONLY_HIGH` | `gemini-3.5-flash-lite`; `gemini-3.8-flash`, `gemini-3.1-flash-lite` | `candidates[0].content.parts[]` without `thought: true`; `MAX_TOKENS` and `CONTINUATION` truncated; `SAFETY`, `RECITATION`, `LANGUAGE`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `IMAGE_*`, `ESCALATION`, `PUP_LIMITED_DISABLED` or `promptFeedback.blockReason` refused; any other reason (`OTHER`, `MALFORMED_RESPONSE`, `MISSING_THOUGHT_SIGNATURE`, the tool-call reasons) an unusable answer with the reason's name |
+| Anthropic Claude | `POST https://api.anthropic.com/v1/messages`, `x-api-key`, `anthropic-version: 2023-06-01`; `model`, `max_tokens: 4000`, `system`, `messages: [user]`, `output_config: {effort: low}`; for claude-opus-5-5, claude-sonnet-5-5, claude-opus-5 and claude-fable-5-1 also `anthropic-beta: server-side-fallback-2026-07-01` and `fallbacks: "default"` | `claude-opus-5-5`; `claude-sonnet-5-5`, `claude-haiku-5-5` | `stop_reason` first (`refusal` refused, `max_tokens` truncated), then the `text` blocks only |
+
+- LLM providers (OpenAI-compatible, Gemini, Claude) get the local prompt split in two:
+  `prompt::system_text` (the casual system prompt) and `prompt::user_text` (`Glossary:`, then
+  `Message:` and the text), the same tuning (V1+V3+V4: must-use terms expanded into the message).
+- Not sent, on purpose: `temperature`, `top_p`, `top_k` (removed or limited to the default on the
+  current Claude and OpenAI reasoning models; the Gemini 3 guidance keeps the default), a
+  `thinking` parameter for Claude (Opus 5.5 cannot disable thinking; effort `low` keeps it
+  short), an assistant prefill (a 400 on current Claude models). Every LLM provider gets an
+  output limit of 4000 tokens (reasoning included), so a chat line written to make the model
+  ramble cannot run up the player's bill. Claude's `output_config.effort` is
+  sent only to models that take it (the 4.6 generation and later; Haiku 4.5 and older refuse it).
+- Gemini thinking (the thinking guide's table, read again 2026-10-21): `thinkingLevel` only for
+  the models it lists, `minimal` where supported (3.6 Flash, 3.5 Flash-Lite, 3 Flash, 3.1
+  Flash-Lite Image), `low` for the others (4 Argon, 3.8 Flash, 3.1 Pro, 3 Pro, 2.5 Pro, 2.5
+  Flash). Any other model (3.1 Flash-Lite, 2.5 Flash-Lite, a typed name) gets no
+  `thinkingConfig`: its default applies, and an undocumented level cannot turn every request
+  into a 400.
+- DeepL placeholders: the text is XML-escaped and each `{N}` (in the Brackets form each
+  `[...]` segment) is wrapped in an ignored `<x>` tag, which DeepL never translates; in the
+  answer the `<x>` tags are removed first (DeepL may move or duplicate them), then the entities
+  are decoded, so text a player typed as `<x>` survives. `context` is "World of Warcraft chat."
+  plus the glossary pairs the prompt would list (not translated, not billed). Target codes: en
+  `EN-US`, fr `FR`, de `DE`, es `ES`, it `IT`, pt `PT-BR`, ru `RU`, ko `KO`, zh `ZH-HANS`,
+  zh-TW `ZH-HANT` (`EN`, `PT`, `ZH` alone are the unspecified variants; DeepL's language list
+  marks `en` as not usable as a target).
+- OpenAI-compatible servers: works with OpenAI, OpenRouter (`https://openrouter.ai/api/v1`),
+  Mistral (`https://api.mistral.ai/v1`), Groq (`https://api.groq.com/openai/v1`), DeepSeek
+  (`https://api.deepseek.com`), LM Studio (`http://localhost:1234/v1`) and Ollama
+  (`http://localhost:11434/v1`). No key is needed for a loopback host (`localhost` itself,
+  127.0.0.0/8 and `::1` literals) or a private network address literal (10/8, 172.16/12,
+  192.168/16, 169.254/16, fc00::/7, fe80::/10: Ollama on a NAS); plain `http://` with a key is
+  refused for any host but a loopback one (`insecure_url`: the key would travel in clear). Other
+  names, `*.localhost` included, are not loopback: Windows sends them to the DNS server, whose
+  answer may point anywhere. A server other than OpenAI's needs a model name.
+
+### Transport, retry and timeouts
+
+- `Transport` (`http.rs`) is one POST: URL, headers, JSON body; status, `retry-after`, body
+  (1 MiB at most). `WinHttp` (`winhttp.rs`, windows crate feature `Win32_Networking_WinHttp`):
+  TLS by the OS (1.2 and 1.3 only), the system proxy settings
+  (`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY`; a loopback host or a private network address literal
+  goes direct), redirects never followed
+  (they would carry the key to another host), no cookies, no automatic authentication, one
+  session per proxy mode kept for connection reuse.
+- Timeouts: connect 5 s, total 15 s (`remote::Policy`). Fact (2026-10-20, loopback stub that
+  reads the request and never answers): synchronous `WinHttpSendRequest` returned only after
+  about 4 s with every WinHTTP timeout at 600 ms, and only when the server answered with 5 s
+  timeouts. So each WinHTTP request runs on its own short thread and the caller waits at most
+  the time left of the total; a late request ends on its thread and its result is dropped. The
+  worker keeps a backstop deadline 2 s after the total.
+- One quick retry for 408, 429, 500, 502, 503, 504 and 529, after `retry-after` (else 500 ms),
+  only when at least 3 s of the total are left after the wait; not for an OpenAI 429 with code
+  `insufficient_quota` or a DeepL 456 (quota). A timeout is not retried.
+- Error messages come from the JSON error body (`error.message`, `message`, `error` as a string,
+  `detail`); an HTML error page gives an empty message. `sanitize_message` replaces any word that
+  holds a 6-character piece of the key, a masked key (`**`, `...`), a key-like prefix (`sk-`,
+  `AIza`) or a run of 24 or more letters, digits, `-` and `_` by `[redacted]` (except the
+  configured model name, which a 404 names, and an all-caps enum name such as
+  `MISSING_THOUGHT_SIGNATURE`; a word holding a piece of the key is always redacted), collapses
+  whitespace and control characters and cuts at 160 characters with "...".
+
+### Routing in the worker
+
+- The route of a job is chosen when it becomes the job in flight: the remote service when one is
+  set (the echo translator never uses it), else the local model. A job already in flight keeps
+  its route when `set_remote` changes the service.
+- Remote: `pipeline::prepare` (shortcuts `Nothing` and `Same` answered without a request), the
+  daily cap check, the request on a `tp-engine-remote` thread, then `pipeline::finish` and
+  `pipeline::next` as for the local model: a broken placeholder gives one Brackets retry at the
+  same service, a second failure is a `BadAnswer` fallback.
+- What leaves the PC: the system prompt, the glossary pairs and the protected message text, in
+  which item links, URLs, e-mail addresses and IDs are placeholders. Two cases would put a
+  verbatim token in clear, and both stay local with the reason `kept_local` instead: a line with
+  more links and tokens than the 9 placeholders (`Protected::tokens_in_clear` > 0; nothing is
+  sent), and a Brackets retry of a line holding a URL, an e-mail address or an ID (that form
+  writes them inline; the first request was sent with placeholders, the retry is not). A line
+  with item links only still gets its Brackets retry at the service (item names are chat text).
+  Names a player typed inside the message are part of its text and are sent.
+- Fallback: the reason is kept for the job, the local path serves it (server start, `Loading`,
+  `Partial`...), and every later update carries `fallback`; when the local path cannot run, the
+  final status is the existing `LowMemory`, `NotInstalled` or `Failed` with the reason. A local
+  answer to a job that fell back is not cached, so the next request tries the service again.
+- With a remote service set, a missing local model does not answer `NotInstalled` at submit,
+  and a local `LowMemory` does not fail the waiting jobs (they may still go to the service).
+- Daily cap: per local day, the characters of the message text and of the glossary pairs sent
+  (the fixed instructions are not counted) plus the characters of the answer. Checked before each
+  request (the Brackets retry included) with the characters to send; counted when the service
+  answers: a usable answer counts what was sent and received, a refused, truncated or unusable
+  2xx answer what was sent (it was billed), an HTTP error, a network error or a timeout nothing
+  (so an invalid key keeps showing its real error, never the daily limit). Past the cap nothing
+  is sent and the job falls back with `daily_cap`, its message holding the cap in force. Stored
+  in `<data dir>\remote_usage.json` as `{"version":1,"day":"YYYY-MM-DD","chars":N}`.
+
+### Keys and privacy
+
+- `keys.bin` next to settings.json: the 4 bytes `TPK1`, then a DPAPI blob
+  (`CryptProtectData`, current user, `CRYPTPROTECT_UI_FORBIDDEN`, an application entropy) of
+  `{"version":2,"keys":{"<service id>":"<key>"}}` (version 1 was keyed by provider and never
+  shipped; its `openai` entry is dropped at load). DPAPI protects the file against other Windows
+  users, other computers and a copy taken elsewhere; the entropy is a public constant, so it does
+  not keep out programs running as the same user. The clear JSON exists only in memory and its
+  strings are zeroed after use (best effort: serde_json's parsed and built values, and one buffer
+  large enough not to grow); an empty key set deletes the file; a damaged or foreign blob is an error
+  (`KeyStoreError::Corrupt` or `Decrypt`), never a crash. The companion writes it from its own
+  process, so the MSIX redirection of the development shell does not apply at run time; tests
+  use temporary folders only.
+- `Secret` (the key in memory): no Debug (prints `Secret(..)`), no Display, no Serialize, zeroed
+  on drop. `RemoteConfig`, `HttpRequest` and `HttpResponse` have no Debug; `HttpRequest` zeroes
+  its header values (one holds the key) when dropped, and the WinHTTP header buffers are zeroed
+  after sending. This is best effort: a copy left behind while a string grew is not reached.
+- Log events carry the provider id, a model label (a known suggestion, `default` or `custom`;
+  never a typed model name), HTTP status, latency, attempts and character counts only. The tests
+  check, with a sentinel key and a sentinel chat word, that neither reaches a log event or a
+  fallback message.
+
+### Tests (all on the fake transport or a 127.0.0.1 stub)
+
+Request shape per provider (URL, headers, body fields present and absent, free and paid DeepL
+hosts, OpenAI-compatible bases for OpenRouter, Mistral, Groq, DeepSeek and a keyless Ollama,
+Gemini thinking table, Claude effort and fallbacks per model), answers through the shared
+post-processing with a coloured link and an ID restored, the Brackets follow-up, every HTTP error
+class per provider (400, 401, 403, 404, 413, DeepL 456 not retried; 429, 500, 503, 529 retried
+once; an HTML error page), the retry budget and quota errors, timeouts and network errors,
+refusals and truncations per provider, message sanitizing, settings JSON and consent per
+service, `from_settings`, the Test button, the cap count; the DPAPI key store round trip on a
+temp folder (no key in clear on disk in UTF-8 or UTF-16, damaged and foreign blobs refused); the
+usage file; WinHTTP against a loopback stub (headers and body, `retry-after`, a redirect not
+followed, the total timeout with a server that never answers, a refused connection); and the
+worker: a remote job that never starts llama-server and is cached under the remote identity, a
+401 that falls back with the reason on every later update and the key redacted, the daily cap,
+the cache key per provider and model, the remote Brackets retry, a remote timeout, a service
+without a local model (`NotInstalled` and a refusal with the reason), the echo translator
+ignoring the service, and no key or chat word in any log event. Since the review of 2026-10-21
+also: DeepL answers with an entity before CJK, Hangul or Cyrillic text (no panic), a saved key
+never sent to another OpenAI-compatible server or a keyless one, routes behind one host kept
+apart (cache and consent), `*.localhost` not taken for this PC, keyless private network
+servers, the output limit for every OpenAI-compatible base, Gemini thinking levels only for
+the documented models and every `finishReason` class, enum and model names kept by the
+sanitizer, failed requests not counted toward the cap and the cap in force carried by the
+reason, and lines with IDs kept local (no Brackets retry at the service, more tokens than
+placeholders never sent).
+
+### Review fixes (2026-10-21)
+
+Two reviews (security and privacy; correctness and UX) of the first version found 16 issues; all
+are fixed, each with a test:
+
+| Finding | Fix |
+|---|---|
+| A DeepL answer with `&amp;`, `&lt;` or `&gt;` before three CJK or Hangul characters (or four Cyrillic letters) panicked in `deepl::unescape` (a string cut at byte 12); the release build aborts on a panic, so another player's line could close Translate Companion | the `;` is searched byte-wise (ASCII, always a char boundary); a `catch_unwind` guard would not help under `panic = "abort"`, so the cause itself is fixed |
+| The OpenAI-compatible key was stored per provider: a saved OpenAI key went as `Authorization: Bearer` to any base URL typed later, even plain http to this PC | keys are stored per service id (host, port and base path); another server has no saved key until one is typed for it |
+| `*.localhost` names counted as this PC (exempt from the http check, the key and the proxy), but Windows resolves them through DNS | only `localhost` itself and loopback literals count |
+| The Brackets retry at the service, and the 10th span and later, put URLs, e-mail addresses and IDs in clear | such lines stay local with `kept_local` |
+| OpenAI-compatible requests had no output limit and the cap counted the input only | an output limit of 4000 tokens, and the answer counts toward the cap |
+| Header values holding the key and the key store's JSON values were not zeroed | `HttpRequest` zeroes its headers on drop and the key store zeroes its JSON strings (documented as best effort) |
+| The DPAPI entropy comment promised protection from the same user's programs | reworded |
+| Consent and cache covered the host only, so routes of one gateway shared them | the base path is part of the service id and the cache identity |
+| Every Gemini `finishReason` but `STOP` and `MAX_TOKENS` was a refusal, and long enum names were redacted | the content filters only are refusals; enum and model names are kept |
+| `thinkingLevel: minimal` went to `gemini-3.1-flash-lite`, which the thinking table does not list | levels only for the listed models |
+| An OpenAI-compatible server on the home network (http, no key) could not be set up | private network address literals need no key (a key over http stays refused) |
+| Failed requests counted toward the cap, so an invalid key turned into "daily limit"; old badges showed the current cap | counted only when the service answered; the cap in force goes in the reason |
