@@ -58,6 +58,21 @@ pub struct Tray {
     icon: HICON,
     tip: String,
     added: bool,
+    /// NOTIFYICON_VERSION_4 accepted: a right-click arrives as WM_CONTEXTMENU (with the anchor
+    /// point in wParam) and the shell lets the app take the foreground for its menu.
+    v4: bool,
+}
+
+// Declared here (under other names) instead of enabling more windows crate features.
+#[link(name = "user32")]
+extern "system" {
+    #[link_name = "AttachThreadInput"]
+    fn attach_thread_input(attach: u32, attach_to: u32, on: i32) -> i32;
+}
+#[link(name = "kernel32")]
+extern "system" {
+    #[link_name = "GetCurrentThreadId"]
+    fn current_thread_id() -> u32;
 }
 
 fn copy_wide(dst: &mut [u16], s: &str) {
@@ -118,7 +133,7 @@ impl Tray {
     /// Adds the icon for the hidden main window `hwnd`.
     pub fn add(hwnd: isize, tip: &str) -> Option<Tray> {
         let icon = make_icon()?;
-        let mut t = Tray { hwnd: HWND(hwnd as *mut core::ffi::c_void), icon, tip: tip.to_string(), added: false };
+        let mut t = Tray { hwnd: HWND(hwnd as *mut core::ffi::c_void), icon, tip: tip.to_string(), added: false, v4: false };
         t.readd();
         Some(t)
     }
@@ -136,7 +151,21 @@ impl Tray {
         d.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         copy_wide(&mut d.szTip, &self.tip);
         self.added = unsafe { Shell_NotifyIconW(NIM_ADD, &d) }.as_bool();
+        // Version 4: without it a legacy icon gets WM_RBUTTONUP and the shell does not hand the
+        // foreground to the app, so its menu could not be dismissed by clicking elsewhere (seen
+        // in use on 2026-10-20).
+        self.v4 = false;
+        if self.added {
+            let mut v = self.data();
+            v.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+            self.v4 = unsafe { Shell_NotifyIconW(NIM_SETVERSION, &v) }.as_bool();
+        }
         self.added
+    }
+
+    /// True when the icon runs with NOTIFYICON_VERSION_4 (see `v4`).
+    pub fn version4(&self) -> bool {
+        self.v4
     }
 
     pub fn added(&self) -> bool {
@@ -167,8 +196,9 @@ impl Tray {
         }
     }
 
-    /// Shows the menu at the cursor; returns the chosen command.
-    pub fn menu(&self, items: &[MenuItem]) -> Option<MenuCmd> {
+    /// Shows the menu at `anchor` (the shell's point for a version 4 icon) or at the cursor;
+    /// returns the chosen command.
+    pub fn menu(&self, items: &[MenuItem], anchor: Option<(i32, i32)>) -> Option<MenuCmd> {
         unsafe {
             let m = CreatePopupMenu().ok()?;
             for it in items {
@@ -183,8 +213,28 @@ impl Tray {
                 let _ = AppendMenuW(m, flags, it.cmd as usize, PCWSTR(w.as_ptr()));
             }
             let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
+            match anchor {
+                Some((x, y)) => {
+                    pt.x = x;
+                    pt.y = y;
+                }
+                None => {
+                    let _ = GetCursorPos(&mut pt);
+                }
+            }
             let _ = SetForegroundWindow(self.hwnd);
+            // Still not in front (the foreground lock): attach to the foreground thread for the
+            // call, the documented fallback, so the menu closes on a click elsewhere or on Esc.
+            if GetForegroundWindow() != self.hwnd {
+                let fg = GetForegroundWindow();
+                let fg_thread = GetWindowThreadProcessId(fg, None);
+                let me = current_thread_id();
+                if fg_thread != 0 && fg_thread != me && attach_thread_input(me, fg_thread, 1) != 0 {
+                    let _ = BringWindowToTop(self.hwnd);
+                    let _ = SetForegroundWindow(self.hwnd);
+                    attach_thread_input(me, fg_thread, 0);
+                }
+            }
             let r = TrackPopupMenuEx(m, (TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON).0, pt.x, pt.y, self.hwnd, None);
             let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(m);

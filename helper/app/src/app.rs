@@ -1785,14 +1785,22 @@ impl Ui {
         }
     }
 
-    fn on_tray(&mut self, lparam: isize) {
+    fn on_tray(&mut self, wparam: usize, lparam: isize) {
         let m = (lparam & 0xFFFF) as u32;
-        if m != WM_RBUTTONUP && m != WM_CONTEXTMENU {
-            return;
-        }
-        if self.tray.is_none() {
-            return;
-        }
+        let Some(v4) = self.tray.as_ref().map(|t| t.version4()) else { return };
+        // Version 4: the right-click is WM_CONTEXTMENU only (WM_RBUTTONUP comes too and would
+        // open the menu twice), anchored at the point in wParam. Legacy icon: WM_RBUTTONUP.
+        let anchor = if v4 {
+            if m != WM_CONTEXTMENU {
+                return;
+            }
+            Some(((wparam & 0xFFFF) as u16 as i16 as i32, ((wparam >> 16) & 0xFFFF) as u16 as i16 as i32))
+        } else {
+            if m != WM_RBUTTONUP {
+                return;
+            }
+            None
+        };
         // While the menu is open the UI thread sits in its modal loop, which dispatches (and so
         // drops) the scene, result, state and event messages: the cards would freeze over the
         // game. Hide them, and drain the inbox again once the menu is closed.
@@ -1807,7 +1815,7 @@ impl Ui {
             MenuItem { cmd: MenuCmd::Exit, label: i18n::tr(l, "tray.exit"), checked: None, separator_before: true },
         ];
         let chosen = match self.tray.as_ref() {
-            Some(t) => t.menu(&items),
+            Some(t) => t.menu(&items, anchor),
             None => None,
         };
         for m in [WM_APP_SCENE, WM_APP_RESULT, WM_APP_STATE, WM_APP_EVENT] {
@@ -1915,7 +1923,7 @@ impl Ui {
                         continue;
                     }
                     WM_APP_TRAY => {
-                        self.on_tray(msg.lParam.0);
+                        self.on_tray(msg.wParam.0, msg.lParam.0);
                         continue;
                     }
                     WM_APP_TRAY_READD => {
@@ -1954,6 +1962,17 @@ extern "system" {
     fn MessageBeep(kind: u32) -> i32;
 }
 
+#[link(name = "winmm")]
+extern "system" {
+    #[link_name = "PlaySoundW"]
+    fn play_sound(sound: *const u16, module: isize, flags: u32) -> i32;
+}
+const SND_ASYNC: u32 = 0x0001;
+const SND_NODEFAULT: u32 = 0x0002;
+const SND_FILENAME: u32 = 0x0002_0000;
+/// Asterisk: a sound most Windows schemes keep, used when the file below is missing.
+const MB_ICONASTERISK_SOUND: u32 = 0x0000_0040;
+
 type WinEventProc = unsafe extern "system" fn(hook: isize, event: u32, hwnd: isize, id_object: i32, id_child: i32, thread: u32, time: u32);
 
 /// The main window, for the WinEvent callback.
@@ -1961,7 +1980,6 @@ static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 const EVENT_SYSTEM_FOREGROUND_ID: u32 = 0x0003;
 const EVENT_SYSTEM_MINIMIZEEND_ID: u32 = 0x0017;
 const WINEVENT_OUTOFCONTEXT_FLAG: u32 = 0x0000;
-const MB_OK_SOUND: u32 = 0x0000_0000;
 
 /// Out-of-context WinEvent callback (runs on the UI thread, inside its message loop): posts the
 /// change to the main window, which moves the overlay in the z-order (decision D12).
@@ -1996,10 +2014,20 @@ fn unhook(hooks: [isize; 2]) {
     }
 }
 
-/// The optional sound when a reply was copied (tray item, off by default).
+/// The optional sound when a reply was copied (tray item, off by default). MessageBeep(MB_OK)
+/// plays the scheme's "Default Beep", which many schemes leave silent (it was not heard in use on
+/// 2026-10-20), so a stock Windows notification file is played first.
 fn message_beep_ok() {
-    unsafe {
-        MessageBeep(MB_OK_SOUND);
+    let windir = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    let path = std::path::Path::new(&windir).join("Media").join("Windows Notify Messaging.wav");
+    let played = path.is_file() && {
+        let w: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe { play_sound(w.as_ptr(), 0, SND_FILENAME | SND_ASYNC | SND_NODEFAULT) != 0 }
+    };
+    if !played {
+        unsafe {
+            MessageBeep(MB_ICONASTERISK_SOUND);
+        }
     }
 }
 
